@@ -27,22 +27,26 @@ import numpy as np
 CollapseCache = List[Tuple[np.ndarray, np.ndarray, np.ndarray]]
 
 
-def alloc_rk4_buffers(DIM: int):
+def alloc_rk4_buffers(DIM: int, xp=None):
     """预分配 RK4 求解所需的 8 个工作缓冲区。
 
     Parameters
     ----------
     DIM : int
         希尔伯特空间维度
+    xp : module, optional
+        numpy 或 cupy；默认 numpy。
 
     Returns
     -------
     tuple of 8 ndarray
         (tmp1, tmp2, k1, k2, k3, k4, work, out)
     """
+    if xp is None:
+        xp = np
     shape = (DIM, DIM)
     dtype = np.complex128
-    return tuple(np.zeros(shape, dtype=dtype) for _ in range(8))
+    return tuple(xp.zeros(shape, dtype=dtype) for _ in range(8))
 
 
 def lindblad_rhs(
@@ -75,21 +79,27 @@ def lindblad_rhs(
     out : ndarray
         dρ/dt
     """
+    try:
+        import cupy
+        xp = cupy.get_array_module(rho)
+    except ImportError:
+        xp = np
+
     # 相干项：−i[H, ρ]
-    np.matmul(H, rho, out=tmp1)
-    np.matmul(rho, H, out=tmp2)
+    xp.matmul(H, rho, out=tmp1)
+    xp.matmul(rho, H, out=tmp2)
     out[:] = -1j * (tmp1 - tmp2)
 
     # 耗散项：Σ_k (c ρ c† − ½ c†c ρ − ½ ρ c†c)
     for c, cd, cd_c in c_cache:
-        np.matmul(c, rho, out=tmp1)
-        np.matmul(tmp1, cd, out=tmp2)
+        xp.matmul(c, rho, out=tmp1)
+        xp.matmul(tmp1, cd, out=tmp2)
         out[:] += tmp2
 
-        np.matmul(cd_c, rho, out=tmp1)
+        xp.matmul(cd_c, rho, out=tmp1)
         out[:] -= 0.5 * tmp1
 
-        np.matmul(rho, cd_c, out=tmp1)
+        xp.matmul(rho, cd_c, out=tmp1)
         out[:] -= 0.5 * tmp1
 
     return out

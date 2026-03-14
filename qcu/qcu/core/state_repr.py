@@ -18,6 +18,20 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 
+def get_xp(device: str):
+    """返回 numpy 或 cupy 模块（按 device 字符串）。
+
+    Parameters
+    ----------
+    device : str
+        "cpu" 返回 numpy；"cuda" 返回 cupy。
+    """
+    if device == "cuda":
+        import cupy as cp
+        return cp
+    return np
+
+
 # ──────────────────────────────────────────────
 # 基础线代工具
 # ──────────────────────────────────────────────
@@ -140,6 +154,7 @@ class IQPUConfig:
     alpha0: Optional[List[complex]] = None
 
     track_entanglement: bool = True
+    device: str = "cpu"
 
     def finalize(self) -> "IQPUConfig":
         """填充所有 None 字段为合理默认值并转换为 ndarray。"""

@@ -16,7 +16,7 @@ from typing import Optional
 
 import numpy as np
 
-from .state_repr import IQPUConfig, IQPURunResult, build_initial_state
+from .state_repr import IQPUConfig, IQPURunResult, build_initial_state, get_xp
 from .phase_modulation import OperatorBank, build_operator_bank, build_H_base, build_H_boost_trim
 from .collapse_operator import build_collapse_cache, CollapseCache
 from .lindblad_solver import alloc_rk4_buffers, rk4_step
@@ -68,14 +68,19 @@ class IQPU:
         self.dimM: int = self.d ** self.Nm
         self.DIM: int = self.dimQ * self.dimM
 
-        # 算符库
-        self.ops: OperatorBank = build_operator_bank(self.cfg)
+        # 计算后端（numpy / cupy）
+        self.xp = get_xp(self.cfg.device)
 
-        # 基础 Hamiltonian
-        self.H_base: np.ndarray = build_H_base(self.cfg, self.ops)
+        # 算符库（先用 numpy 构建，再移到目标设备）
+        ops_cpu: OperatorBank = build_operator_bank(self.cfg)
+        self.ops: OperatorBank = self._move_ops(ops_cpu)
 
-        # RK4 缓冲区（预分配，避免运行时 GC 压力）
-        self.buffers = alloc_rk4_buffers(self.DIM)
+        # 基础 Hamiltonian（numpy 构建后移到目标设备）
+        H_base_cpu = build_H_base(self.cfg, ops_cpu)
+        self.H_base = self.xp.asarray(H_base_cpu)
+
+        # RK4 缓冲区（在目标设备上预分配）
+        self.buffers = alloc_rk4_buffers(self.DIM, self.xp)
 
     # ──────────────────────────────────────────────
     # 公开运行接口
@@ -139,8 +144,8 @@ class IQPU:
         cfg = self.cfg
         ops = self.ops
 
-        # ── 初始化密度矩阵 ──
-        rho = build_initial_state(cfg, self.dimQ, self.dimM)
+        # ── 初始化密度矩阵（numpy 构建后移到目标设备）──
+        rho = self.xp.asarray(build_initial_state(cfg, self.dimQ, self.dimM))
 
         # ── 构建各阶段 Hamiltonian ──
         H_pulse = 0.5 * float(omega_x) * ops.sxJ[0]
@@ -212,6 +217,19 @@ class IQPU:
     # ──────────────────────────────────────────────
     # 内部辅助
     # ──────────────────────────────────────────────
+
+    def _move_ops(self, ops_cpu: OperatorBank) -> OperatorBank:
+        """将 numpy 算符库移到目标设备。"""
+        xp = self.xp
+        return OperatorBank(
+            DIM=ops_cpu.DIM,
+            szJ=[xp.asarray(o) for o in ops_cpu.szJ],
+            sxJ=[xp.asarray(o) for o in ops_cpu.sxJ],
+            smJ=[xp.asarray(o) for o in ops_cpu.smJ],
+            aJ= [xp.asarray(o) for o in ops_cpu.aJ],
+            adJ=[xp.asarray(o) for o in ops_cpu.adJ],
+            nJ= [xp.asarray(o) for o in ops_cpu.nJ],
+        )
 
     def _make_cache(
         self,
