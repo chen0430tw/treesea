@@ -34,6 +34,13 @@ class EvaluationResult:
 # Family-specific parameter space
 # ---------------------------------------------------------------------------
 
+# City-scale anchor points for large-n batch family.
+# These represent realistic population/iteration scales for Academy City
+# (2.3M esper network; experiments in the thousands to hundreds of thousands).
+_BATCH_LARGE_N_ANCHORS: list = [
+    500, 1000, 2000, 5000, 10000, 15000, 20000, 30000, 50000, 100000
+]
+
 _FAMILY_PARAMS: Dict[str, Dict[str, list]] = {
     "batch": {
         "n":    [3, 5, 7],
@@ -80,13 +87,66 @@ _FAMILY_PARAMS: Dict[str, Dict[str, list]] = {
 }
 
 
+def _batch_n_opt(seed: ProblemSeed) -> float:
+    """Optimal iteration count for large-n batch family via resonance locking.
+
+    Physical model: to lock a population-coupled resonance across a low-noise
+    city field, the minimum viable iteration count satisfies
+
+        n_opt = (C × ρ_net × α_aim) / (δ² × (1 − ρ_pop) × η_noise)
+
+    where:
+        C        = data_coverage  — required pattern-space completeness
+        ρ_net    = network_density — ambient network connectivity
+        α_aim    = aim_coupling   — precision of per-iteration targeting
+        δ        = marginal_decay — per-iteration marginal gain rate
+        ρ_pop    = population_coupling — group field coherence (→1 ⇒ more iters)
+        η_noise  = field_noise    — environment precision (low noise ⇒ fine-grained
+                                    patterns ⇒ more samples needed for full coverage)
+    """
+    dc = seed.resources.get("data_coverage", 0.5)
+    pc = seed.resources.get("population_coupling", 0.5)
+    nd = seed.environment.get("network_density", 0.5)
+    md = seed.subject.get("marginal_decay", 0.1)
+    fn = seed.environment.get("field_noise", 0.3)
+    ac = seed.subject.get("aim_coupling", 0.9)
+    denom = (md ** 2) * max(1.0 - pc, 1e-3) * max(fn, 1e-3)
+    return (dc * nd * ac) / max(denom, 1e-9)
+
+
+def _batch_large_n_fp(seed: ProblemSeed) -> Dict[str, list]:
+    """Parameter grid for batch family in the large-n (high-coupling) regime.
+
+    Entered when population_coupling >= 0.90 and data_coverage >= 0.85.
+    Candidate n values are drawn from city-scale anchors within
+    [n_opt × 0.25, n_opt × 4].  At this scale the batch route can sustain
+    high rho, high A, and low sigma (industrialised clone production).
+    """
+    n_opt = _batch_n_opt(seed)
+    lo, hi = n_opt * 0.25, n_opt * 4.0
+    candidates = sorted(n for n in _BATCH_LARGE_N_ANCHORS if lo <= n <= hi)
+    if not candidates:
+        candidates = [max(1, int(round(n_opt)))]
+    return {
+        "n":     candidates,
+        "rho":   [0.8, 0.9, 1.0],
+        "A":     [0.7, 0.8, 0.9],
+        "sigma": [0.1, 0.15],
+    }
+
+
 def generate_worldlines(
     seed: ProblemSeed,
     bg: ProblemBackground,
 ) -> List[CandidateWorldline]:
     worldlines: List[CandidateWorldline] = []
+    pc = seed.resources.get("population_coupling", 0.5)
+    dc = seed.resources.get("data_coverage", 0.5)
     for family in bg.candidate_families:
-        fp = _FAMILY_PARAMS.get(family, _FAMILY_PARAMS["batch"])
+        if family == "batch" and pc >= 0.90 and dc >= 0.85:
+            fp = _batch_large_n_fp(seed)
+        else:
+            fp = _FAMILY_PARAMS.get(family, _FAMILY_PARAMS["batch"])
         keys = list(fp.keys())
         values = [fp[k] for k in keys]
         for combo in itertools.product(*values):
@@ -187,6 +247,18 @@ def evaluate_worldline(
         + 0.20 * re * lock
     )
     field_fit = max(0.0, min(1.0, field_fit))
+
+    # Coverage depth bonus: resonance alignment for large-n batch family.
+    # Rewards n values near the seed-derived optimal iteration count n_opt.
+    # Gaussian in log-n space (log_sigma=0.8 ≈ ±2× factor tolerance).
+    pc_val = seed.resources.get("population_coupling", 0.0)
+    dc_val = seed.resources.get("data_coverage", 0.0)
+    if w.family == "batch" and pc_val >= 0.90 and dc_val >= 0.85:
+        n_opt_v = _batch_n_opt(seed)
+        if n_opt_v > 50:
+            log_ratio = math.log(max(n, 1.0) / n_opt_v)
+            coverage_depth = math.exp(-0.5 * (log_ratio / 0.8) ** 2)
+            field_fit = min(1.0, field_fit + 0.10 * coverage_depth)
 
     # Risk: high turbulence, low stability, high sigma, low resources
     risk = (
