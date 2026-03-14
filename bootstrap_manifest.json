@@ -1,0 +1,11 @@
+{
+  "generated_at": "2026-03-13T06:24:45.703071Z",
+  "root": "/mnt/data/HCE_ROOT",
+  "systems": [
+    "tree_diagram",
+    "qcu",
+    "honkai_core",
+    "hce"
+  ],
+  "notes": "Initial monorepo skeleton with placeholders, copied guides/readmes, and legacy prototypes."
+}

@@ -1,0 +1,9 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hce-root"
+version = "0.1.0"
+description = "HCE_ROOT monorepo for Tree Diagram / QCU / Honkai Core / HCE"
+requires-python = ">=3.10"

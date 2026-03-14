@@ -1,0 +1,68 @@
+# treesea .gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.installed.cfg
+lib/
+lib64/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Runtime outputs (do not commit)
+runs/
+checkpoints/
+logs/
+results/
+
+# Experiment trackers
+experiments/trackers/experiment_index.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Slurm job outputs
+*.out
+*.err
+slurm-*.out
+
+# Large data files
+*.npy
+*.npz
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+
+# Secrets
+.env
+*.key
+*.pem
+
+# Temp
+_tmp_extract/
+*.tmp
+*.bak

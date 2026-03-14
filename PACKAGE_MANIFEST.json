@@ -1,0 +1,8 @@
+{
+  "authoritative": true,
+  "kept_core_docs": [
+    "HCE_整合版总规范.md",
+    "HCE_技术栈选型文档.md",
+    "Claude_执行规范.md"
+  ]
+}

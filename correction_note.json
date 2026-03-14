@@ -1,0 +1,7 @@
+{
+  "generated_at": "2026-03-13T06:38:02.240795+00:00",
+  "correction": "Tree Diagram corrected to a single system built from two prototype files as one source basis.",
+  "removed_wrong_semantics": [
+    "shells/weather_oracle as external shell/submodule semantics"
+  ]
+}

@@ -1,0 +1,4 @@
+#!/bin/bash
+#SBATCH --job-name=honkai_core
+# Placeholder Slurm template: hc_single.sbatch
+echo "Honkai Core Slurm template placeholder"
