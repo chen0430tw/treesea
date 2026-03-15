@@ -8,7 +8,19 @@ def compress_to_main_branches(
     results: List[EvaluationResult],
     top_k: int = 12,
 ) -> List[EvaluationResult]:
-    return sorted(results, key=lambda x: x.balanced_score, reverse=True)[:top_k]
+    """Return top-k worldlines, keeping at most one entry per (family, n) pair.
+
+    Within each (family, n) group only the best-scoring representative survives.
+    This prevents parameter sweeps over rho/A/sigma from flooding the ranking
+    with variations of the same plan.
+    """
+    # Best representative per (family, n)
+    best: Dict[tuple, EvaluationResult] = {}
+    for r in results:
+        key = (r.family, r.params.get("n"))
+        if key not in best or r.balanced_score > best[key].balanced_score:
+            best[key] = r
+    return sorted(best.values(), key=lambda x: x.balanced_score, reverse=True)[:top_k]
 
 
 def branch_status_histogram(results: List[EvaluationResult]) -> Dict[str, int]:
