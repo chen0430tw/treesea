@@ -114,37 +114,63 @@ def _batch_n_opt(seed: ProblemSeed) -> float:
     return (dc * nd * ac) / max(denom, 1e-9)
 
 
-def _batch_large_n_fp(seed: ProblemSeed) -> Dict[str, list]:
-    """Parameter grid for batch family in the large-n (high-coupling) regime.
+# Per-family rho/A/sigma ranges in the large-n (city-scale) regime.
+# Each family retains its characteristic operating envelope at city scale.
+# Per-family rho/A/sigma ranges in the large-n (city-scale) regime.
+# rho is capped at 1.0 (normalized field; rho > 1 is unphysical in this framework).
+_FAMILY_LARGE_N_RA: Dict[str, Dict[str, list]] = {
+    "batch":      {"rho": [0.8, 0.9, 1.0], "A": [0.7, 0.8, 0.9], "sigma": [0.10, 0.15]},
+    "network":    {"rho": [0.7, 0.9, 1.0], "A": [0.6, 0.8],      "sigma": [0.02, 0.05]},
+    "phase":      {"rho": [0.5, 0.8, 1.0], "A": [0.6, 0.75],     "sigma": [0.04, 0.06]},
+    "electrical": {"rho": [0.6, 0.8, 1.0], "A": [0.7, 0.9],      "sigma": [0.05, 0.08]},
+    "ascetic":    {"rho": [0.2, 0.4],       "A": [0.4, 0.55],     "sigma": [0.03, 0.05]},
+    "hybrid":     {"rho": [0.7, 0.9, 1.0], "A": [0.75, 0.85],    "sigma": [0.06, 0.08]},
+    "composite":  {"rho": [0.8, 1.0],       "A": [0.8, 0.9],      "sigma": [0.04, 0.06]},
+}
 
-    Entered when population_coupling >= 0.90 and data_coverage >= 0.85.
-    Candidate n values are drawn from city-scale anchors within
-    [n_opt × 0.25, n_opt × 4].  At this scale the batch route can sustain
-    high rho, high A, and low sigma (industrialised clone production).
+# Coverage depth weight per family: how directly n_opt maps to this family's physics.
+# batch (iterative accumulation) gets the highest weight; ascetic/electrical the lowest.
+_FAMILY_COVERAGE_WEIGHT: Dict[str, float] = {
+    "batch":      0.08,
+    "composite":  0.06,
+    "hybrid":     0.05,
+    "network":    0.04,
+    "phase":      0.03,
+    "electrical": 0.03,
+    "ascetic":    0.02,
+}
+
+
+def _large_n_candidates(seed: ProblemSeed) -> list:
+    """City-scale n candidates for all families in the large-n regime.
+
+    Anchors filtered to [n_opt × 0.25, n_opt × 4].
     """
     n_opt = _batch_n_opt(seed)
     lo, hi = n_opt * 0.25, n_opt * 4.0
     candidates = sorted(n for n in _BATCH_LARGE_N_ANCHORS if lo <= n <= hi)
-    if not candidates:
-        candidates = [max(1, int(round(n_opt)))]
-    return {
-        "n":     candidates,
-        "rho":   [0.8, 0.9, 1.0],
-        "A":     [0.7, 0.8, 0.9],
-        "sigma": [0.1, 0.15],
-    }
+    return candidates if candidates else [max(1, int(round(n_opt)))]
 
 
 def generate_worldlines(
     seed: ProblemSeed,
     bg: ProblemBackground,
 ) -> List[CandidateWorldline]:
+    """Generate candidate worldlines across all families.
+
+    In the large-n regime (population_coupling >= 0.90, data_coverage >= 0.85)
+    every family is evaluated at city-scale n so all plans compete on equal footing.
+    """
     worldlines: List[CandidateWorldline] = []
     pc = seed.resources.get("population_coupling", 0.5)
     dc = seed.resources.get("data_coverage", 0.5)
+    large_n_mode = pc >= 0.90 and dc >= 0.85
+    n_candidates = _large_n_candidates(seed) if large_n_mode else None
+
     for family in bg.candidate_families:
-        if family == "batch" and pc >= 0.90 and dc >= 0.85:
-            fp = _batch_large_n_fp(seed)
+        if large_n_mode:
+            ra = _FAMILY_LARGE_N_RA.get(family, _FAMILY_LARGE_N_RA["batch"])
+            fp = {"n": n_candidates, **ra}
         else:
             fp = _FAMILY_PARAMS.get(family, _FAMILY_PARAMS["batch"])
         keys = list(fp.keys())
@@ -248,18 +274,6 @@ def evaluate_worldline(
     )
     field_fit = max(0.0, min(1.0, field_fit))
 
-    # Coverage depth bonus: resonance alignment for large-n batch family.
-    # Rewards n values near the seed-derived optimal iteration count n_opt.
-    # Gaussian in log-n space (log_sigma=0.8 ≈ ±2× factor tolerance).
-    pc_val = seed.resources.get("population_coupling", 0.0)
-    dc_val = seed.resources.get("data_coverage", 0.0)
-    if w.family == "batch" and pc_val >= 0.90 and dc_val >= 0.85:
-        n_opt_v = _batch_n_opt(seed)
-        if n_opt_v > 50:
-            log_ratio = math.log(max(n, 1.0) / n_opt_v)
-            coverage_depth = math.exp(-0.5 * (log_ratio / 0.8) ** 2)
-            field_fit = min(1.0, field_fit + 0.10 * coverage_depth)
-
     # Risk: high turbulence, low stability, high sigma, low resources
     risk = (
         0.30 * pt
@@ -269,8 +283,43 @@ def evaluate_worldline(
     )
     risk = max(0.0, min(1.0, risk))
 
+    # Coverage depth bonus (large-n regime only): all families compete at city scale,
+    # but the bonus weight reflects how directly n_opt maps to each family's physics.
+    # Applied to raw score directly to avoid distorting the pstdev balance penalty.
+    coverage_raw_bonus = 0.0
+    pc_val = seed.resources.get("population_coupling", 0.0)
+    dc_val = seed.resources.get("data_coverage", 0.0)
+    if pc_val >= 0.90 and dc_val >= 0.85:
+        n_opt_v = _batch_n_opt(seed)
+        if n_opt_v > 50:
+            log_ratio = math.log(max(n, 1.0) / n_opt_v)
+            coverage_depth = math.exp(-0.5 * (log_ratio / 0.8) ** 2)
+            weight = _FAMILY_COVERAGE_WEIGHT.get(w.family, 0.02)
+            coverage_raw_bonus = weight * coverage_depth
+
+    # Family theory alignment bonus: each family has a natural advantage in certain
+    # field conditions.  Small bonus derived from field variables, not from n.
+    # network:    excels when network_amplification is high
+    # electrical: excels when field_coherence is high (precision regime)
+    # hybrid:     benefits from combined amplification + resource slack
+    # phase:      benefits when phase_proximity is high and turbulence is low
+    # composite:  benefits when both coherence and amplification are strong
+    # batch/ascetic: no extra theory bonus (coverage_depth serves batch already)
+    theory_bonus = 0.0
+    if w.family == "network":
+        theory_bonus = 0.035 * na
+    elif w.family == "electrical":
+        theory_bonus = 0.030 * fc
+    elif w.family == "hybrid":
+        theory_bonus = 0.028 * (na + re) * 0.5
+    elif w.family == "phase":
+        theory_bonus = 0.025 * seed.subject.get("phase_proximity", 0.0) * (1.0 - pt)
+    elif w.family == "composite":
+        theory_bonus = 0.012 * math.sqrt(fc * na)
+
     # Raw score
-    raw = 0.30 * feasibility + 0.30 * stability + 0.25 * field_fit - 0.15 * risk
+    raw = 0.30 * feasibility + 0.30 * stability + 0.25 * field_fit - 0.15 * risk \
+          + coverage_raw_bonus + theory_bonus
 
     # Penalize by spread (using population standard deviation of the three positive metrics)
     vals = [feasibility, stability, field_fit]
