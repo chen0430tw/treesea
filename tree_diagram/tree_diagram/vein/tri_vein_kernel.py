@@ -75,14 +75,21 @@ def compute_tri_vein(
 ) -> TriVeinScore:
     """Compute a TriVeinScore from an EvaluationResult.
 
-    yield     = 0.5 * feasibility + 0.3 * nutrient_gain + 0.2 * field_fit
+    yield     = 0.35 * feasibility + 0.25 * nutrient_gain + 0.15 * field_fit
+              + 0.25 * balanced_score
     stability = 0.6 * stability   + 0.4 * (1 - risk)
     risk      = result.risk (direct; note: lower is better)
     composite = yield_w * yield - risk_w * risk + stability_w * stability
+
+    balanced_score carries the n_penalty signal from worldline_kernel,
+    ensuring the V-shaped penalty (|n - 20000| / 10000) propagates through
+    the Vein layer and preserves the n=20000 alignment fixed point.
     """
-    yield_score    = (0.50 * result.feasibility
-                      + 0.30 * result.nutrient_gain
-                      + 0.20 * result.field_fit)
+    balanced = max(0.0, min(1.0, result.balanced_score))
+    yield_score    = (0.35 * result.feasibility
+                      + 0.25 * result.nutrient_gain
+                      + 0.15 * result.field_fit
+                      + 0.25 * balanced)
     stability_score = (0.60 * result.stability
                        + 0.40 * max(0.0, 1.0 - result.risk))
     risk_score      = result.risk

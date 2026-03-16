@@ -891,7 +891,7 @@ def score_candidates(
               - 1.8)
     p_blow = 1.0 / (1.0 + np.exp(-np.clip(raw, -20.0, 20.0)))
 
-    n_penalty = np.minimum(1.0, carr["n"] / 30000.0)
+    n_penalty = np.minimum(1.0, np.abs(carr["n"] - 20000.0) / 10000.0)
 
     U = variance_proxy + disagree_proxy + ood_proxy
     score = (1.80 * phase_max
