@@ -1,4 +1,5 @@
 from __future__ import annotations
+from dataclasses import asdict
 from typing import List, Optional, Tuple
 
 from ..core.problem_seed import ProblemSeed, default_seed
@@ -6,12 +7,18 @@ from ..core.background_inference import ProblemBackground, infer_problem_backgro
 from ..core.group_field import encode_group_field
 from ..core.worldline_kernel import EvaluationResult, run_tree_diagram
 from ..core.oracle_output import oracle_summary_abstract
-from ..core.umdst_kernel import Metrics
+from ..core.umdst_kernel import Metrics, TDOutputs
 from ..core.cbf_balancer import aggregate_cbf
+from ..core.ipl_phase_indexer import (
+    IPLPhaseIndexer, build_ipl_index,
+    zone_summary, smoothed_gain_centroid, phase_spread,
+)
 from ..vein.tri_vein_kernel import compute_tri_vein_batch, pareto_front, tri_vein_stats
 from ..vein.veinlet_experts import VeinletEnsemble
 from ..vein.vein_backbone import VeinBackbone
 from ..control.utm_hydrology_controller import UTMHydrologyController
+from ..oracle.report_builder import ReportBuilder
+from ..llm_bridge.explanation_layer import ExplanationLayer
 
 
 class CandidatePipeline:
@@ -43,12 +50,41 @@ class CandidatePipeline:
         bg    = infer_problem_background(seed)
         field = encode_group_field(seed)
 
+        # ── IPL Layer (Layer 2): seed-level phase zone routing (pre-eval) ────
+        ipl_seed = IPLPhaseIndexer(seed, bg).build_index()
+        # ────────────────────────────────────────────────────────────────────
+
         top_results, hydro = run_tree_diagram(
             seed, bg,
             NX=self.NX, NY=self.NY,
             steps=self.steps, top_k=self.top_k, dt=self.dt,
             device=self.device,
         )
+
+        # Add seed IPL to hydro (routing context for oracle/report consumers)
+        hydro["ipl_seed"] = ipl_seed
+
+        # ── IPL Layer (Layer 2): post-eval index over evaluated candidates ───
+        td_list = [
+            TDOutputs(
+                riskfield=[r.risk],
+                curve=[r.field_fit, r.feasibility],
+                graph=[],
+                samples={},
+                meta={"phase_final": r.balanced_score, "phase_max": r.field_fit},
+            )
+            for r in top_results
+        ]
+        path_ids  = [f"{r.family}/{r.template}" for r in top_results]
+        ipl_index = build_ipl_index(path_ids, td_list)
+        zs        = zone_summary(ipl_index)
+        hydro["ipl_index"] = {
+            "zone_summary":            zs,
+            "smoothed_gain_centroid":  smoothed_gain_centroid(ipl_index),
+            "phase_spread":            phase_spread(ipl_index),
+            "top_zone":                max(zs, key=zs.get) if zs else "stable",
+        }
+        # ────────────────────────────────────────────────────────────────────
 
         # ── CBF Balance Layer (Layer 5): zero-net-drive balance ──────────────
         cbf_metrics = [
@@ -102,4 +138,11 @@ class CandidatePipeline:
         # ────────────────────────────────────────────────────────────────────
 
         abstract_oracle = oracle_summary_abstract(seed, bg, field, top_results, hydro)
+
+        # ── LLM Bridge (Layer 10): explanation layer for outer loop ──────────
+        report = ReportBuilder().build_from_dict(abstract_oracle)
+        exp    = ExplanationLayer().explain(report)
+        abstract_oracle["llm_explanation"] = asdict(exp)
+        # ────────────────────────────────────────────────────────────────────
+
         return top_results, hydro, abstract_oracle
