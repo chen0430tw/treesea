@@ -22,8 +22,14 @@ G      = 9.81
 F0     = 8.0e-5
 CP     = 1004.0
 LV     = 2.5e6
-DX     = 12000.0
-DY     = 12000.0
+# Physical domain (fixed geographic extent — resolution set by NX/NY)
+_DOMAIN_X  = 1_500_000.0   # 1 500 km east-west  (metres)
+_DOMAIN_Y  = 1_100_000.0   #  1 100 km north-south (metres)
+_DX_REF    = _DOMAIN_X / 127.0   # reference grid spacing at NX=128 (~11 811 m)
+
+# Legacy scalar kept for backward-compat; overridden inside run_tree_diagram.
+DX     = _DOMAIN_X / 27.0    # ~55 556 m at NX=28 (original scale)
+DY     = _DOMAIN_Y / 20.0    # ~55 000 m at NY=21
 
 # ---------------------------------------------------------------------------
 # Per-family UMDST coefficients  (gain, precision, coupling, stress, decay)
@@ -185,8 +191,15 @@ def _umdst_batched_step(
     g_stress,       # (B,) per-family stress coefficient
     progress: float,  # scalar 0.0–1.0
     mod_group,        # (B,) int tensor, 0–5
+    spatial_het=None, # (B,) combined spatial heterogeneity signal [0,1]
+    wind_rms=None,    # (B,) normalised RMS wind speed [0,2]
 ):
-    """Vectorised UMDST 1-step. Returns (new_phase, new_stress, new_instab)."""
+    """Vectorised UMDST 1-step. Returns (new_phase, new_stress, new_instab).
+
+    spatial_het: combined spatial heterogeneity (h_std, T_std, q_std weighted).
+                 Boosts phase gain and drives instability when fields are diverse.
+    wind_rms:    normalised RMS wind speed.  Drives stress accumulation.
+    """
     std    = torch.exp(-4.0 * sigma)
     n_steps = (24.0 + torch.sqrt(n.float()) * 1.2 + 18.0 * rho).clamp(min=24.0)
     n_scale = (n_steps / _UMDST_N_BASELINE).clamp(0.5, 2.0)
@@ -217,10 +230,20 @@ def _umdst_batched_step(
               + (mg == 5).float() * m5)
     gain = gain * modifier
 
+    # Spatial heterogeneity feedback: diverse fields boost gain and instability
+    if spatial_het is not None:
+        gain = gain * (1.0 + 0.10 * spatial_het.clamp(0.0, 1.0))
+
     stress_up        = g_stress * A * (0.8 + 0.4 * rho) * (0.55 + 0.45 * sigma)
     stress_down      = 0.010 + 0.014 * load_tol
     instability_up   = 0.012 * A + 0.010 * sigma + 0.014 * stress
     instability_down = 0.008 * load_tol
+
+    # Wind and spatial heterogeneity add to stress/instability
+    if wind_rms is not None:
+        stress_up = stress_up + 0.004 * wind_rms.clamp(0.0, 2.0)
+    if spatial_het is not None:
+        instability_up = instability_up + 0.005 * spatial_het.clamp(0.0, 1.0)
 
     new_phase  = (phase  + gain
                   + 0.20 * precision_gain + 0.16 * coupling_gain
@@ -274,67 +297,67 @@ class EvaluationResult:
 # ---------------------------------------------------------------------------
 _CANDIDATE_SPECS: Dict = {
     "batch":      {
-        "n":[12000,18000,20000,24000], "rho":[0.5,1.0], "A":[0.7,0.9], "sigma":[0.01,0.03],
+        "n":[12000,16000,18000,20000,22000,24000,28000], "rho":[0.5,0.8,1.0], "A":[0.7,0.9], "sigma":[0.01,0.03],
         "Kh":360.0, "Kt":180.0, "Kq":130.0, "drag":1.5e-5,
         "humid_couple":1.00, "nudging":1.6e-4, "pg_scale":1.00,
     },
     "network":    {
-        "n":[10000,16000,20000], "rho":[0.8,1.0], "A":[0.6,0.8], "sigma":[0.02],
+        "n":[10000,14000,16000,20000,24000], "rho":[0.8,1.0], "A":[0.6,0.8], "sigma":[0.02],
         "Kh":300.0, "Kt":150.0, "Kq":125.0, "drag":1.2e-5,
         "humid_couple":0.95, "nudging":1.5e-4, "pg_scale":1.00,
     },
     "phase":      {
-        "n":[10000,18000], "rho":[0.5,1.0], "A":[0.6,0.75], "sigma":[0.04],
+        "n":[10000,14000,18000,22000], "rho":[0.5,1.0], "A":[0.6,0.75], "sigma":[0.04],
         "Kh":330.0, "Kt":170.0, "Kq":135.0, "drag":1.6e-5,
         "humid_couple":1.02, "nudging":1.5e-4, "pg_scale":1.04,
     },
     "electrical": {
-        "n":[10000,16000,20000], "rho":[0.6,1.0], "A":[0.7], "sigma":[0.05],
+        "n":[10000,14000,18000,20000,24000], "rho":[0.6,1.0], "A":[0.7], "sigma":[0.05],
         "Kh":240.0, "Kt":120.0, "Kq":95.0, "drag":1.2e-5,
         "humid_couple":0.80, "nudging":1.4e-4, "pg_scale":1.00,
     },
     "ascetic":    {
-        "n":[10000,20000], "rho":[0.2,0.4], "A":[0.4,0.55], "sigma":[0.03],
+        "n":[10000,14000,18000,22000], "rho":[0.2,0.4], "A":[0.4,0.55], "sigma":[0.03],
         "Kh":240.0, "Kt":120.0, "Kq":95.0, "drag":1.2e-5,
         "humid_couple":0.80, "nudging":1.4e-4, "pg_scale":1.00,
     },
     "hybrid":     {
-        "n":[14000,18000,22000], "rho":[0.7,1.0], "A":[0.75], "sigma":[0.08],
+        "n":[12000,14000,18000,22000,26000], "rho":[0.7,1.0], "A":[0.75], "sigma":[0.08],
         "Kh":520.0, "Kt":260.0, "Kq":180.0, "drag":1.8e-5,
         "humid_couple":1.05, "nudging":1.7e-4, "pg_scale":1.00,
     },
     "composite":  {
-        "n":[18000,22000], "rho":[0.8,1.0], "A":[0.8], "sigma":[0.04],
+        "n":[16000,18000,20000,22000,26000], "rho":[0.8,1.0], "A":[0.8], "sigma":[0.04],
         "Kh":340.0, "Kt":175.0, "Kq":220.0, "drag":1.5e-5,
         "humid_couple":1.24, "nudging":1.6e-4, "pg_scale":1.00,
     },
     "weak_mix":    {
-        "n":[12000,16000], "rho":[0.5,0.7], "A":[0.6,0.7], "sigma":[0.03,0.05],
+        "n":[10000,12000,16000,20000], "rho":[0.5,0.7], "A":[0.6,0.7], "sigma":[0.03,0.05],
         "Kh":240.0, "Kt":120.0, "Kq":95.0, "drag":1.2e-5,
         "humid_couple":0.80, "nudging":1.4e-4, "pg_scale":1.00,
     },
     "balanced":    {
-        "n":[14000,18000], "rho":[0.6,0.8], "A":[0.65,0.75], "sigma":[0.03,0.05],
+        "n":[12000,14000,18000,22000], "rho":[0.6,0.8], "A":[0.65,0.75], "sigma":[0.03,0.05],
         "Kh":360.0, "Kt":180.0, "Kq":130.0, "drag":1.5e-5,
         "humid_couple":1.00, "nudging":1.6e-4, "pg_scale":1.00,
     },
     "high_mix":    {
-        "n":[16000,20000], "rho":[0.7,1.0], "A":[0.7,0.85], "sigma":[0.02,0.04],
+        "n":[14000,16000,20000,24000], "rho":[0.7,1.0], "A":[0.7,0.85], "sigma":[0.02,0.04],
         "Kh":520.0, "Kt":260.0, "Kq":180.0, "drag":1.8e-5,
         "humid_couple":1.05, "nudging":1.7e-4, "pg_scale":1.00,
     },
     "humid_bias":  {
-        "n":[14000,18000], "rho":[0.6,0.8], "A":[0.65,0.75], "sigma":[0.03,0.05],
+        "n":[12000,14000,18000,22000], "rho":[0.6,0.8], "A":[0.65,0.75], "sigma":[0.03,0.05],
         "Kh":340.0, "Kt":175.0, "Kq":220.0, "drag":1.5e-5,
         "humid_couple":1.24, "nudging":1.6e-4, "pg_scale":1.00,
     },
     "strong_pg":   {
-        "n":[12000,16000], "rho":[0.5,0.7], "A":[0.6,0.7], "sigma":[0.03,0.05],
+        "n":[10000,12000,16000,20000], "rho":[0.5,0.7], "A":[0.6,0.7], "sigma":[0.03,0.05],
         "Kh":300.0, "Kt":150.0, "Kq":125.0, "drag":1.2e-5,
         "humid_couple":0.95, "nudging":1.5e-4, "pg_scale":1.18,
     },
     "terrain_lock":{
-        "n":[12000,16000], "rho":[0.5,0.8], "A":[0.6,0.75], "sigma":[0.03,0.05],
+        "n":[10000,12000,16000,20000], "rho":[0.5,0.8], "A":[0.6,0.75], "sigma":[0.03,0.05],
         "Kh":330.0, "Kt":170.0, "Kq":135.0, "drag":1.6e-5,
         "humid_couple":1.02, "nudging":1.5e-4, "pg_scale":1.04,
     },
@@ -442,12 +465,17 @@ def encode_initial_state(
     stress_arr = np.empty(B, dtype=np.float32)
     instab_arr = np.empty(B, dtype=np.float32)
 
-    # All candidates receive the same seed-derived IC.
-    h_arr[:]      = plan_h[None]
-    T_arr[:]      = plan_T[None]
-    q_arr[:]      = plan_q[None]
-    u_arr[:]      = plan_u[None]
-    v_arr[:]      = plan_v[None]
+    # Each candidate receives a small deterministic perturbation to break symmetry.
+    # Seed derived from candidate params so rollouts are fully reproducible.
+    for b, cand in enumerate(candidates):
+        p = cand["params"]
+        _seed = int(p["n"] * 13 + p["rho"] * 97 + p["A"] * 53) % (2**31)
+        rng = np.random.default_rng(_seed)
+        h_arr[b]  = plan_h + rng.normal(0, 18.0, (NY, NX)).astype(np.float32)
+        T_arr[b]  = plan_T + rng.normal(0,  0.4, (NY, NX)).astype(np.float32)
+        q_arr[b]  = np.clip(plan_q + rng.normal(0, 4e-4, (NY, NX)).astype(np.float32), 1e-5, 0.030)
+        u_arr[b]  = plan_u + rng.normal(0,  0.4, (NY, NX)).astype(np.float32)
+        v_arr[b]  = plan_v + rng.normal(0,  0.4, (NY, NX)).astype(np.float32)
     phase_arr[:]  = init_phase
     stress_arr[:] = init_stress
     instab_arr[:] = init_instab
@@ -595,9 +623,12 @@ def unified_step(
     phase, stress, instab = state.phase, state.stress, state.instability
     topo = state.topography[None]
 
-    Kh    = carr["Kh"]   [:,None,None]
-    Kt    = carr["Kt"]   [:,None,None]
-    Kq    = carr["Kq"]   [:,None,None]
+    # Resolution-adaptive diffusivity: Kh scales as (dx/_DX_REF)^2 so that the
+    # diffusion CFL number Kh*dt/dx^2 is constant regardless of grid spacing.
+    _res_scale = (dx / _DX_REF) ** 2
+    Kh    = carr["Kh"]   [:,None,None] * _res_scale
+    Kt    = carr["Kt"]   [:,None,None] * _res_scale
+    Kq    = carr["Kq"]   [:,None,None] * _res_scale
     drag  = carr["drag"] [:,None,None]
     hc    = carr["humid_couple"][:,None,None]
     nu    = carr["nudging"]     [:,None,None]
@@ -646,6 +677,14 @@ def unified_step(
     new_u = np.clip(_ENG.smooth(u_a + du, 0.04), -40.0, 40.0)
     new_v = np.clip(_ENG.smooth(v_a + dv, 0.04), -40.0, 40.0)
 
+    # Spatial statistics — feed back into UMDST to couple field diversity to dynamics
+    h_std    = np.std(new_h, axis=(-2, -1)) / BASE_H          # (B,) normalised
+    T_std    = np.std(new_T, axis=(-2, -1)) / 10.0            # (B,)
+    q_std    = np.std(new_q, axis=(-2, -1)) / 0.005           # (B,)
+    wind_rms = np.sqrt(np.mean(new_u**2 + new_v**2, axis=(-2, -1))) / 20.0  # (B,)
+    # Combined heterogeneity signal [0, 1]
+    spatial_het = np.clip(0.40*h_std + 0.30*T_std + 0.20*q_std + 0.10*wind_rms, 0.0, 1.0)
+
     # UMDST — per-family coefficients + per-family gain modifier
     new_phase  = np.empty_like(phase)
     new_stress = np.empty_like(stress)
@@ -686,9 +725,14 @@ def unified_step(
         ]
         gain_i *= mods[mg]
 
-        su  = gs * A_i * (0.8 + 0.4 * rho_i) * (0.55 + 0.45 * sigma_i)
+        # Spatial heterogeneity boosts phase gain
+        het_i = float(spatial_het[i])
+        gain_i *= (1.0 + 0.10 * het_i)
+
+        wrms_i = float(wind_rms[i])
+        su  = gs * A_i * (0.8 + 0.4 * rho_i) * (0.55 + 0.45 * sigma_i) + 0.004 * wrms_i
         sd  = 0.010 + 0.014 * lt_i
-        iu  = 0.012 * A_i + 0.010 * sigma_i + 0.014 * stress_i
+        iu  = 0.012 * A_i + 0.010 * sigma_i + 0.014 * stress_i + 0.005 * het_i
         id_ = 0.008 * lt_i
 
         new_phase[i]  = max(0.0, min(1.0,
@@ -721,9 +765,11 @@ def _torch_unified_step(
     phase, stress, instab = state.phase, state.stress, state.instability
     topo = state.topography.unsqueeze(0)
 
-    Kh    = carr["Kh"]   [:, None, None]
-    Kt    = carr["Kt"]   [:, None, None]
-    Kq    = carr["Kq"]   [:, None, None]
+    # Resolution-adaptive diffusivity (same scaling as numpy path)
+    _res_scale = (dx / _DX_REF) ** 2
+    Kh    = carr["Kh"]   [:, None, None] * _res_scale
+    Kt    = carr["Kt"]   [:, None, None] * _res_scale
+    Kq    = carr["Kq"]   [:, None, None] * _res_scale
     drag  = carr["drag"] [:, None, None]
     hc    = carr["humid_couple"][:, None, None]
     nu    = carr["nudging"]     [:, None, None]
@@ -776,12 +822,20 @@ def _torch_unified_step(
     new_u = (eng.smooth(u_a + du, 0.04)).clamp(-40.0, 40.0)
     new_v = (eng.smooth(v_a + dv, 0.04)).clamp(-40.0, 40.0)
 
+    # Spatial statistics — GPU-vectorised over batch
+    h_std    = new_h.std(dim=(-2, -1)) / BASE_H
+    T_std    = new_T.std(dim=(-2, -1)) / 10.0
+    q_std    = new_q.std(dim=(-2, -1)) / 0.005
+    wind_rms = torch.sqrt((new_u**2 + new_v**2).mean(dim=(-2, -1))) / 20.0
+    spatial_het = (0.40*h_std + 0.30*T_std + 0.20*q_std + 0.10*wind_rms).clamp(0.0, 1.0)
+
     op  = (new_h.mean(dim=(-2,-1)) / BASE_H).clamp(0.0, 1.2)
     lt  = (new_q.mean(dim=(-2,-1)) / 0.030).clamp(0.0, 1.2)
     new_phase, new_stress, new_instab = _umdst_batched_step(
         op, lt, ac, stress, phase, md, instab, A, rho, sigma, carr["n"],
         carr["g_gain"], carr["g_prec"], carr["g_coup"], carr["g_stress"],
         progress=progress, mod_group=carr["mod_group"],
+        spatial_het=spatial_het, wind_rms=wind_rms,
     )
 
     return UnifiedState(
@@ -937,9 +991,9 @@ def td_hydro_control(scores: np.ndarray) -> dict:
 def run_tree_diagram(
     seed: ProblemSeed,
     bg: ProblemBackground,
-    NX: int = 28,
-    NY: int = 21,
-    steps: int = 20,
+    NX: int = 128,
+    NY: int = 96,
+    steps: int = 300,
     top_k: int = 12,
     dt: float = 45.0,
     device: Optional[str] = None,
@@ -953,6 +1007,10 @@ def run_tree_diagram(
         use_torch = True
     else:
         device = "cpu"
+
+    # Physical grid spacing computed from fixed domain size and requested resolution
+    DX = _DOMAIN_X / (NX - 1)   # metres (~11 811 m at NX=128)
+    DY = _DOMAIN_Y / (NY - 1)   # metres (~11 573 m at NY=96)
 
     candidates   = generate_candidates(seed, bg)
     B            = len(candidates)

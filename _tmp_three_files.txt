@@ -1,0 +1,614 @@
+=== tree_diagram_unified_operator_v27_fixed.py (67 lines) ===
+
+"""
+Tree Diagram Unified Operator v29
+Updated to include the UMDST backend v2 branch as a first-class domain.
+"""
+
+from __future__ import annotations
+from pathlib import Path
+import importlib.util
+import sys
+import json
+import math
+import numpy as np
+
+ADAPTER_PATH = Path("/mnt/data/tree_diagram_umdst_adapter_v3.py")
+
+def load_adapter():
+    spec = importlib.util.spec_from_file_location("tree_diagram_umdst_adapter_v3", ADAPTER_PATH)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Cannot load adapter from {ADAPTER_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["tree_diagram_umdst_adapter_v3"] = module
+    spec.loader.exec_module(module)
+    return module
+
+ADAPTER = load_adapter()
+
+DEFAULT_REQUEST = {
+    "problem": {
+        "title": "Tree Diagram Unified Oracle v29",
+        "target": "Use the unified oracle shell while routing molecular dynamics work to UMDST backend v2."
+    }
+}
+
+def route_mappings(req):
+    text = (req["problem"]["title"] + " " + req["problem"]["target"]).lower()
+    if any(k in text for k in ["umdst", "molecule", "molecular", "gas", "particle"]):
+        return {"plan": False, "meteorology": False, "umdst_backend": True, "coupled": False}
+    return {"plan": False, "meteorology": False, "umdst_backend": True, "coupled": False}
+
+def run_unified(req=DEFAULT_REQUEST):
+    routing = route_mappings(req)
+    oracle = ADAPTER.run_umdst_oracle()
+    return {
+        "meta": {
+            "engine": "tree_diagram_unified_operator_v27_fixed",
+            "structure": "unified_oracle_manifest + umdst_backend_v2",
+        },
+        "routing": routing,
+        "domains": oracle["domains"],
+        "selection": oracle["selection"],
+        "oracle_summary": oracle["oracle_summary"],
+    }
+
+def main():
+    oracle = run_unified()
+    outpath = Path("/mnt/data/tree_diagram_unified_result_v27_fixed.json")
+    outpath.write_text(json.dumps(oracle, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(json.dumps({
+        "selection": oracle["selection"],
+        "oracle_summary": oracle["oracle_summary"],
+        "domains_present": list(oracle["domains"].keys()),
+    }, ensure_ascii=False, indent=2))
+    print(f"saved: {outpath}")
+
+if __name__ == "__main__":
+    main()
+
+
+=== tree_diagram_unified_operator_v28_lj.py (413 lines) ===
+
+# Tree Diagram Unified Operator Core v28
+# Added a true Lennard-Jones molecular branch for atmospheric-style particle simulation.
+#
+# Important:
+# - This is particle-based MD (2D Lennard-Jones + velocity Verlet + periodic box)
+# - It is "true molecule / particle" in the sense of pairwise LJ interaction, not continuum PDE
+# - It is NOT full real-Earth atmosphere scale MD; that would be computationally impossible here
+#
+# Usage:
+#   python tree_diagram_unified_operator_v28_lj.py
+#   python tree_diagram_unified_operator_v28_lj.py --input request.json
+
+from __future__ import annotations
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, Any, Tuple
+import argparse, itertools, json, math
+import numpy as np
+
+DEFAULT_REQUEST = {
+    "problem": {
+        "title": "Atmospheric Lennard-Jones Oracle Test",
+        "target": "Run a Lennard-Jones molecular branch and rank worldlines for particle-level atmospheric evolution."
+    },
+    "subject": {
+        "output_power": 0.93, "control_precision": 0.88, "load_tolerance": 0.61,
+        "aim_coupling": 0.97, "phase_proximity": 0.69, "stress_level": 0.22,
+        "instability_sensitivity": 0.28,
+    },
+    "environment": {
+        "budget": 0.62, "infrastructure": 0.71, "data_coverage": 0.66,
+        "population_coupling": 0.83, "field_noise": 0.34, "social_pressure": 0.58,
+        "regulatory_friction": 0.47, "network_density": 0.76, "phase_instability": 0.41,
+        "weather_relevance": 1.0, "terrain_relevance": 1.0,
+    },
+    "reward": {
+        "components": {
+            "lj_temp_err": -2.2,
+            "lj_pressure_err": -1.7,
+            "lj_energy_drift": -2.5,
+            "lj_density_var": -0.8,
+            "lj_rdf_err": -1.0,
+        }
+    },
+    "runtime": {
+        "grid_engine": "numpy_local",
+        "lj_particle_count": 96,
+        "lj_steps": 220,
+        "lj_dt": 0.0035,
+        "lj_box_size": 12.0,
+        "lj_rcut": 2.5,
+        "lj_seed": 430,
+    }
+}
+
+def deep_merge(base, override):
+    out = dict(base)
+    for k, v in override.items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+def load_request(path=None):
+    if path is None:
+        return DEFAULT_REQUEST
+    return deep_merge(DEFAULT_REQUEST, json.loads(Path(path).read_text(encoding="utf-8")))
+
+def classify_relative(scores, idx):
+    best = max(scores); worst = min(scores); span = max(1e-9, best - worst); rel = best - scores[idx]
+    if rel <= max(0.20, 0.22 * span): return "active"
+    if rel <= max(0.55, 0.45 * span): return "restricted"
+    if rel <= max(1.20, 0.90 * span): return "starved"
+    return "withered"
+
+def histogram_of_status(rows, key="branch_status"):
+    return {s: sum(r[key] == s for r in rows) for s in ["active", "restricted", "starved", "withered"]}
+
+@dataclass
+class UnifiedState:
+    dyn: Dict[str, np.ndarray]
+    aux: Dict[str, np.ndarray]
+    meta: Dict[str, Any]
+
+def route_mappings(req):
+    return {"plan": False, "meteorology": False, "lj_molecules": True, "coupled": False}
+
+# ---------------- LJ particle branch ----------------
+
+def generate_lj_candidates():
+    return [
+        {"family":"cold_dense", "template":"lj_cold_dense", "params":{"epsilon":1.30,"sigma":0.95,"target_T":0.72,"thermostat":0.040,"density_bias":1.08}},
+        {"family":"balanced", "template":"lj_balanced", "params":{"epsilon":1.00,"sigma":1.00,"target_T":0.95,"thermostat":0.050,"density_bias":1.00}},
+        {"family":"hot_sparse", "template":"lj_hot_sparse", "params":{"epsilon":0.82,"sigma":1.05,"target_T":1.22,"thermostat":0.060,"density_bias":0.92}},
+        {"family":"sticky_cluster", "template":"lj_sticky_cluster", "params":{"epsilon":1.55,"sigma":0.92,"target_T":0.78,"thermostat":0.035,"density_bias":1.10}},
+        {"family":"agitated_mix", "template":"lj_agitated_mix", "params":{"epsilon":0.92,"sigma":1.00,"target_T":1.10,"thermostat":0.075,"density_bias":0.98}},
+        {"family":"soft_gas", "template":"lj_soft_gas", "params":{"epsilon":0.70,"sigma":1.10,"target_T":1.30,"thermostat":0.080,"density_bias":0.88}},
+    ]
+
+def prepare_candidate_arrays(candidates):
+    fams = [c["family"] for c in candidates]
+    params = [c["params"] for c in candidates]
+    out = {"family": np.array(fams, dtype=object)}
+    for k in sorted(set().union(*[p.keys() for p in params])):
+        out[k] = np.array([p.get(k, 0.0) for p in params], dtype=np.float64)
+    return out
+
+def initialize_lj_state(req, candidate_arrays):
+    B = len(candidate_arrays["family"])
+    N = int(req["runtime"]["lj_particle_count"])
+    L = float(req["runtime"]["lj_box_size"])
+    density_bias = candidate_arrays["density_bias"]
+    base_seed = int(req["runtime"].get("lj_seed", 430))
+
+    pos = np.zeros((B, N, 2), dtype=np.float64)
+    vel = np.zeros((B, N, 2), dtype=np.float64)
+
+    n_side = int(math.ceil(math.sqrt(N)))
+    grid = np.linspace(0.0, 1.0, n_side, endpoint=False)
+    xx, yy = np.meshgrid(grid, grid, indexing="xy")
+    lattice = np.stack([xx.reshape(-1), yy.reshape(-1)], axis=1)[:N]
+
+    for b in range(B):
+        rng = np.random.default_rng(base_seed + b)
+        Lb = L / math.sqrt(max(1e-6, density_bias[b]))
+        jitter = 0.025 * rng.normal(size=(N, 2))
+        pos[b] = (lattice * Lb + 0.5 * Lb / n_side + jitter) % Lb
+        T0 = candidate_arrays["target_T"][b]
+        vel[b] = rng.normal(scale=math.sqrt(T0), size=(N, 2))
+        vel[b] -= vel[b].mean(axis=0, keepdims=True)
+
+    aux = {
+        "box_size": L / np.sqrt(np.maximum(1e-6, density_bias)),
+        "initial_energy": np.zeros(B, dtype=np.float64),
+    }
+    return UnifiedState(
+        dyn={"pos": pos, "vel": vel},
+        aux=aux,
+        meta={"domain":"lj_molecules", "batch":B, "particles":N}
+    )
+
+def minimum_image(delta, L):
+    return delta - L * np.round(delta / L)
+
+def lj_forces_energy_pressure(pos, Lb, epsilon, sigma, rcut):
+    """
+    pos: (N,2)
+    returns force (N,2), potential_energy scalar, virial scalar
+    """
+    N = pos.shape[0]
+    force = np.zeros_like(pos)
+    pe = 0.0
+    virial = 0.0
+    rcut2 = (rcut * sigma) ** 2
+
+    for i in range(N - 1):
+        rij = pos[i+1:] - pos[i]
+        rij = minimum_image(rij, Lb)
+        r2 = np.sum(rij * rij, axis=1)
+        mask = (r2 > 1e-12) & (r2 < rcut2)
+        if not np.any(mask):
+            continue
+        rij_m = rij[mask]
+        r2_m = r2[mask]
+
+        inv_r2 = 1.0 / r2_m
+        sig2 = sigma * sigma
+        sr2 = sig2 * inv_r2
+        sr6 = sr2 ** 3
+        sr12 = sr6 ** 2
+
+        # shifted potential
+        src2 = sig2 / ((rcut * sigma) ** 2)
+        src6 = src2 ** 3
+        src12 = src6 ** 2
+        e_shift = 4.0 * epsilon * (src12 - src6)
+
+        pair_pe = 4.0 * epsilon * (sr12 - sr6) - e_shift
+        pe += float(np.sum(pair_pe))
+
+        coef = 24.0 * epsilon * inv_r2 * (2.0 * sr12 - sr6)
+        fij = rij_m * coef[:, None]
+        virial += float(np.sum(np.sum(rij_m * fij, axis=1)))
+
+        force[i] += np.sum(fij, axis=0)
+        idx = np.nonzero(mask)[0] + (i + 1)
+        for local, j in enumerate(idx):
+            force[j] -= fij[local]
+
+    return force, pe, virial
+
+def kinetic_temperature(vel):
+    N = vel.shape[0]
+    ke = 0.5 * np.sum(vel * vel)
+    temp = 2.0 * ke / (2.0 * N)  # d=2, m=1, kB=1
+    return ke, temp
+
+def radial_distribution_error(pos, Lb, sigma):
+    # crude scalar proxy: compare mean pair distance shell against LJ-favored ~ 1.12 sigma
+    N = pos.shape[0]
+    dists = []
+    for i in range(N - 1):
+        rij = minimum_image(pos[i+1:] - pos[i], Lb)
+        r = np.sqrt(np.sum(rij * rij, axis=1))
+        dists.append(r)
+    if not dists:
+        return 0.0
+    d = np.concatenate(dists)
+    near = d[(d > 0.7 * sigma) & (d < 2.2 * sigma)]
+    if near.size == 0:
+        return 10.0
+    mean_r = float(np.mean(near))
+    return (mean_r - 1.122 * sigma) ** 2
+
+def density_variance(pos, Lb, bins=4):
+    hist, _, _ = np.histogram2d(pos[:,0], pos[:,1], bins=bins, range=[[0,Lb],[0,Lb]])
+    p = hist / np.maximum(1.0, hist.sum())
+    return float(np.var(p))
+
+def simulate_lj_branch(req, candidate_arrays, initial_state):
+    B = len(candidate_arrays["family"])
+    steps = int(req["runtime"]["lj_steps"])
+    dt = float(req["runtime"]["lj_dt"])
+    rcut = float(req["runtime"]["lj_rcut"])
+
+    pos = initial_state.dyn["pos"].copy()
+    vel = initial_state.dyn["vel"].copy()
+    box_sizes = initial_state.aux["box_size"].copy()
+
+    temp_obs = np.zeros(B, dtype=np.float64)
+    pressure_obs = np.zeros(B, dtype=np.float64)
+    density_var_obs = np.zeros(B, dtype=np.float64)
+    rdf_err_obs = np.zeros(B, dtype=np.float64)
+    energy_drift_obs = np.zeros(B, dtype=np.float64)
+
+    for b in range(B):
+        eps = float(candidate_arrays["epsilon"][b])
+        sig = float(candidate_arrays["sigma"][b])
+        target_T = float(candidate_arrays["target_T"][b])
+        thermostat = float(candidate_arrays["thermostat"][b])
+        Lb = float(box_sizes[b])
+
+        f, pe0, vir0 = lj_forces_energy_pressure(pos[b], Lb, eps, sig, rcut)
+        ke0, _ = kinetic_temperature(vel[b])
+        e0 = ke0 + pe0
+
+        temps = []
+        press = []
+        dens_var = []
+        rdf_err = []
+
+        for _ in range(steps):
+            pos[b] = (pos[b] + vel[b] * dt + 0.5 * f * dt * dt) % Lb
+            f_new, pe, vir = lj_forces_energy_pressure(pos[b], Lb, eps, sig, rcut)
+            vel[b] = vel[b] + 0.5 * (f + f_new) * dt
+            f = f_new
+
+            ke, T_inst = kinetic_temperature(vel[b])
+
+            # Berendsen-like thermostat
+            lam = math.sqrt(max(1e-8, 1.0 + thermostat * (target_T / max(1e-8, T_inst) - 1.0)))
+            vel[b] *= lam
+            ke, T_inst = kinetic_temperature(vel[b])
+
+            rho = pos[b].shape[0] / (Lb * Lb)
+            P_inst = rho * T_inst + vir / (2.0 * Lb * Lb)
+
+            temps.append(T_inst)
+            press.append(P_inst)
+            dens_var.append(density_variance(pos[b], Lb))
+            rdf_err.append(radial_distribution_error(pos[b], Lb, sig))
+
+        ke1, _ = kinetic_temperature(vel[b])
+        pe1_force, pe1, _ = lj_forces_energy_pressure(pos[b], Lb, eps, sig, rcut)
+        e1 = ke1 + pe1
+
+        temp_obs[b] = float(np.mean(temps[-min(40, len(temps)):]))
+        pressure_obs[b] = float(np.mean(press[-min(40, len(press)):]))
+        density_var_obs[b] = float(np.mean(dens_var[-min(40, len(dens_var)):]))
+        rdf_err_obs[b] = float(np.mean(rdf_err[-min(40, len(rdf_err)):]))
+        energy_drift_obs[b] = abs(e1 - e0) / max(1e-8, abs(e0))
+
+    return {
+        "lj_temp": temp_obs,
+        "lj_pressure": pressure_obs,
+        "lj_density_var": density_var_obs,
+        "lj_rdf_err": rdf_err_obs,
+        "lj_energy_drift": energy_drift_obs,
+    }
+
+def build_reward_bundle(observables, candidate_arrays, req):
+    weights = req["reward"]["components"]
+    target_T = candidate_arrays["target_T"]
+    density_bias = candidate_arrays["density_bias"]
+
+    # rough pressure target tied to target temperature and density
+    target_P = density_bias * target_T * 0.55
+
+    metrics = {
+        "lj_temp_err": (observables["lj_temp"] - target_T) ** 2,
+        "lj_pressure_err": (observables["lj_pressure"] - target_P) ** 2,
+        "lj_energy_drift": observables["lj_energy_drift"],
+        "lj_density_var": observables["lj_density_var"],
+        "lj_rdf_err": observables["lj_rdf_err"],
+    }
+
+    score = np.zeros_like(target_T)
+    for k, v in metrics.items():
+        score = score + weights[k] * v
+
+    out = {"score": score}
+    out.update(metrics)
+    return out
+
+def batch_rows_from_metrics(candidates, metrics):
+    rows = []
+    for i, c in enumerate(candidates):
+        row = {"family": c["family"], "template": c["template"], "params": c["params"]}
+        for k, arr in metrics.items():
+            row[k] = float(arr[i])
+        rows.append(row)
+    return rows
+
+def td_hydro_control(rows):
+    ranked = sorted(rows, key=lambda x: x["score"], reverse=True)
+    margin = ranked[0]["score"] - ranked[1]["score"] if len(ranked) > 1 else 0.0
+    spread = ranked[0]["score"] - ranked[-1]["score"] if len(ranked) > 1 else 0.0
+    pressure_balance = float(np.clip(1.0 + (0.04 if margin < 0.08 else 0.0) - (0.03 if spread > 1.4 else 0.0), 0.94, 1.08))
+    return {
+        "pressure_balance": pressure_balance,
+        "top_margin": float(margin),
+        "score_spread": float(spread),
+        "mean_score": float(np.mean([m["score"] for m in rows])) if rows else 0.0,
+    }
+
+def run_lj_domain(req):
+    candidates = generate_lj_candidates()
+    carr = prepare_candidate_arrays(candidates)
+    init = initialize_lj_state(req, carr)
+    observables = simulate_lj_branch(req, carr, init)
+    metrics = build_reward_bundle(observables, carr, req)
+    rows = sorted(batch_rows_from_metrics(candidates, metrics), key=lambda x: x["score"], reverse=True)
+    scores = [r["score"] for r in rows]
+    for i, row in enumerate(rows):
+        row["branch_status"] = classify_relative(scores, i)
+
+    hydro = td_hydro_control(rows)
+    return rows, hydro
+
+def package_domain_output(name, rows, hydro, mode):
+    best = rows[0]
+    payload = {
+        "name": name,
+        "mode": mode,
+        "best": {
+            "branch": best["family"],
+            "status": best["branch_status"],
+            "score": best["score"],
+            "template": best["template"],
+            "params": best["params"],
+        },
+        "status_histogram": histogram_of_status(rows),
+        "hydro_control": hydro,
+        "row_count": len(rows),
+        "rows": rows if mode == "ranking" else rows[:5],
+    }
+    return payload
+
+def run_unified(req):
+    routing = route_mappings(req)
+    domains = {}
+
+    lj_rows, lj_hydro = run_lj_domain(req)
+    domains["lj_molecules"] = package_domain_output("lj_molecules", lj_rows, lj_hydro, "ranking")
+
+    selection = {
+        "dominant_mapping": "lj_molecules",
+        "best_domain": "lj_molecules",
+        "best_branch": domains["lj_molecules"]["best"]["branch"],
+    }
+    oracle_summary = {
+        "main_worldline_alive": domains["lj_molecules"]["best"]["status"] in ("active", "restricted"),
+        "main_worldline_active": domains["lj_molecules"]["best"]["status"] == "active",
+    }
+
+    return {
+        "meta": {
+            "engine": "tree_diagram_unified_operator_v28_lj",
+            "structure": "lj_molecular_oracle_manifest",
+            "note": "Particle-based Lennard-Jones branch; true pairwise particles, not full real-atmosphere molecular scale."
+        },
+        "routing": routing,
+        "domains": domains,
+        "selection": selection,
+        "oracle_summary": oracle_summary,
+    }
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input", default=None)
+    parser.add_argument("--outdir", default="./tree_diagram_unified_out_v28_lj")
+    args = parser.parse_args()
+    req = load_request(args.input)
+    oracle = run_unified(req)
+    outdir = Path(args.outdir); outdir.mkdir(parents=True, exist_ok=True)
+    outpath = outdir / "unified_oracle.json"
+    outpath.write_text(json.dumps(oracle, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(json.dumps(oracle, ensure_ascii=False, indent=2))
+
+if __name__ == "__main__":
+    main()
+
+
+=== tree_diagram_unified_operator_v27_fixed_umdst.py (125 lines) ===
+
+"""
+Tree Diagram Unified Operator v27_fixed + UMDST integration
+-----------------------------------------------------------
+Safe wrapper:
+- preserves legacy v27 unified behavior for plan / meteorology
+- adds UMDST backend v2 as an extra routed domain
+- does NOT overwrite the original v27 / v27_fixed lineage
+"""
+
+from __future__ import annotations
+from pathlib import Path
+import importlib.util
+import sys
+import json
+
+LEGACY_PATH = Path("/mnt/data/tree_diagram_unified_operator_v27.py")
+UMDST_ADAPTER_PATH = Path("/mnt/data/tree_diagram_umdst_adapter_v3.py")
+
+
+def load_module(path: Path, module_name: str):
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Cannot load module from {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+LEGACY = load_module(LEGACY_PATH, "tree_diagram_unified_operator_v27_legacy")
+UMDST_ADAPTER = load_module(UMDST_ADAPTER_PATH, "tree_diagram_umdst_adapter_v3_for_v27")
+
+
+DEFAULT_REQUEST = {
+    "problem": {
+        "title": "Tree Diagram Unified Operator v27_fixed with UMDST",
+        "target": "Route standard unified tasks to legacy Tree Diagram, and molecular/gas/particle tasks to UMDST backend v2."
+    }
+}
+
+
+def deep_merge(base, override):
+    out = dict(base)
+    for k, v in override.items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def route_mappings(req):
+    text = (req["problem"]["title"] + " " + req["problem"]["target"]).lower()
+    umdst_hit = any(k in text for k in [
+        "umdst", "molecule", "molecular", "gas", "particle", "dsmc", "collision exchange"
+    ])
+    if umdst_hit:
+        return {
+            "plan": False,
+            "meteorology": False,
+            "umdst_backend": True,
+            "coupled": False,
+        }
+    # fall back to legacy routing
+    legacy = LEGACY.route_mappings(req)
+    legacy["umdst_backend"] = False
+    return legacy
+
+
+def _wrap_legacy_result(req):
+    legacy_oracle = LEGACY.run_unified(req)
+    meta = dict(legacy_oracle.get("meta", {}))
+    meta["engine"] = "tree_diagram_unified_operator_v27_fixed_umdst"
+    meta["legacy_engine"] = meta.get("engine_legacy", "tree_diagram_unified_operator_v27")
+    meta["umdst_available"] = True
+    legacy_oracle["meta"] = meta
+    return legacy_oracle
+
+
+def _wrap_umdst_result():
+    umdst_oracle = UMDST_ADAPTER.run_umdst_oracle()
+    return {
+        "meta": {
+            "engine": "tree_diagram_unified_operator_v27_fixed_umdst",
+            "structure": "legacy_v27_shell + umdst_backend_v2_route",
+            "legacy_available": True,
+            "umdst_available": True,
+        },
+        "routing": {
+            "plan": False,
+            "meteorology": False,
+            "umdst_backend": True,
+            "coupled": False,
+        },
+        "domains": umdst_oracle["domains"],
+        "selection": umdst_oracle["selection"],
+        "oracle_summary": umdst_oracle["oracle_summary"],
+    }
+
+
+def run_unified(req=None):
+    if req is None:
+        req = DEFAULT_REQUEST
+    routing = route_mappings(req)
+    if routing.get("umdst_backend", False):
+        return _wrap_umdst_result()
+    return _wrap_legacy_result(req)
+
+
+def main():
+    oracle = run_unified()
+    outpath = Path("/mnt/data/tree_diagram_unified_operator_v27_fixed_umdst_result.json")
+    outpath.write_text(json.dumps(oracle, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(json.dumps({
+        "routing": oracle["routing"],
+        "selection": oracle["selection"],
+        "oracle_summary": oracle["oracle_summary"],
+        "domains_present": list(oracle["domains"].keys()),
+    }, ensure_ascii=False, indent=2))
+    print(f"saved: {outpath}")
+
+
+if __name__ == "__main__":
+    main()
+
+

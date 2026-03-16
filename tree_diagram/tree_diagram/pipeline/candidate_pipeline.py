@@ -27,9 +27,9 @@ class CandidatePipeline:
         seed: Optional[ProblemSeed] = None,
         top_k: int = 12,
         n_workers: int = 1,
-        NX: int = 28,
-        NY: int = 21,
-        steps: int = 20,
+        NX: int = 128,
+        NY: int = 96,
+        steps: int = 300,
         dt: float = 45.0,
         device: Optional[str] = None,
         # Legacy params accepted but unused

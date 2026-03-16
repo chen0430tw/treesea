@@ -56,12 +56,21 @@ class VeinletExpert:
         Multiplicative scale on risk channel (>1 = more risk-averse).
     confidence_base : float
         Base confidence for this expert [0, 1].
+    yield_w : float
+        Weight on adjusted yield in the final score (default 0.45).
+    stab_w : float
+        Weight on adjusted stability in the final score (default 0.35).
+    risk_w : float
+        Weight on adjusted risk in the final score (default 0.20).
     """
     family_name:      str
     yield_bias:       float = 0.0
     stability_bias:   float = 0.0
     risk_scale:       float = 1.0
     confidence_base:  float = 0.8
+    yield_w:          float = 0.45
+    stab_w:           float = 0.35
+    risk_w:           float = 0.20
 
     def score(self, tri: TriVeinScore) -> ExpertScore:
         """Apply expert policy to a TriVeinScore."""
@@ -70,9 +79,9 @@ class VeinletExpert:
         adj_risk     = max(0.0, min(1.0, tri.risk      * self.risk_scale))
 
         adjusted = (
-            0.45 * adj_yield
-            + 0.35 * adj_stab
-            - 0.20 * adj_risk
+            self.yield_w * adj_yield
+            + self.stab_w  * adj_stab
+            - self.risk_w  * adj_risk
         )
 
         # Confidence degrades when risk is high
@@ -96,7 +105,7 @@ class VeinletExpert:
 
 def _default_experts() -> Dict[str, VeinletExpert]:
     return {
-        "batch":      VeinletExpert("batch",      yield_bias=+0.04, stability_bias=+0.02, risk_scale=0.90, confidence_base=0.88),
+        "batch":      VeinletExpert("batch",      yield_bias=+0.04, stability_bias=+0.02, risk_scale=0.90, confidence_base=0.88, yield_w=0.28, stab_w=0.52, risk_w=0.20),
         "phase":      VeinletExpert("phase",      yield_bias=+0.02, stability_bias=+0.04, risk_scale=1.00, confidence_base=0.85),
         "hybrid":     VeinletExpert("hybrid",     yield_bias=+0.01, stability_bias=-0.01, risk_scale=1.15, confidence_base=0.78),
         "network":    VeinletExpert("network",    yield_bias=+0.03, stability_bias=+0.01, risk_scale=0.95, confidence_base=0.82),
