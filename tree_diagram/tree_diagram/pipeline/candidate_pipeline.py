@@ -6,9 +6,12 @@ from ..core.background_inference import ProblemBackground, infer_problem_backgro
 from ..core.group_field import encode_group_field
 from ..core.worldline_kernel import EvaluationResult, run_tree_diagram
 from ..core.oracle_output import oracle_summary_abstract
+from ..core.umdst_kernel import Metrics
+from ..core.cbf_balancer import aggregate_cbf
 from ..vein.tri_vein_kernel import compute_tri_vein_batch, pareto_front, tri_vein_stats
 from ..vein.veinlet_experts import VeinletEnsemble
 from ..vein.vein_backbone import VeinBackbone
+from ..control.utm_hydrology_controller import UTMHydrologyController
 
 
 class CandidatePipeline:
@@ -47,6 +50,24 @@ class CandidatePipeline:
             device=self.device,
         )
 
+        # ── CBF Balance Layer (Layer 5): zero-net-drive balance ──────────────
+        cbf_metrics = [
+            Metrics(
+                e_cons_mean    = r.risk,
+                impact_peak    = r.nutrient_gain,
+                variance_proxy = max(0.0, 1.0 - r.stability),
+                disagree_proxy = max(0.0, 1.0 - r.feasibility),
+                ood_proxy      = r.risk,
+                p_blow_max     = r.risk,
+                phase_max      = r.field_fit,
+                phase_final    = r.balanced_score,
+                repeatability  = r.stability,
+            )
+            for r in top_results
+        ]
+        hydro["cbf_allocation"] = aggregate_cbf(cbf_metrics, {})
+        # ────────────────────────────────────────────────────────────────────
+
         # ── Vein layer: tri-channel scoring + family-expert re-ranking ──────
         tri_scores    = compute_tri_vein_batch(top_results)
         ensemble      = VeinletEnsemble()
@@ -69,6 +90,15 @@ class CandidatePipeline:
         hydro["vein_backbone"] = backbone.to_dict()
         hydro["vein_stats"]    = tri_vein_stats(tri_scores)
         hydro["vein_pareto_size"] = len(pareto_front(tri_scores))
+        # ────────────────────────────────────────────────────────────────────
+
+        # ── H-UTM Hydro Control Layer (Layer 8): main-channel stability ─────
+        utm_ctrl = UTMHydrologyController()
+        utm_adj  = utm_ctrl.adjust(top_results, step=self.steps)
+        hydro["utm_hydro_state"]    = utm_adj.hydro_state
+        hydro["utm_state"]          = utm_adj.utm_state
+        hydro["utm_main_channel_k"] = len(utm_adj.main_channel_ids)
+        hydro.update(utm_adj.merged_hydro)
         # ────────────────────────────────────────────────────────────────────
 
         abstract_oracle = oracle_summary_abstract(seed, bg, field, top_results, hydro)
