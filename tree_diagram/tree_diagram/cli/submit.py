@@ -72,8 +72,7 @@ def main(argv=None):
     parser.add_argument("--account",   default=None,
                         help="Slurm account")
     parser.add_argument("--partition", default=None,
-                        choices=["normal", "normal2"],
-                        help="Slurm partition")
+                        help="Slurm partition (e.g. normal, normal2, dev)")
     parser.add_argument("--nodes",     type=int, default=None,
                         help="Number of nodes")
     parser.add_argument("--gpus",      type=int, default=None,
