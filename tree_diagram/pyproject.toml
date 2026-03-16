@@ -7,3 +7,6 @@ name = "tree_diagram"
 version = "0.1.0"
 description = "Tree Diagram subsystem"
 requires-python = ">=3.10"
+
+[project.scripts]
+tree-diagram = "tree_diagram.cli.main:main"

@@ -1,0 +1,167 @@
+{
+  "profile": "quick",
+  "elapsed_s": 4.799,
+  "top_results": [
+    {
+      "rank": 1,
+      "family": "batch",
+      "template": "batch_route",
+      "n": 22000,
+      "final_score": 0.57395,
+      "balanced_score": 1.294188,
+      "feasibility": 0.877412,
+      "stability": 0.688463,
+      "risk": 0.301411
+    },
+    {
+      "rank": 2,
+      "family": "batch",
+      "template": "batch_route",
+      "n": 20000,
+      "final_score": 0.573929,
+      "balanced_score": 1.402353,
+      "feasibility": 0.877416,
+      "stability": 0.688429,
+      "risk": 0.301437
+    },
+    {
+      "rank": 3,
+      "family": "batch",
+      "template": "batch_route",
+      "n": 18000,
+      "final_score": 0.573886,
+      "balanced_score": 1.292602,
+      "feasibility": 0.87738,
+      "stability": 0.688384,
+      "risk": 0.301504
+    },
+    {
+      "rank": 4,
+      "family": "batch",
+      "template": "batch_route",
+      "n": 22000,
+      "final_score": 0.568717,
+      "balanced_score": 1.292994,
+      "feasibility": 0.868952,
+      "stability": 0.694747,
+      "risk": 0.292808
+    },
+    {
+      "rank": 5,
+      "family": "batch",
+      "template": "batch_route",
+      "n": 20000,
+      "final_score": 0.568634,
+      "balanced_score": 1.405921,
+      "feasibility": 0.868896,
+      "stability": 0.694653,
+      "risk": 0.292932
+    },
+    {
+      "rank": 6,
+      "family": "batch",
+      "template": "batch_route",
+      "n": 22000,
+      "final_score": 0.548955,
+      "balanced_score": 1.285498,
+      "feasibility": 0.836392,
+      "stability": 0.654507,
+      "risk": 0.325638
+    },
+    {
+      "rank": 7,
+      "family": "batch",
+      "template": "batch_route",
+      "n": 20000,
+      "final_score": 0.548935,
+      "balanced_score": 1.391048,
+      "feasibility": 0.836395,
+      "stability": 0.654473,
+      "risk": 0.325665
+    },
+    {
+      "rank": 8,
+      "family": "batch",
+      "template": "batch_route",
+      "n": 20000,
+      "final_score": 0.542581,
+      "balanced_score": 1.3357,
+      "feasibility": 0.81418,
+      "stability": 0.660801,
+      "risk": 0.317017
+    },
+    {
+      "rank": 9,
+      "family": "batch",
+      "template": "batch_route",
+      "n": 20000,
+      "final_score": 0.541498,
+      "balanced_score": 1.275432,
+      "feasibility": 0.888629,
+      "stability": 0.640458,
+      "risk": 0.352852
+    },
+    {
+      "rank": 10,
+      "family": "batch",
+      "template": "batch_route",
+      "n": 20000,
+      "final_score": 0.531635,
+      "balanced_score": 1.30884,
+      "feasibility": 0.872453,
+      "stability": 0.652843,
+      "risk": 0.335922
+    },
+    {
+      "rank": 11,
+      "family": "batch",
+      "template": "batch_route",
+      "n": 20000,
+      "final_score": 0.516193,
+      "balanced_score": 1.26156,
+      "feasibility": 0.847404,
+      "stability": 0.606191,
+      "risk": 0.377505
+    },
+    {
+      "rank": 12,
+      "family": "batch",
+      "template": "batch_route",
+      "n": 20000,
+      "final_score": 0.506575,
+      "balanced_score": 1.285921,
+      "feasibility": 0.828151,
+      "stability": 0.618776,
+      "risk": 0.360301
+    }
+  ],
+  "hydro": {
+    "pressure_balance": 1.5,
+    "top_margin": 0.0,
+    "score_spread": 0.0,
+    "mean_score": 0.0,
+    "pruned_count": 6,
+    "reflow_bonus": 1.38181818181818,
+    "alive_count": 160,
+    "vein_pareto_size": 4,
+    "utm_hydro_state": "FLOOD",
+    "utm_state": "NORMAL",
+    "utm_main_channel_k": 3,
+    "mean_balanced_score": 1.3193379781242385,
+    "wither_ratio": 0.0,
+    "mean_instability": 0.0,
+    "active_ratio": 1.0,
+    "restricted_ratio": 0.0,
+    "mean_risk": 0.32374925163884954
+  },
+  "oracle_summary": {
+    "seed_title": "Urban Resonance Upgrade Program",
+    "background_emerged": true,
+    "inferred_goal": "precision_upgrade_via_control_dominance",
+    "dominant_pressures": [
+      "social_pressure_dominant",
+      "regulatory_friction_present",
+      "field_noise_elevated"
+    ]
+  }
+}
