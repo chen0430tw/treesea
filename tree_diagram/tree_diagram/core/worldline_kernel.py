@@ -70,6 +70,8 @@ _FAMILY_MOD_GROUP: Dict[str, int] = {
 }
 
 _UMDST_N_BASELINE = 183.0   # steps for n=15000, rho=0.7 (neutral point)
+_N_OPT            = 20000.0  # alignment fixed point
+_N_SIGMA          = 5000.0   # Gaussian half-width for n_scale envelope
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +205,9 @@ def _umdst_batched_step(
     std    = torch.exp(-4.0 * sigma)
     n_steps = (24.0 + torch.sqrt(n.float()) * 1.2 + 18.0 * rho).clamp(min=24.0)
     n_scale = (n_steps / _UMDST_N_BASELINE).clamp(0.5, 2.0)
+    # Gaussian envelope: peaks at n=_N_OPT, making n=20000 the dynamical fixed point
+    n_gauss = torch.exp(-0.5 * ((n.float() - _N_OPT) / _N_SIGMA) ** 2)
+    n_scale = (n_scale * n_gauss).clamp(0.5, 2.0)
 
     gain = (g_gain * A * (0.55 + 0.45 * rho) * std
             * (0.7 + 0.3 * ac)
@@ -705,6 +710,9 @@ def unified_step(
         std_i     = math.exp(-4.0 * sigma_i)
         n_steps_i = max(24.0, 24.0 + math.sqrt(n_i) * 1.2 + 18.0 * rho_i)
         n_scale_i = max(0.5, min(2.0, n_steps_i / _UMDST_N_BASELINE))
+        # Gaussian envelope: peaks at n_opt=20000, dynamical fixed point
+        n_gauss_i = math.exp(-0.5 * ((n_i - _N_OPT) / _N_SIGMA) ** 2)
+        n_scale_i = max(0.5, min(2.0, n_scale_i * n_gauss_i))
 
         gain_i = (gg * A_i * (0.55 + 0.45 * rho_i) * std_i
                   * (0.7 + 0.3 * ac_i)
