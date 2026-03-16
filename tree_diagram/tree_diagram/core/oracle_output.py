@@ -39,8 +39,27 @@ def oracle_summary_abstract(
             "nutrient_gain": best.nutrient_gain,
             "branch_status": best.branch_status,
         }
+        # Include weather physics fields if full_eval was used
+        if best.weather_score is not None:
+            best_worldline["weather_score"] = round(best.weather_score, 4)
+            best_worldline["weather_alignment"] = round(best.weather_alignment, 4)
+            best_worldline["final_balanced_score"] = round(best.final_balanced_score, 4)
 
     branch_histogram = branch_status_histogram(top_results)
+
+    # top_families: list of dicts for each top result (used by examples)
+    top_families = []
+    for r in top_results:
+        entry = {
+            "family": r.family,
+            "params": r.params,
+            "balanced_score": r.balanced_score,
+            "branch_status": r.branch_status,
+        }
+        if r.weather_score is not None:
+            entry["weather_score"] = round(r.weather_score, 4)
+            entry["final_balanced_score"] = round(r.final_balanced_score, 4)
+        top_families.append(entry)
 
     return {
         "mode": "abstract",
@@ -54,6 +73,7 @@ def oracle_summary_abstract(
         "hydro_control_state": hydro,
         "branch_histogram": branch_histogram,
         "total_evaluated": len(top_results),
+        "top_families": top_families,
     }
 
 
