@@ -20,7 +20,6 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 from ..core.worldline_kernel import EvaluationResult
-from ..core.umdst_kernel import Metrics
 
 
 # ---------------------------------------------------------------------------

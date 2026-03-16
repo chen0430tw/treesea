@@ -6,6 +6,9 @@ from ..core.background_inference import ProblemBackground, infer_problem_backgro
 from ..core.group_field import encode_group_field
 from ..core.worldline_kernel import EvaluationResult, run_tree_diagram
 from ..core.oracle_output import oracle_summary_abstract
+from ..vein.tri_vein_kernel import compute_tri_vein_batch, pareto_front, tri_vein_stats
+from ..vein.veinlet_experts import VeinletEnsemble
+from ..vein.vein_backbone import VeinBackbone
 
 
 class CandidatePipeline:
@@ -33,8 +36,8 @@ class CandidatePipeline:
         self.device   = device  # None = auto (cuda if available, else cpu)
 
     def run(self) -> Tuple[List[EvaluationResult], dict, dict]:
-        seed = self.seed
-        bg   = infer_problem_background(seed)
+        seed  = self.seed
+        bg    = infer_problem_background(seed)
         field = encode_group_field(seed)
 
         top_results, hydro = run_tree_diagram(
@@ -43,6 +46,30 @@ class CandidatePipeline:
             steps=self.steps, top_k=self.top_k, dt=self.dt,
             device=self.device,
         )
+
+        # ── Vein layer: tri-channel scoring + family-expert re-ranking ──────
+        tri_scores    = compute_tri_vein_batch(top_results)
+        ensemble      = VeinletEnsemble()
+        expert_scores = ensemble.score_all(tri_scores)
+
+        # Re-rank by expert-adjusted composite score
+        paired = sorted(
+            zip(top_results, expert_scores),
+            key=lambda x: x[1].adjusted,
+            reverse=True,
+        )
+        top_results = [r for r, _ in paired]
+
+        # Write expert-adjusted score back into final_balanced_score
+        for r, es in zip(top_results, [e for _, e in paired]):
+            r.final_balanced_score = round(es.adjusted, 6)
+
+        # Backbone: low-rank diversity-aware branch summary
+        backbone = VeinBackbone.from_results(top_results, top_k=min(8, len(top_results)))
+        hydro["vein_backbone"] = backbone.to_dict()
+        hydro["vein_stats"]    = tri_vein_stats(tri_scores)
+        hydro["vein_pareto_size"] = len(pareto_front(tri_scores))
+        # ────────────────────────────────────────────────────────────────────
 
         abstract_oracle = oracle_summary_abstract(seed, bg, field, top_results, hydro)
         return top_results, hydro, abstract_oracle
