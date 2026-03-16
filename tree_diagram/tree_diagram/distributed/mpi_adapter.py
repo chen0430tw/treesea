@@ -28,18 +28,46 @@ class MPIEnsembleRunner:
         size = comm.Get_size()
 
         if rank == 0:
-            # Scatter tasks
             chunks = [[] for _ in range(size)]
             for i, task in enumerate(tasks):
                 chunks[i % size].append(task)
         else:
             chunks = None
 
-        local_tasks = comm.scatter(chunks, root=0)
-        local_results = [fn(t) for t in local_tasks]
-        all_results = comm.gather(local_results, root=0)
+        try:
+            local_tasks = comm.scatter(chunks, root=0)
+        except Exception as exc:
+            raise RuntimeError(
+                f"[MPIEnsembleRunner] scatter failed on rank {rank}: {exc}"
+            ) from exc
+
+        local_results = []
+        errors: list = []
+        for t in local_tasks:
+            try:
+                local_results.append(fn(t))
+            except Exception as exc:
+                errors.append((t, repr(exc)))
+
+        if errors:
+            import warnings
+            for task, msg in errors:
+                warnings.warn(
+                    f"[MPIEnsembleRunner] rank {rank} task {task!r} failed: {msg}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+
+        try:
+            all_results = comm.gather(local_results, root=0)
+        except Exception as exc:
+            raise RuntimeError(
+                f"[MPIEnsembleRunner] gather failed on rank {rank}: {exc}"
+            ) from exc
 
         if rank == 0:
+            if all_results is None:
+                raise RuntimeError("[MPIEnsembleRunner] gather returned None on rank 0")
             merged: list = []
             for chunk in all_results:
                 merged.extend(chunk)
@@ -49,5 +77,11 @@ class MPIEnsembleRunner:
 
     def _run_pool(self, tasks: list, fn: Callable) -> list:
         import multiprocessing
-        with multiprocessing.Pool(processes=self.n_workers) as pool:
-            return pool.map(fn, tasks)
+        try:
+            with multiprocessing.Pool(processes=self.n_workers) as pool:
+                return pool.map(fn, tasks)
+        except Exception as exc:
+            raise RuntimeError(
+                f"[MPIEnsembleRunner] multiprocessing pool failed "
+                f"(n_workers={self.n_workers}): {exc}"
+            ) from exc

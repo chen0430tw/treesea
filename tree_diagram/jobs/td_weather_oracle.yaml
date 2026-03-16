@@ -1,1 +1,28 @@
-# Job definition placeholder: td_weather_oracle.yaml
+# Tree Diagram — deep oracle job (high-res + 3000 steps for oracle analysis)
+# Usage: python -m tree_diagram submit --job jobs/td_weather_oracle.yaml
+
+job:
+  name: td_weather_oracle
+
+slurm:
+  account: ENT114035
+  partition: normal2        # H200 for higher memory requirement
+  nodes: 1
+  gpus: 8
+  time: "06:00:00"
+  out_dir: /work/twsuday816/treesea/tree_diagram
+  work_dir: /work/twsuday816/treesea/tree_diagram
+
+# Inline profile (overrides any referenced config)
+profile:
+  NX: 512
+  NY: 384
+  steps: 3000
+  top_k: 20
+  device: cuda
+
+output:
+  path: /work/twsuday816/treesea/tree_diagram/td_result_oracle.json
+
+seed:
+  # title: "Deep Oracle Run"

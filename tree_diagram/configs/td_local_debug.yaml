@@ -1,1 +1,15 @@
-# Local debug config for Tree Diagram
+# Tree Diagram — local debug config (fast, small grid)
+# Usage: python -m tree_diagram run --config configs/td_local_debug.yaml
+
+profile:
+  NX: 32
+  NY: 24
+  steps: 30
+  top_k: 8
+  device: cpu
+
+output:
+  path: td_result_debug.json
+
+seed:
+  # title: "Debug Run"

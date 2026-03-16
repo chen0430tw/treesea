@@ -1,1 +1,15 @@
-# Job definition placeholder: td_single.yaml
+# Tree Diagram — single-node job definition
+# Usage: python -m tree_diagram submit --job jobs/td_single.yaml
+
+job:
+  name: td_single
+  config: configs/td_cluster.yaml   # inherit run config
+
+slurm:
+  account: ENT114035
+  partition: normal
+  nodes: 1
+  gpus: 8
+  time: "02:00:00"
+  out_dir: /work/twsuday816/treesea/tree_diagram
+  work_dir: /work/twsuday816/treesea/tree_diagram

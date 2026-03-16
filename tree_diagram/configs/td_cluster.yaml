@@ -1,1 +1,25 @@
-# Cluster config for Tree Diagram
+# Tree Diagram — HPC cluster run config
+# Usage: python -m tree_diagram submit --config configs/td_cluster.yaml
+
+profile:
+  NX: 512
+  NY: 384
+  steps: 1000
+  top_k: 20
+  device: cuda
+
+output:
+  path: /work/twsuday816/treesea/tree_diagram/td_result_cluster.json
+
+# Slurm job parameters
+slurm:
+  account: ENT114035
+  partition: normal
+  nodes: 1
+  gpus: 8
+  time: "02:00:00"
+  out_dir: /work/twsuday816/treesea/tree_diagram
+  work_dir: /work/twsuday816/treesea/tree_diagram
+
+seed:
+  # title: "Cluster Run"

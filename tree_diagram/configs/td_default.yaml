@@ -1,1 +1,16 @@
-# Default config for Tree Diagram
+# Tree Diagram — default run config
+# Usage: python -m tree_diagram run --config configs/td_default.yaml
+
+profile:
+  NX: 128
+  NY: 96
+  steps: 300
+  top_k: 12
+  device: null          # null = auto-detect (cuda if available, else cpu)
+
+output:
+  path: td_result_default.json
+
+# Optional seed overrides (omit any field to use built-in default)
+seed:
+  # title: "Custom Problem Title"

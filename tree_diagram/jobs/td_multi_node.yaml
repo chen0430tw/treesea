@@ -1,1 +1,15 @@
-# Job definition placeholder: td_multi_node.yaml
+# Tree Diagram — multi-node job definition (2×H100, normal partition)
+# Usage: python -m tree_diagram submit --job jobs/td_multi_node.yaml
+
+job:
+  name: td_multi_node
+  config: configs/td_cluster.yaml
+
+slurm:
+  account: ENT114035
+  partition: normal
+  nodes: 2
+  gpus: 8
+  time: "04:00:00"
+  out_dir: /work/twsuday816/treesea/tree_diagram
+  work_dir: /work/twsuday816/treesea/tree_diagram

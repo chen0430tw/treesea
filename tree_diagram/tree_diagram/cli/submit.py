@@ -5,6 +5,8 @@ Usage:
     python -m tree_diagram submit [OPTIONS]
 
 Options:
+    --config    YAML config file (configs/td_*.yaml)
+    --job       Job definition YAML (jobs/td_*.yaml) — includes Slurm params
     --profile   quick | default | cluster | deep  (default: cluster)
     --account   Slurm account  (default: ENT114035)
     --partition normal | normal2  (default: normal)
@@ -15,6 +17,8 @@ Options:
     --dry-run   Print script only, do not submit
     --title     Problem title override
     --top-k     Override top_k from profile
+
+Note: CLI flags take precedence over --job / --config values.
 """
 from __future__ import annotations
 import argparse
@@ -58,23 +62,27 @@ def main(argv=None):
         prog="tree-diagram submit",
         description="Generate and submit a Slurm job for Tree Diagram",
     )
-    parser.add_argument("--profile",   default="cluster",
+    parser.add_argument("--config",    default=None,
+                        help="YAML config file (configs/td_*.yaml)")
+    parser.add_argument("--job",       default=None,
+                        help="Job definition YAML (jobs/td_*.yaml)")
+    parser.add_argument("--profile",   default=None,
                         choices=["quick", "default", "cluster", "deep"],
                         help="Compute profile (default: cluster)")
-    parser.add_argument("--account",   default="ENT114035",
-                        help="Slurm account (default: ENT114035)")
-    parser.add_argument("--partition", default="normal",
+    parser.add_argument("--account",   default=None,
+                        help="Slurm account")
+    parser.add_argument("--partition", default=None,
                         choices=["normal", "normal2"],
-                        help="Slurm partition (default: normal)")
-    parser.add_argument("--nodes",     type=int, default=1,
-                        help="Number of nodes (default: 1)")
-    parser.add_argument("--gpus",      type=int, default=8,
-                        help="GPUs per node (default: 8)")
-    parser.add_argument("--time",      default="02:00:00",
-                        help="Wall-clock limit (default: 02:00:00)")
-    parser.add_argument("--out-dir",   default="/work/twsuday816/treesea/tree_diagram",
+                        help="Slurm partition")
+    parser.add_argument("--nodes",     type=int, default=None,
+                        help="Number of nodes")
+    parser.add_argument("--gpus",      type=int, default=None,
+                        help="GPUs per node")
+    parser.add_argument("--time",      default=None,
+                        help="Wall-clock limit")
+    parser.add_argument("--out-dir",   default=None,
                         help="Output directory on cluster")
-    parser.add_argument("--work-dir",  default="/work/twsuday816/treesea/tree_diagram",
+    parser.add_argument("--work-dir",  default=None,
                         help="Working directory on cluster")
     parser.add_argument("--dry-run",   action="store_true",
                         help="Print script only, do not submit")
@@ -84,22 +92,53 @@ def main(argv=None):
                         help="Override top_k from profile")
     args = parser.parse_args(argv)
 
+    # --- Load YAML (job file takes priority over config file) ---
+    cfg_slurm:   dict = {}
+    cfg_profile_name: str | None = None
+    cfg_title:   str | None = None
+    yaml_source = args.job or args.config
+    if yaml_source:
+        from ..io.input_loader import load_run_config
+        cfg = load_run_config(yaml_source)
+        cfg_slurm        = cfg.get("slurm") or {}
+        cfg_profile_name = (cfg.get("profile") or {}).get("name")
+        cfg_title        = (cfg.get("seed") or {}).get("title")
+
+    # --- Resolve each parameter: CLI > YAML > hardcoded default ---
+    def _resolve(cli_val, yaml_val, default):
+        if cli_val is not None:
+            return cli_val
+        if yaml_val is not None:
+            return yaml_val
+        return default
+
+    _DEFAULT_DIR = "/work/twsuday816/treesea/tree_diagram"
+    profile   = _resolve(args.profile,   cfg_profile_name,               "cluster")
+    account   = _resolve(args.account,   cfg_slurm.get("account"),       "ENT114035")
+    partition = _resolve(args.partition, cfg_slurm.get("partition"),      "normal")
+    nodes     = _resolve(args.nodes,     cfg_slurm.get("nodes"),         1)
+    gpus      = _resolve(args.gpus,      cfg_slurm.get("gpus"),          8)
+    wall_time = _resolve(args.time,      cfg_slurm.get("time"),          "02:00:00")
+    out_dir   = _resolve(args.out_dir,   cfg_slurm.get("out_dir"),       _DEFAULT_DIR)
+    work_dir  = _resolve(args.work_dir,  cfg_slurm.get("work_dir"),      _DEFAULT_DIR)
+    title     = _resolve(args.title,     cfg_title,                      None)
+
     extra_parts = []
-    if args.title:
-        extra_parts.append(f'--title "{args.title}"')
+    if title:
+        extra_parts.append(f'--title "{title}"')
     if args.top_k is not None:
         extra_parts.append(f"--top-k {args.top_k}")
     extra_args = " \\\n    ".join(extra_parts)
 
     script = _SCRIPT_TEMPLATE.format(
-        profile=args.profile,
-        account=args.account,
-        partition=args.partition,
-        nodes=args.nodes,
-        gpus=args.gpus,
-        time=args.time,
-        out_dir=args.out_dir,
-        work_dir=args.work_dir,
+        profile=profile,
+        account=account,
+        partition=partition,
+        nodes=nodes,
+        gpus=gpus,
+        time=wall_time,
+        out_dir=out_dir,
+        work_dir=work_dir,
         extra_args=extra_args,
     )
 
@@ -125,7 +164,7 @@ def main(argv=None):
         job_id = result.stdout.strip().split()[-1]
         print(f"[td-submit] submitted job {job_id}")
         print(f"[td-submit] monitor: squeue -j {job_id}")
-        print(f"[td-submit] output:  tail -f {args.out_dir}/td_{args.profile}_{job_id}.out")
+        print(f"[td-submit] output:  tail -f {out_dir}/td_{profile}_{job_id}.out")
     except FileNotFoundError:
         print("[td-submit] sbatch not found — run this on the cluster login node")
         print(f"[td-submit] script saved to {tmp_path}")

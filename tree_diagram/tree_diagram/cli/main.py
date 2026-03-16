@@ -1,14 +1,16 @@
 """tree-diagram  — main CLI entry point.
 
 Subcommands:
-    run     Run pipeline locally (login node or workstation)
-    submit  Generate + submit a Slurm job
+    run      Run pipeline locally (login node or workstation)
+    submit   Generate + submit a Slurm job
     profiles List available compute profiles
+    inspect  Display and summarise a result JSON file
 
 Usage:
     python -m tree_diagram run --profile cluster
     python -m tree_diagram submit --profile cluster --dry-run
     python -m tree_diagram profiles
+    python -m tree_diagram inspect td_result_cluster.json
 """
 from __future__ import annotations
 import sys
@@ -30,6 +32,10 @@ def main(argv=None):
     elif sub == "submit":
         from .submit import main as submit_main
         return submit_main(args[1:])
+
+    elif sub == "inspect":
+        from .inspect import main as inspect_main
+        return inspect_main(args[1:])
 
     elif sub == "profiles":
         from .profiles import PROFILES
