@@ -3,385 +3,1086 @@ import itertools
 import math
 from dataclasses import dataclass
 from typing import Dict, List, Optional
+import numpy as np
+
+try:
+    import torch
+    _TORCH_OK = True
+except ImportError:
+    _TORCH_OK = False
 
 from .problem_seed import ProblemSeed
 from .background_inference import ProblemBackground
 
+# ---------------------------------------------------------------------------
+# Physics constants
+# ---------------------------------------------------------------------------
+BASE_H = 5400.0
+G      = 9.81
+F0     = 8.0e-5
+CP     = 1004.0
+LV     = 2.5e6
+DX     = 12000.0
+DY     = 12000.0
 
+# ---------------------------------------------------------------------------
+# Per-family UMDST coefficients  (gain, precision, coupling, stress, decay)
+# Source: umdst_v03 family_coeffs; atmosphere families mapped to analogs.
+# ---------------------------------------------------------------------------
+_FAMILY_COEFFS: Dict[str, tuple] = {
+    "batch":       (0.060, 0.020, 0.026, 0.018, 0.008),
+    "network":     (0.052, 0.016, 0.032, 0.021, 0.010),
+    "phase":       (0.050, 0.018, 0.020, 0.022, 0.010),
+    "electrical":  (0.044, 0.030, 0.016, 0.040, 0.016),
+    "ascetic":     (0.030, 0.022, 0.014, 0.012, 0.006),
+    "hybrid":      (0.055, 0.014, 0.024, 0.035, 0.018),
+    "composite":   (0.055, 0.014, 0.024, 0.035, 0.018),
+    # Atmosphere families → closest subject analog
+    "weak_mix":    (0.045, 0.015, 0.018, 0.025, 0.012),   # default (gentle)
+    "balanced":    (0.050, 0.018, 0.020, 0.022, 0.010),   # phase-like
+    "high_mix":    (0.055, 0.014, 0.024, 0.035, 0.018),   # hybrid-like
+    "humid_bias":  (0.052, 0.016, 0.032, 0.021, 0.010),   # network-like
+    "strong_pg":   (0.060, 0.020, 0.026, 0.018, 0.008),   # batch-like
+    "terrain_lock":(0.044, 0.030, 0.016, 0.040, 0.016),   # electrical-like
+}
+_FAMILY_COEFFS_DEFAULT = (0.045, 0.015, 0.018, 0.025, 0.012)
+
+# Gain modifier group per family:
+#   0 = batch      1+0.16*sigmoid(10*(phase-0.55))
+#   1 = phase      1+0.10*progress
+#   2 = hybrid     1+0.12*sin(progress*pi)
+#   3 = electrical 0.92+0.10*sin(progress*2pi)
+#   4 = network    0.98+0.10*sigmoid(8*(ac-0.65))
+#   5 = ascetic    0.82+0.20*progress
+_FAMILY_MOD_GROUP: Dict[str, int] = {
+    "batch": 0, "strong_pg": 0, "balanced": 0, "high_mix": 0,
+    "phase": 1, "humid_bias": 1,
+    "hybrid": 2, "composite": 2,
+    "electrical": 3, "terrain_lock": 3,
+    "network": 4,
+    "ascetic": 5, "weak_mix": 5,
+}
+
+_UMDST_N_BASELINE = 183.0   # steps for n=15000, rho=0.7 (neutral point)
+
+
+# ---------------------------------------------------------------------------
+# NumPy grid engine
+# ---------------------------------------------------------------------------
+class _GridEngine:
+    def lap(self, f, dx, dy):
+        return ((np.roll(f,-1,-2)-2*f+np.roll(f,1,-2))/dy**2
+              + (np.roll(f,-1,-1)-2*f+np.roll(f,1,-1))/dx**2)
+
+    def grad_x(self, f, dx):
+        return (np.roll(f,-1,-1) - np.roll(f,1,-1)) / (2*dx)
+
+    def grad_y(self, f, dy):
+        return (np.roll(f,-1,-2) - np.roll(f,1,-2)) / (2*dy)
+
+    def smooth(self, f, alpha=0.06):
+        return ((1-alpha)*f
+                + alpha*(np.roll(f,1,-2)+np.roll(f,-1,-2)
+                        +np.roll(f,1,-1)+np.roll(f,-1,-1))/4)
+
+    def bilinear_sample(self, field, px, py):
+        px = np.clip(px, 0.0, field.shape[-1]-1.001)
+        py = np.clip(py, 0.0, field.shape[-2]-1.001)
+        x0 = np.floor(px).astype(int); y0 = np.floor(py).astype(int)
+        x1 = np.clip(x0+1, 0, field.shape[-1]-1)
+        y1 = np.clip(y0+1, 0, field.shape[-2]-1)
+        wx = px-x0; wy = py-y0
+        b = np.arange(field.shape[0])[:,None,None]
+        return ((1-wx)*(1-wy)*field[b,y0,x0] + wx*(1-wy)*field[b,y0,x1]
+              + (1-wx)*wy*field[b,y1,x0] + wx*wy*field[b,y1,x1])
+
+    def semi_lagrangian(self, field, u, v, dx, dy, dt):
+        H, W = field.shape[-2], field.shape[-1]
+        jj, ii = np.meshgrid(np.arange(H), np.arange(W), indexing='ij')
+        dep_x = ii[None] - u*dt/dx
+        dep_y = jj[None] - v*dt/dy
+        return self.bilinear_sample(field, dep_x, dep_y)
+
+
+# ---------------------------------------------------------------------------
+# Torch grid engine
+# ---------------------------------------------------------------------------
+class _TorchGridEngine:
+    def lap(self, f, dx, dy):
+        return ((torch.roll(f,-1,-2)-2*f+torch.roll(f,1,-2))/dy**2
+              + (torch.roll(f,-1,-1)-2*f+torch.roll(f,1,-1))/dx**2)
+
+    def grad_x(self, f, dx):
+        return (torch.roll(f,-1,-1) - torch.roll(f,1,-1)) / (2*dx)
+
+    def grad_y(self, f, dy):
+        return (torch.roll(f,-1,-2) - torch.roll(f,1,-2)) / (2*dy)
+
+    def smooth(self, f, alpha=0.06):
+        return ((1-alpha)*f
+                + alpha*(torch.roll(f,1,-2)+torch.roll(f,-1,-2)
+                        +torch.roll(f,1,-1)+torch.roll(f,-1,-1))/4)
+
+    def bilinear_sample(self, field, px, py):
+        W = field.shape[-1]; H = field.shape[-2]
+        px = px.clamp(0.0, W - 1.001)
+        py = py.clamp(0.0, H - 1.001)
+        x0 = px.long(); y0 = py.long()
+        x1 = (x0 + 1).clamp(0, W - 1)
+        y1 = (y0 + 1).clamp(0, H - 1)
+        wx = (px - x0.to(px.dtype))
+        wy = (py - y0.to(py.dtype))
+        b  = torch.arange(field.shape[0], device=field.device)[:, None, None]
+        return ((1-wx)*(1-wy)*field[b,y0,x0] + wx*(1-wy)*field[b,y0,x1]
+              + (1-wx)*wy*field[b,y1,x0] + wx*wy*field[b,y1,x1])
+
+    def semi_lagrangian(self, field, u, v, dx, dy, dt):
+        H, W = field.shape[-2], field.shape[-1]
+        dev  = field.device
+        jj = torch.arange(H, device=dev, dtype=field.dtype)
+        ii = torch.arange(W, device=dev, dtype=field.dtype)
+        jj, ii = torch.meshgrid(jj, ii, indexing='ij')
+        dep_x = ii[None] - u * dt / dx
+        dep_y = jj[None] - v * dt / dy
+        return self.bilinear_sample(field, dep_x, dep_y)
+
+
+_ENG       = _GridEngine()
+_TORCH_ENG = _TorchGridEngine() if _TORCH_OK else None
+_COORD_CACHE: dict = {}
+
+
+def _get_coords(NY: int, NX: int):
+    key = (NY, NX)
+    if key not in _COORD_CACHE:
+        x = np.linspace(-1.0, 1.0, NX)
+        y = np.linspace(-1.0, 1.0, NY)
+        _COORD_CACHE[key] = np.meshgrid(x, y)
+    return _COORD_CACHE[key]
+
+
+# ---------------------------------------------------------------------------
+# Vectorised UMDST 1-step — Torch/GPU path
+#
+# Now uses per-family (g_gain, g_prec, g_coup, g_stress) coefficient tensors
+# and per-family gain modifier determined by mod_group.
+# ---------------------------------------------------------------------------
+def _umdst_batched_step(
+    output_power,   # (B,)
+    load_tol,       # (B,)
+    ac,             # (B,) aim_coupling
+    stress,         # (B,)
+    phase,          # (B,)
+    md,             # (B,) marginal_decay
+    instab,         # (B,)
+    A,              # (B,)
+    rho,            # (B,)
+    sigma,          # (B,)
+    n,              # (B,)
+    g_gain,         # (B,) per-family gain coefficient
+    g_prec,         # (B,) per-family precision coefficient
+    g_coup,         # (B,) per-family coupling coefficient
+    g_stress,       # (B,) per-family stress coefficient
+    progress: float,  # scalar 0.0–1.0
+    mod_group,        # (B,) int tensor, 0–5
+):
+    """Vectorised UMDST 1-step. Returns (new_phase, new_stress, new_instab)."""
+    std    = torch.exp(-4.0 * sigma)
+    n_steps = (24.0 + torch.sqrt(n.float()) * 1.2 + 18.0 * rho).clamp(min=24.0)
+    n_scale = (n_steps / _UMDST_N_BASELINE).clamp(0.5, 2.0)
+
+    gain = (g_gain * A * (0.55 + 0.45 * rho) * std
+            * (0.7 + 0.3 * ac)
+            * torch.exp(-1.8 * md)
+            * (1.0 - 0.35 * stress)
+            * n_scale)
+    precision_gain = g_prec * A * (1.0 - 0.4 * sigma) * (1.0 - 0.35 * stress)
+    coupling_gain  = g_coup * A * std * (0.8 + 0.2 * output_power)
+
+    # Per-family gain modifier (6 groups)
+    _pi = math.pi
+    m0 = 1.0 + 0.16 * torch.sigmoid(10.0 * (phase - 0.55))      # batch
+    m1 = 1.0 + 0.10 * progress                                    # phase-linear
+    m2 = 1.0 + 0.12 * math.sin(progress * _pi)                   # hybrid-sin
+    m3 = 0.92 + 0.10 * math.sin(progress * 2.0 * _pi)            # electrical
+    m4 = 0.98 + 0.10 * torch.sigmoid(8.0 * (ac - 0.65))          # network
+    m5 = 0.82 + 0.20 * progress                                   # ascetic
+
+    mg = mod_group
+    modifier = ((mg == 0).float() * m0
+              + (mg == 1).float() * m1
+              + (mg == 2).float() * m2
+              + (mg == 3).float() * m3
+              + (mg == 4).float() * m4
+              + (mg == 5).float() * m5)
+    gain = gain * modifier
+
+    stress_up        = g_stress * A * (0.8 + 0.4 * rho) * (0.55 + 0.45 * sigma)
+    stress_down      = 0.010 + 0.014 * load_tol
+    instability_up   = 0.012 * A + 0.010 * sigma + 0.014 * stress
+    instability_down = 0.008 * load_tol
+
+    new_phase  = (phase  + gain
+                  + 0.20 * precision_gain + 0.16 * coupling_gain
+                  - 0.05 * instab - 0.04 * stress).clamp(0.0, 1.0)
+    new_stress = (stress + stress_up - stress_down).clamp(0.0, 1.0)
+    new_instab = (instab + instability_up - instability_down).clamp(0.0, 1.0)
+    return new_phase, new_stress, new_instab
+
+
+# ---------------------------------------------------------------------------
+# Data structures
+# ---------------------------------------------------------------------------
 @dataclass
-class CandidateWorldline:
-    family: str
-    template: str
-    params: Dict[str, float]
-    description: str
+class UnifiedState:
+    """Full state for all B candidates simultaneously."""
+    h:   object   # (B, H, W)
+    T:   object   # (B, H, W)
+    q:   object   # (B, H, W)
+    u:   object   # (B, H, W)
+    v:   object   # (B, H, W)
+    phase:       object   # (B,)
+    stress:      object   # (B,)
+    instability: object   # (B,)
+    obs_h:      object   # (H, W)
+    obs_T:      object   # (H, W)
+    obs_q:      object   # (H, W)
+    obs_u:      object   # (H, W)
+    obs_v:      object   # (H, W)
+    topography: object   # (H, W)
 
 
 @dataclass
 class EvaluationResult:
-    family: str
-    template: str
-    params: Dict[str, float]
-    feasibility: float
-    stability: float
-    field_fit: float
-    risk: float
-    balanced_score: float
-    nutrient_gain: float
-    branch_status: str
+    family:          str
+    template:        str
+    params:          Dict
+    feasibility:     float
+    stability:       float
+    field_fit:       float
+    risk:            float
+    balanced_score:  float
+    nutrient_gain:   float
+    branch_status:   str
+    weather_score:         Optional[float] = None
+    weather_alignment:     Optional[float] = None
+    final_balanced_score:  Optional[float] = None
 
 
 # ---------------------------------------------------------------------------
-# Family-specific parameter space
+# Candidate generation — unified pool, no plan/weather split
 # ---------------------------------------------------------------------------
-
-# City-scale anchor points for large-n batch family.
-# These represent realistic population/iteration scales for Academy City
-# (2.3M esper network; experiments in the thousands to hundreds of thousands).
-_BATCH_LARGE_N_ANCHORS: list = [
-    500, 1000, 2000, 5000, 10000, 15000, 20000, 30000, 50000, 100000
-]
-
-_FAMILY_PARAMS: Dict[str, Dict[str, list]] = {
-    "batch": {
-        "n":    [3, 5, 7],
-        "rho":  [0.4, 0.6, 0.8],
-        "A":    [0.5, 0.7],
-        "sigma":[0.2, 0.4],
+_CANDIDATE_SPECS: Dict = {
+    "batch":      {
+        "n":[12000,18000,20000,24000], "rho":[0.5,1.0], "A":[0.7,0.9], "sigma":[0.01,0.03],
+        "Kh":360.0, "Kt":180.0, "Kq":130.0, "drag":1.5e-5,
+        "humid_couple":1.00, "nudging":1.6e-4, "pg_scale":1.00,
     },
-    "network": {
-        "n":    [4, 6, 8],
-        "rho":  [0.5, 0.7, 0.9],
-        "A":    [0.6, 0.8],
-        "sigma":[0.1, 0.3],
+    "network":    {
+        "n":[10000,16000,20000], "rho":[0.8,1.0], "A":[0.6,0.8], "sigma":[0.02],
+        "Kh":300.0, "Kt":150.0, "Kq":125.0, "drag":1.2e-5,
+        "humid_couple":0.95, "nudging":1.5e-4, "pg_scale":1.00,
     },
-    "phase": {
-        "n":    [2, 4, 6],
-        "rho":  [0.3, 0.5, 0.7],
-        "A":    [0.4, 0.6],
-        "sigma":[0.3, 0.5],
+    "phase":      {
+        "n":[10000,18000], "rho":[0.5,1.0], "A":[0.6,0.75], "sigma":[0.04],
+        "Kh":330.0, "Kt":170.0, "Kq":135.0, "drag":1.6e-5,
+        "humid_couple":1.02, "nudging":1.5e-4, "pg_scale":1.04,
     },
     "electrical": {
-        "n":    [5, 7, 9],
-        "rho":  [0.6, 0.8, 1.0],
-        "A":    [0.7, 0.9],
-        "sigma":[0.1, 0.2],
+        "n":[10000,16000,20000], "rho":[0.6,1.0], "A":[0.7], "sigma":[0.05],
+        "Kh":240.0, "Kt":120.0, "Kq":95.0, "drag":1.2e-5,
+        "humid_couple":0.80, "nudging":1.4e-4, "pg_scale":1.00,
     },
-    "ascetic": {
-        "n":    [1, 2, 3],
-        "rho":  [0.2, 0.3, 0.4],
-        "A":    [0.3, 0.4],
-        "sigma":[0.5, 0.7],
+    "ascetic":    {
+        "n":[10000,20000], "rho":[0.2,0.4], "A":[0.4,0.55], "sigma":[0.03],
+        "Kh":240.0, "Kt":120.0, "Kq":95.0, "drag":1.2e-5,
+        "humid_couple":0.80, "nudging":1.4e-4, "pg_scale":1.00,
     },
-    "hybrid": {
-        "n":    [4, 6, 8],
-        "rho":  [0.4, 0.6, 0.8],
-        "A":    [0.5, 0.7],
-        "sigma":[0.2, 0.4],
+    "hybrid":     {
+        "n":[14000,18000,22000], "rho":[0.7,1.0], "A":[0.75], "sigma":[0.08],
+        "Kh":520.0, "Kt":260.0, "Kq":180.0, "drag":1.8e-5,
+        "humid_couple":1.05, "nudging":1.7e-4, "pg_scale":1.00,
     },
-    "composite": {
-        "n":    [6, 8, 10],
-        "rho":  [0.5, 0.7, 0.9],
-        "A":    [0.6, 0.8],
-        "sigma":[0.1, 0.3],
+    "composite":  {
+        "n":[18000,22000], "rho":[0.8,1.0], "A":[0.8], "sigma":[0.04],
+        "Kh":340.0, "Kt":175.0, "Kq":220.0, "drag":1.5e-5,
+        "humid_couple":1.24, "nudging":1.6e-4, "pg_scale":1.00,
+    },
+    "weak_mix":    {
+        "n":[12000,16000], "rho":[0.5,0.7], "A":[0.6,0.7], "sigma":[0.03,0.05],
+        "Kh":240.0, "Kt":120.0, "Kq":95.0, "drag":1.2e-5,
+        "humid_couple":0.80, "nudging":1.4e-4, "pg_scale":1.00,
+    },
+    "balanced":    {
+        "n":[14000,18000], "rho":[0.6,0.8], "A":[0.65,0.75], "sigma":[0.03,0.05],
+        "Kh":360.0, "Kt":180.0, "Kq":130.0, "drag":1.5e-5,
+        "humid_couple":1.00, "nudging":1.6e-4, "pg_scale":1.00,
+    },
+    "high_mix":    {
+        "n":[16000,20000], "rho":[0.7,1.0], "A":[0.7,0.85], "sigma":[0.02,0.04],
+        "Kh":520.0, "Kt":260.0, "Kq":180.0, "drag":1.8e-5,
+        "humid_couple":1.05, "nudging":1.7e-4, "pg_scale":1.00,
+    },
+    "humid_bias":  {
+        "n":[14000,18000], "rho":[0.6,0.8], "A":[0.65,0.75], "sigma":[0.03,0.05],
+        "Kh":340.0, "Kt":175.0, "Kq":220.0, "drag":1.5e-5,
+        "humid_couple":1.24, "nudging":1.6e-4, "pg_scale":1.00,
+    },
+    "strong_pg":   {
+        "n":[12000,16000], "rho":[0.5,0.7], "A":[0.6,0.7], "sigma":[0.03,0.05],
+        "Kh":300.0, "Kt":150.0, "Kq":125.0, "drag":1.2e-5,
+        "humid_couple":0.95, "nudging":1.5e-4, "pg_scale":1.18,
+    },
+    "terrain_lock":{
+        "n":[12000,16000], "rho":[0.5,0.8], "A":[0.6,0.75], "sigma":[0.03,0.05],
+        "Kh":330.0, "Kt":170.0, "Kq":135.0, "drag":1.6e-5,
+        "humid_couple":1.02, "nudging":1.5e-4, "pg_scale":1.04,
     },
 }
 
 
-def _batch_n_opt(seed: ProblemSeed) -> float:
-    """Optimal iteration count for large-n batch family via resonance locking.
+def generate_candidates(seed: ProblemSeed, bg: ProblemBackground) -> list:
+    """Build a flat list of candidates, each with ALL parameters fully specified."""
+    ac = float(seed.subject.get("aim_coupling", 0.9))
+    md = float(seed.subject.get("marginal_decay", 0.1))
+    out = []
+    for fam in bg.candidate_families:
+        spec = _CANDIDATE_SPECS.get(fam, _CANDIDATE_SPECS["batch"])
+        var_keys = [k for k, v in spec.items() if isinstance(v, list)]
+        fix_keys = [k for k, v in spec.items() if not isinstance(v, list)]
+        for combo in itertools.product(*[spec[k] for k in var_keys]):
+            p = dict(zip(var_keys, (float(v) for v in combo)))
+            for k in fix_keys:
+                p[k] = float(spec[k])
+            p["aim_coupling"]   = ac
+            p["marginal_decay"] = md
+            out.append({"family": fam, "template": f"{fam}_route", "params": p})
+    return out
 
-    Physical model: to lock a population-coupled resonance across a low-noise
-    city field, the minimum viable iteration count satisfies
 
-        n_opt = (C × ρ_net × α_aim) / (δ² × (1 − ρ_pop) × η_noise)
+def prepare_candidate_arrays(candidates: list) -> dict:
+    """Return numpy dict of per-candidate parameter arrays, including UMDST coefficients."""
+    all_keys: set = set()
+    for c in candidates:
+        all_keys.update(c["params"].keys())
+    carr: dict = {"family": np.array([c["family"] for c in candidates], dtype=object)}
+    for k in sorted(all_keys):
+        carr[k] = np.array([c["params"].get(k, 0.0) for c in candidates], dtype=np.float64)
 
-    where:
-        C        = data_coverage  — required pattern-space completeness
-        ρ_net    = network_density — ambient network connectivity
-        α_aim    = aim_coupling   — precision of per-iteration targeting
-        δ        = marginal_decay — per-iteration marginal gain rate
-        ρ_pop    = population_coupling — group field coherence (→1 ⇒ more iters)
-        η_noise  = field_noise    — environment precision (low noise ⇒ fine-grained
-                                    patterns ⇒ more samples needed for full coverage)
+    # Per-family UMDST coefficient arrays
+    _dc = _FAMILY_COEFFS_DEFAULT
+    carr["g_gain"]    = np.array([_FAMILY_COEFFS.get(c["family"], _dc)[0] for c in candidates], dtype=np.float32)
+    carr["g_prec"]    = np.array([_FAMILY_COEFFS.get(c["family"], _dc)[1] for c in candidates], dtype=np.float32)
+    carr["g_coup"]    = np.array([_FAMILY_COEFFS.get(c["family"], _dc)[2] for c in candidates], dtype=np.float32)
+    carr["g_stress"]  = np.array([_FAMILY_COEFFS.get(c["family"], _dc)[3] for c in candidates], dtype=np.float32)
+    carr["mod_group"] = np.array([_FAMILY_MOD_GROUP.get(c["family"], 0) for c in candidates], dtype=np.int32)
+    return carr
+
+
+# ---------------------------------------------------------------------------
+# Initial state encoder (always numpy — cheap, runs once)
+# ---------------------------------------------------------------------------
+def encode_initial_state(
+    seed: ProblemSeed,
+    candidates: list,
+    NX: int = 28,
+    NY: int = 21,
+) -> UnifiedState:
+    XX, YY = _get_coords(NY, NX)
+
+    topo = (1400.0*np.exp(-7.0*((XX+0.36)**2+(YY-0.06)**2))
+           +  720.0*np.exp(-10.5*((XX-0.18)**2+(YY+0.24)**2))
+           +  350.0*np.exp(-14.0*((XX+0.05)**2+(YY+0.28)**2)))
+
+    obs_h = np.clip(BASE_H+200*np.exp(-6.8*((XX+0.18)**2+(YY+0.10)**2))
+                   -150*np.exp(-8.0*((XX-0.28)**2+(YY-0.14)**2))-0.23*topo,
+                   BASE_H-500, BASE_H+500)
+    obs_T = np.clip(289.0+7.5*np.exp(-8.2*((XX+0.16)**2+(YY+0.11)**2))
+                   -5.8*np.exp(-8.8*((XX-0.24)**2+(YY-0.17)**2))-0.0038*topo
+                   +0.8*np.sin(1.2*np.pi*XX)*np.cos(0.8*np.pi*YY), 250.0, 320.0)
+    obs_q = np.clip(0.010+0.011*np.exp(-7.6*((XX-0.10)**2+(YY+0.21)**2))
+                   +0.0016*np.sin(np.pi*YY), 1e-5, 0.030)
+    obs_u = 12.0*np.sin(0.9*np.pi*YY)*np.cos(0.8*np.pi*XX)
+    obs_v = -8.5*np.sin(0.8*np.pi*XX)*np.cos(0.9*np.pi*YY)
+
+    env  = seed.environment
+    subj = seed.subject
+    res  = seed.resources
+    pc   = float(res.get("population_coupling", 0.5))
+    dc   = float(res.get("data_coverage", 0.5))
+    primary   = float(np.clip(
+        0.42*subj.get("aim_coupling",0.9)+0.18*subj.get("control_precision",0.8)
+        +0.12*subj.get("phase_proximity",0.7)+0.18*pc+0.06*dc
+        -0.14*env.get("field_noise",0.3)-0.08*env.get("phase_instability",0.4),
+        0.0, 1.0))
+    secondary = float(np.clip(
+        0.60*env.get("network_density",0.7)+0.20*env.get("infrastructure",0.7)+0.20*dc,
+        0.0, 1.0))
+    tertiary  = float(np.clip(
+        0.75*env.get("phase_instability",0.4)+0.25*env.get("field_noise",0.3),
+        0.0, 1.0))
+
+    plan_h = np.full((NY, NX), BASE_H - 350.0 + 700.0 * primary)
+    plan_T = np.full((NY, NX), 265.0 + 50.0 * secondary)
+    plan_q = np.full((NY, NX), 1e-5 + 0.024 * tertiary)
+    plan_u = np.zeros((NY, NX))
+    plan_v = np.zeros((NY, NX))
+
+    init_phase  = float(subj.get("phase_proximity", 0.7))
+    init_stress = float(subj.get("stress_level", 0.2))
+    init_instab = float(subj.get("instability_sensitivity", 0.28))
+
+    B = len(candidates)
+    h_arr = np.empty((B, NY, NX), dtype=np.float32)
+    T_arr = np.empty((B, NY, NX), dtype=np.float32)
+    q_arr = np.empty((B, NY, NX), dtype=np.float32)
+    u_arr = np.empty((B, NY, NX), dtype=np.float32)
+    v_arr = np.empty((B, NY, NX), dtype=np.float32)
+    phase_arr  = np.empty(B, dtype=np.float32)
+    stress_arr = np.empty(B, dtype=np.float32)
+    instab_arr = np.empty(B, dtype=np.float32)
+
+    # All candidates receive the same seed-derived IC.
+    h_arr[:]      = plan_h[None]
+    T_arr[:]      = plan_T[None]
+    q_arr[:]      = plan_q[None]
+    u_arr[:]      = plan_u[None]
+    v_arr[:]      = plan_v[None]
+    phase_arr[:]  = init_phase
+    stress_arr[:] = init_stress
+    instab_arr[:] = init_instab
+
+    return UnifiedState(
+        h=h_arr, T=T_arr, q=q_arr, u=u_arr, v=v_arr,
+        phase=phase_arr, stress=stress_arr, instability=instab_arr,
+        obs_h=obs_h.astype(np.float32), obs_T=obs_T.astype(np.float32),
+        obs_q=obs_q.astype(np.float32), obs_u=obs_u.astype(np.float32),
+        obs_v=obs_v.astype(np.float32), topography=topo.astype(np.float32),
+    )
+
+
+# ---------------------------------------------------------------------------
+# NumPy ↔ Torch conversion helpers
+# ---------------------------------------------------------------------------
+def _state_to_torch(state: UnifiedState, device: str) -> UnifiedState:
+    def t(arr):
+        return torch.as_tensor(arr, dtype=torch.float32, device=device)
+    return UnifiedState(
+        h=t(state.h), T=t(state.T), q=t(state.q),
+        u=t(state.u), v=t(state.v),
+        phase=t(state.phase), stress=t(state.stress), instability=t(state.instability),
+        obs_h=t(state.obs_h), obs_T=t(state.obs_T), obs_q=t(state.obs_q),
+        obs_u=t(state.obs_u), obs_v=t(state.obs_v),
+        topography=t(state.topography),
+    )
+
+
+def _state_to_numpy(state: UnifiedState) -> UnifiedState:
+    def n(arr):
+        if _TORCH_OK and isinstance(arr, torch.Tensor):
+            return arr.cpu().float().numpy()
+        return np.asarray(arr, dtype=np.float32)
+    return UnifiedState(
+        h=n(state.h), T=n(state.T), q=n(state.q),
+        u=n(state.u), v=n(state.v),
+        phase=n(state.phase), stress=n(state.stress), instability=n(state.instability),
+        obs_h=n(state.obs_h), obs_T=n(state.obs_T), obs_q=n(state.obs_q),
+        obs_u=n(state.obs_u), obs_v=n(state.obs_v),
+        topography=n(state.topography),
+    )
+
+
+def _carr_to_torch(carr: dict, device: str) -> dict:
+    out = {}
+    for k, v in carr.items():
+        if isinstance(v, np.ndarray) and v.dtype != object:
+            if v.dtype == np.int32:
+                out[k] = torch.as_tensor(v, dtype=torch.long, device=device)
+            else:
+                out[k] = torch.as_tensor(v, dtype=torch.float32, device=device)
+        else:
+            out[k] = v
+    return out
+
+
+def _carr_to_numpy(carr: dict) -> dict:
+    out = {}
+    for k, v in carr.items():
+        if _TORCH_OK and isinstance(v, torch.Tensor):
+            out[k] = v.cpu().numpy()
+        else:
+            out[k] = v
+    return out
+
+
+def _subset_state(state: UnifiedState, idx) -> UnifiedState:
+    """Return a UnifiedState containing only the selected batch indices.
+
+    Works with both numpy arrays and torch tensors.
+    Shared fields (obs_*, topography) are not copied — they are broadcast-safe.
     """
-    dc = seed.resources.get("data_coverage", 0.5)
-    pc = seed.resources.get("population_coupling", 0.5)
-    nd = seed.environment.get("network_density", 0.5)
-    md = seed.subject.get("marginal_decay", 0.1)
-    fn = seed.environment.get("field_noise", 0.3)
-    ac = seed.subject.get("aim_coupling", 0.9)
-    denom = (md ** 2) * max(1.0 - pc, 1e-3) * max(fn, 1e-3)
-    return (dc * nd * ac) / max(denom, 1e-9)
+    def sel(arr):
+        if _TORCH_OK and isinstance(arr, torch.Tensor):
+            t_idx = torch.as_tensor(idx, device=arr.device, dtype=torch.long)
+            return arr[t_idx]
+        return arr[np.array(idx)]
+
+    return UnifiedState(
+        h=sel(state.h), T=sel(state.T), q=sel(state.q),
+        u=sel(state.u), v=sel(state.v),
+        phase=sel(state.phase), stress=sel(state.stress),
+        instability=sel(state.instability),
+        obs_h=state.obs_h, obs_T=state.obs_T, obs_q=state.obs_q,
+        obs_u=state.obs_u, obs_v=state.obs_v, topography=state.topography,
+    )
 
 
-# Per-family rho/A/sigma ranges in the large-n (city-scale) regime.
-# Each family retains its characteristic operating envelope at city scale.
-# Per-family rho/A/sigma ranges in the large-n (city-scale) regime.
-# rho is capped at 1.0 (normalized field; rho > 1 is unphysical in this framework).
-_FAMILY_LARGE_N_RA: Dict[str, Dict[str, list]] = {
-    "batch":      {"rho": [0.8, 0.9, 1.0], "A": [0.7, 0.8, 0.9], "sigma": [0.10, 0.15]},
-    "network":    {"rho": [0.7, 0.9, 1.0], "A": [0.6, 0.8],      "sigma": [0.02, 0.05]},
-    "phase":      {"rho": [0.5, 0.8, 1.0], "A": [0.6, 0.75],     "sigma": [0.04, 0.06]},
-    "electrical": {"rho": [0.6, 0.8, 1.0], "A": [0.7, 0.9],      "sigma": [0.05, 0.08]},
-    "ascetic":    {"rho": [0.2, 0.4],       "A": [0.4, 0.55],     "sigma": [0.03, 0.05]},
-    "hybrid":     {"rho": [0.7, 0.9, 1.0], "A": [0.75, 0.85],    "sigma": [0.06, 0.08]},
-    "composite":  {"rho": [0.8, 1.0],       "A": [0.8, 0.9],      "sigma": [0.04, 0.06]},
-}
-
-# Coverage depth weight per family: how directly n_opt maps to this family's physics.
-# batch (iterative accumulation) gets the highest weight; ascetic/electrical the lowest.
-_FAMILY_COVERAGE_WEIGHT: Dict[str, float] = {
-    "batch":      0.08,
-    "composite":  0.06,
-    "hybrid":     0.05,
-    "network":    0.04,
-    "phase":      0.03,
-    "electrical": 0.03,
-    "ascetic":    0.02,
-}
+def _subset_carr(carr: dict, idx, B: int) -> dict:
+    """Return a carr dict containing only the selected batch indices."""
+    idx_np = np.array(idx)
+    out = {}
+    for k, v in carr.items():
+        if _TORCH_OK and isinstance(v, torch.Tensor) and v.shape[0] == B:
+            t_idx = torch.as_tensor(idx_np, device=v.device, dtype=torch.long)
+            out[k] = v[t_idx]
+        elif isinstance(v, np.ndarray) and v.ndim >= 1 and v.shape[0] == B:
+            out[k] = v[idx_np]
+        else:
+            out[k] = v
+    return out
 
 
-def _large_n_candidates(seed: ProblemSeed) -> list:
-    """City-scale n candidates for all families in the large-n regime.
+def _merge_states(base: UnifiedState, updated: UnifiedState, alive_idx, B: int) -> UnifiedState:
+    """Overwrite base[alive_idx] with updated (len(alive_idx) candidates).
 
-    Anchors filtered to [n_opt × 0.25, n_opt × 4].
+    Shared fields (obs_*, topography) are taken from base unchanged.
+    Both base and updated must be numpy UnifiedStates.
     """
-    n_opt = _batch_n_opt(seed)
-    lo, hi = n_opt * 0.25, n_opt * 4.0
-    candidates = sorted(n for n in _BATCH_LARGE_N_ANCHORS if lo <= n <= hi)
-    return candidates if candidates else [max(1, int(round(n_opt)))]
+    idx = np.array(alive_idx)
+
+    def merge(b, u):
+        if isinstance(b, np.ndarray) and b.ndim >= 1 and b.shape[0] == B:
+            r = b.copy()
+            r[idx] = u
+            return r
+        return b  # shared 2-D fields
+
+    return UnifiedState(
+        h=merge(base.h, updated.h), T=merge(base.T, updated.T),
+        q=merge(base.q, updated.q), u=merge(base.u, updated.u),
+        v=merge(base.v, updated.v),
+        phase=merge(base.phase, updated.phase),
+        stress=merge(base.stress, updated.stress),
+        instability=merge(base.instability, updated.instability),
+        obs_h=base.obs_h, obs_T=base.obs_T, obs_q=base.obs_q,
+        obs_u=base.obs_u, obs_v=base.obs_v, topography=base.topography,
+    )
 
 
-def generate_worldlines(
+# ---------------------------------------------------------------------------
+# THE algorithm function — NumPy path
+# ---------------------------------------------------------------------------
+def unified_step(
+    state: UnifiedState,
+    carr: dict,
+    dt: float,
+    dx: float,
+    dy: float,
+    progress: float = 0.5,
+) -> UnifiedState:
+    """One unified step on CPU numpy. All B candidates simultaneously."""
+    h, T, q, u, v = state.h, state.T, state.q, state.u, state.v
+    phase, stress, instab = state.phase, state.stress, state.instability
+    topo = state.topography[None]
+
+    Kh    = carr["Kh"]   [:,None,None]
+    Kt    = carr["Kt"]   [:,None,None]
+    Kq    = carr["Kq"]   [:,None,None]
+    drag  = carr["drag"] [:,None,None]
+    hc    = carr["humid_couple"][:,None,None]
+    nu    = carr["nudging"]     [:,None,None]
+    pg    = carr["pg_scale"]    [:,None,None]
+    A     = carr["A"];     rho   = carr["rho"];   sigma = carr["sigma"]
+    ac    = carr["aim_coupling"]; md = carr["marginal_decay"]
+
+    h_a = _ENG.semi_lagrangian(h, u, v, dx, dy, dt)
+    T_a = _ENG.semi_lagrangian(T, u, v, dx, dy, dt)
+    q_a = _ENG.semi_lagrangian(q, u, v, dx, dy, dt)
+    u_a = _ENG.semi_lagrangian(u, u, v, dx, dy, dt)
+    v_a = _ENG.semi_lagrangian(v, u, v, dx, dy, dt)
+
+    geop   = G * (h_a + 0.18 * topo)
+    td_fac = 1.0 + 0.00035 * topo
+    du = -dt*pg*_ENG.grad_x(geop, dx) + dt*F0*v_a - dt*drag*td_fac*u_a
+    dv = -dt*pg*_ENG.grad_y(geop, dy) - dt*F0*u_a - dt*drag*td_fac*v_a
+
+    div = _ENG.grad_x(u_a, dx) + _ENG.grad_y(v_a, dy)
+    dh  = -dt * 0.55 * h_a / BASE_H * div
+
+    dh += dt * Kh * 0.35 * _ENG.lap(h_a, dx, dy)
+    dT  = dt * Kt        * _ENG.lap(T_a, dx, dy)
+    dq  = dt * Kq        * _ENG.lap(q_a, dx, dy)
+    du += dt * Kh        * _ENG.lap(u_a, dx, dy)
+    dv += dt * Kh        * _ENG.lap(v_a, dx, dy)
+
+    sat    = 0.0045 * np.exp(0.060 * (T_a - 273.15) / 10.0)
+    excess = np.maximum(q_a - sat, 0.0)
+    cond   = 0.20 * excess * hc
+    T_eq   = 286.5 - 0.0032 * topo
+    dT    += dt * ((LV/CP)*cond*1e-4 - 1.4e-5*(T_a - T_eq))
+    XX, YY = _get_coords(h.shape[-2], h.shape[-1])
+    q_src  = 2.0e-6 * np.exp(-6.0*(XX**2 + YY**2))
+    dq    += dt * (q_src[None] - cond)
+
+    dh += dt * nu * (state.obs_h[None] - h_a)
+    dT += dt * nu * (state.obs_T[None] - T_a)
+    dq += dt * nu * (state.obs_q[None] - q_a)
+    du += dt * nu * (state.obs_u[None] - u_a)
+    dv += dt * nu * (state.obs_v[None] - v_a)
+
+    new_h = np.clip(_ENG.smooth(h_a + dh, 0.06), BASE_H-500.0, BASE_H+500.0)
+    new_T = np.clip(_ENG.smooth(T_a + dT, 0.05), 250.0, 320.0)
+    new_q = np.clip(_ENG.smooth(q_a + dq, 0.05), 1e-5,  0.030)
+    new_u = np.clip(_ENG.smooth(u_a + du, 0.04), -40.0, 40.0)
+    new_v = np.clip(_ENG.smooth(v_a + dv, 0.04), -40.0, 40.0)
+
+    # UMDST — per-family coefficients + per-family gain modifier
+    new_phase  = np.empty_like(phase)
+    new_stress = np.empty_like(stress)
+    new_instab = np.empty_like(instab)
+    _pi = math.pi
+    for i in range(phase.shape[0]):
+        op_i  = float(np.clip(new_h[i].mean() / BASE_H, 0.0, 1.2))
+        lt_i  = float(np.clip(new_q[i].mean() / 0.030, 0.0, 1.2))
+        ac_i  = float(ac[i]);   stress_i = float(stress[i])
+        ph_i  = float(phase[i]); md_i = float(md[i])
+        ins_i = float(instab[i])
+        A_i   = float(A[i]);    rho_i = float(rho[i]); sigma_i = float(sigma[i])
+        n_i   = float(carr["n"][i])
+        gg    = float(carr["g_gain"][i]);  gp = float(carr["g_prec"][i])
+        gc    = float(carr["g_coup"][i]);  gs = float(carr["g_stress"][i])
+        mg    = int(carr["mod_group"][i])
+
+        std_i     = math.exp(-4.0 * sigma_i)
+        n_steps_i = max(24.0, 24.0 + math.sqrt(n_i) * 1.2 + 18.0 * rho_i)
+        n_scale_i = max(0.5, min(2.0, n_steps_i / _UMDST_N_BASELINE))
+
+        gain_i = (gg * A_i * (0.55 + 0.45 * rho_i) * std_i
+                  * (0.7 + 0.3 * ac_i)
+                  * math.exp(-1.8 * md_i)
+                  * (1.0 - 0.35 * stress_i)
+                  * n_scale_i)
+        prec_g = gp * A_i * (1.0 - 0.4 * sigma_i) * (1.0 - 0.35 * stress_i)
+        coup_g = gc * A_i * std_i * (0.8 + 0.2 * op_i)
+
+        # Per-family gain modifier
+        mods = [
+            1.0 + 0.16 / (1.0 + math.exp(-10.0 * (ph_i - 0.55))),  # 0 batch
+            1.0 + 0.10 * progress,                                    # 1 phase
+            1.0 + 0.12 * math.sin(progress * _pi),                   # 2 hybrid
+            0.92 + 0.10 * math.sin(progress * 2.0 * _pi),            # 3 electrical
+            0.98 + 0.10 / (1.0 + math.exp(-8.0 * (ac_i - 0.65))),   # 4 network
+            0.82 + 0.20 * progress,                                   # 5 ascetic
+        ]
+        gain_i *= mods[mg]
+
+        su  = gs * A_i * (0.8 + 0.4 * rho_i) * (0.55 + 0.45 * sigma_i)
+        sd  = 0.010 + 0.014 * lt_i
+        iu  = 0.012 * A_i + 0.010 * sigma_i + 0.014 * stress_i
+        id_ = 0.008 * lt_i
+
+        new_phase[i]  = max(0.0, min(1.0,
+            ph_i + gain_i + 0.20*prec_g + 0.16*coup_g - 0.05*ins_i - 0.04*stress_i))
+        new_stress[i] = max(0.0, min(1.0, stress_i + su - sd))
+        new_instab[i] = max(0.0, min(1.0, ins_i + iu - id_))
+
+    return UnifiedState(
+        h=new_h, T=new_T, q=new_q, u=new_u, v=new_v,
+        phase=new_phase, stress=new_stress, instability=new_instab,
+        obs_h=state.obs_h, obs_T=state.obs_T, obs_q=state.obs_q,
+        obs_u=state.obs_u, obs_v=state.obs_v, topography=state.topography,
+    )
+
+
+# ---------------------------------------------------------------------------
+# THE algorithm function — Torch/GPU path
+# ---------------------------------------------------------------------------
+def _torch_unified_step(
+    state: UnifiedState,
+    carr: dict,
+    dt: float,
+    dx: float,
+    dy: float,
+    progress: float = 0.5,
+) -> UnifiedState:
+    """One unified step on GPU. All B candidates simultaneously."""
+    eng = _TORCH_ENG
+    h, T, q, u, v = state.h, state.T, state.q, state.u, state.v
+    phase, stress, instab = state.phase, state.stress, state.instability
+    topo = state.topography.unsqueeze(0)
+
+    Kh    = carr["Kh"]   [:, None, None]
+    Kt    = carr["Kt"]   [:, None, None]
+    Kq    = carr["Kq"]   [:, None, None]
+    drag  = carr["drag"] [:, None, None]
+    hc    = carr["humid_couple"][:, None, None]
+    nu    = carr["nudging"]     [:, None, None]
+    pg    = carr["pg_scale"]    [:, None, None]
+    A     = carr["A"];     rho   = carr["rho"];   sigma = carr["sigma"]
+    ac    = carr["aim_coupling"]; md = carr["marginal_decay"]
+
+    h_a = eng.semi_lagrangian(h, u, v, dx, dy, dt)
+    T_a = eng.semi_lagrangian(T, u, v, dx, dy, dt)
+    q_a = eng.semi_lagrangian(q, u, v, dx, dy, dt)
+    u_a = eng.semi_lagrangian(u, u, v, dx, dy, dt)
+    v_a = eng.semi_lagrangian(v, u, v, dx, dy, dt)
+
+    geop   = G * (h_a + 0.18 * topo)
+    td_fac = 1.0 + 0.00035 * topo
+    du = -dt*pg*eng.grad_x(geop, dx) + dt*F0*v_a - dt*drag*td_fac*u_a
+    dv = -dt*pg*eng.grad_y(geop, dy) - dt*F0*u_a - dt*drag*td_fac*v_a
+
+    div = eng.grad_x(u_a, dx) + eng.grad_y(v_a, dy)
+    dh  = -dt * 0.55 * h_a / BASE_H * div
+
+    dh += dt * Kh * 0.35 * eng.lap(h_a, dx, dy)
+    dT  = dt * Kt        * eng.lap(T_a, dx, dy)
+    dq  = dt * Kq        * eng.lap(q_a, dx, dy)
+    du += dt * Kh        * eng.lap(u_a, dx, dy)
+    dv += dt * Kh        * eng.lap(v_a, dx, dy)
+
+    sat    = 0.0045 * torch.exp(0.060 * (T_a - 273.15) / 10.0)
+    excess = torch.clamp(q_a - sat, min=0.0)
+    cond   = 0.20 * excess * hc
+    T_eq   = 286.5 - 0.0032 * topo
+    dT    += dt * ((LV/CP)*cond*1e-4 - 1.4e-5*(T_a - T_eq))
+    H_dim, W_dim = h.shape[-2], h.shape[-1]
+    dev = h.device
+    x_t = torch.linspace(-1.0, 1.0, W_dim, device=dev, dtype=h.dtype)
+    y_t = torch.linspace(-1.0, 1.0, H_dim, device=dev, dtype=h.dtype)
+    YY_t, XX_t = torch.meshgrid(y_t, x_t, indexing='ij')
+    q_src = 2.0e-6 * torch.exp(-6.0 * (XX_t**2 + YY_t**2))
+    dq   += dt * (q_src[None] - cond)
+
+    dh += dt * nu * (state.obs_h.unsqueeze(0) - h_a)
+    dT += dt * nu * (state.obs_T.unsqueeze(0) - T_a)
+    dq += dt * nu * (state.obs_q.unsqueeze(0) - q_a)
+    du += dt * nu * (state.obs_u.unsqueeze(0) - u_a)
+    dv += dt * nu * (state.obs_v.unsqueeze(0) - v_a)
+
+    new_h = (eng.smooth(h_a + dh, 0.06)).clamp(BASE_H-500.0, BASE_H+500.0)
+    new_T = (eng.smooth(T_a + dT, 0.05)).clamp(250.0, 320.0)
+    new_q = (eng.smooth(q_a + dq, 0.05)).clamp(1e-5,  0.030)
+    new_u = (eng.smooth(u_a + du, 0.04)).clamp(-40.0, 40.0)
+    new_v = (eng.smooth(v_a + dv, 0.04)).clamp(-40.0, 40.0)
+
+    op  = (new_h.mean(dim=(-2,-1)) / BASE_H).clamp(0.0, 1.2)
+    lt  = (new_q.mean(dim=(-2,-1)) / 0.030).clamp(0.0, 1.2)
+    new_phase, new_stress, new_instab = _umdst_batched_step(
+        op, lt, ac, stress, phase, md, instab, A, rho, sigma, carr["n"],
+        carr["g_gain"], carr["g_prec"], carr["g_coup"], carr["g_stress"],
+        progress=progress, mod_group=carr["mod_group"],
+    )
+
+    return UnifiedState(
+        h=new_h, T=new_T, q=new_q, u=new_u, v=new_v,
+        phase=new_phase, stress=new_stress, instability=new_instab,
+        obs_h=state.obs_h, obs_T=state.obs_T, obs_q=state.obs_q,
+        obs_u=state.obs_u, obs_v=state.obs_v, topography=state.topography,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Rollout — collects phase series for UMDST scoring
+# ---------------------------------------------------------------------------
+def unified_rollout(
+    state: UnifiedState,
+    carr: dict,
+    dt: float,
+    dx: float,
+    dy: float,
+    steps: int,
+    step_offset: int = 0,
+    total_steps: Optional[int] = None,
+):
+    """Returns (final_state, phase_series) where phase_series is (B, steps).
+
+    step_offset / total_steps allow continuation: pass step_offset=screen_steps,
+    total_steps=full_steps so that progress resumes correctly in phase 2.
+    """
+    if total_steps is None:
+        total_steps = step_offset + steps
+    phase_list = []
+    for s in range(steps):
+        progress = min(1.0, (step_offset + s + 1) / total_steps)
+        state = unified_step(state, carr, dt, dx, dy, progress=progress)
+        phase_list.append(state.phase.copy())
+    phase_series = np.stack(phase_list, axis=1)   # (B, steps)
+    return state, phase_series
+
+
+def _torch_rollout(
+    state: UnifiedState,
+    carr: dict,
+    dt: float,
+    dx: float,
+    dy: float,
+    steps: int,
+    step_offset: int = 0,
+    total_steps: Optional[int] = None,
+):
+    """Returns (final_state, phase_series) where phase_series is (B, steps) tensor."""
+    if total_steps is None:
+        total_steps = step_offset + steps
+    phase_list = []
+    for s in range(steps):
+        progress = min(1.0, (step_offset + s + 1) / total_steps)
+        state = _torch_unified_step(state, carr, dt, dx, dy, progress=progress)
+        phase_list.append(state.phase)
+    phase_series = torch.stack(phase_list, dim=1)  # (B, steps)
+    return state, phase_series
+
+
+# ---------------------------------------------------------------------------
+# Scoring — UMDST evaluate_score aligned
+# ---------------------------------------------------------------------------
+def score_candidates(
+    final: UnifiedState,
+    phase_series: np.ndarray,   # (B, steps) numpy
+    carr: dict,
+    seed: ProblemSeed,
+) -> np.ndarray:
+    """Score candidates using the UMDST evaluate_score formula.
+
+    Replaces ad-hoc MSE+phase combination with:
+      score = 1.80*phase_max - 1.35*p_blow - 0.55*n_penalty - 0.80*U + 0.50*repeatability
+    where U = variance_proxy + disagree_proxy + ood_proxy,
+    and p_blow is estimated from field error (E_cons proxy) + state indicators.
+    """
+    phase_max      = phase_series.max(axis=1)          # (B,)
+    phase_final    = phase_series[:, -1]                # (B,)
+    variance_proxy = phase_series.var(axis=1)           # (B,)
+
+    disagree_proxy = 0.25 * final.stress + 0.25 * final.instability
+    ood_proxy      = (np.maximum(0.0, phase_final - 1.0)
+                      + np.maximum(0.0, final.instability - 0.8))
+    repeatability  = np.maximum(0.0, 1.0 - (variance_proxy + 0.5 * final.instability))
+
+    # E_cons proxy: per-component normalised field error (same idea as before
+    # but now feeding into p_blow rather than directly into the score).
+    def _norm(x):
+        lo, hi = x.min(), x.max()
+        return (x - lo) / (hi - lo + 1e-12)
+
+    h_err = ((final.h - final.obs_h[None])**2).mean(axis=(1, 2))
+    T_err = ((final.T - final.obs_T[None])**2).mean(axis=(1, 2))
+    q_err = ((final.q - final.obs_q[None])**2).mean(axis=(1, 2))
+    w_err = ((final.u - final.obs_u[None])**2
+             + (final.v - final.obs_v[None])**2).mean(axis=(1, 2))
+    e_cons = (_norm(h_err)*0.35 + _norm(T_err)*0.30
+              + _norm(q_err)*0.20 + _norm(w_err)*0.15)
+
+    # p_blow: logistic blow-up risk (no prev trajectory → impact term = 0)
+    raw    = (2.2 * e_cons
+              + 1.6 * final.stress
+              + 1.9 * final.instability
+              + 0.8 * variance_proxy * 8.0
+              + 0.6 * ood_proxy
+              - 1.8)
+    p_blow = 1.0 / (1.0 + np.exp(-np.clip(raw, -20.0, 20.0)))
+
+    n_penalty = np.minimum(1.0, carr["n"] / 30000.0)
+
+    U = variance_proxy + disagree_proxy + ood_proxy
+    score = (1.80 * phase_max
+             - 1.35 * p_blow
+             - 0.55 * n_penalty
+             - 0.80 * U
+             + 0.50 * repeatability)
+
+    # Family bonus (batch family gets +0.08 per umdst_v03)
+    for i, fam in enumerate(carr["family"]):
+        if fam == "batch":
+            score[i] += 0.08
+
+    return score
+
+
+def classify_relative(scores: np.ndarray) -> List[str]:
+    best = scores.max(); span = max(1e-9, best - scores.min())
+    out = []
+    for s in scores:
+        rel = best - s
+        if   rel <= max(0.20, 0.22*span): out.append("active")
+        elif rel <= max(0.55, 0.45*span): out.append("restricted")
+        elif rel <= max(1.20, 0.90*span): out.append("starved")
+        else:                              out.append("withered")
+    return out
+
+
+def td_hydro_control(scores: np.ndarray) -> dict:
+    s = np.sort(scores)[::-1]
+    margin = float(s[0] - s[1]) if len(s) > 1 else 0.0
+    spread = float(s[0] - s[-1]) if len(s) > 1 else 0.0
+    pb = float(np.clip(
+        1.0 + (0.04 if margin < 0.08 else 0.0) - (0.03 if spread > 1.4 else 0.0),
+        0.94, 1.08))
+    return {"pressure_balance": pb, "top_margin": margin,
+            "score_spread": spread, "mean_score": float(scores.mean())}
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+def run_tree_diagram(
     seed: ProblemSeed,
     bg: ProblemBackground,
-) -> List[CandidateWorldline]:
-    """Generate candidate worldlines across all families.
+    NX: int = 28,
+    NY: int = 21,
+    steps: int = 20,
+    top_k: int = 12,
+    dt: float = 45.0,
+    device: Optional[str] = None,
+) -> tuple:
+    from .resource_controller import AngioResourceController
 
-    In the large-n regime (population_coupling >= 0.90, data_coverage >= 0.85)
-    every family is evaluated at city-scale n so all plans compete on equal footing.
-    """
-    worldlines: List[CandidateWorldline] = []
-    pc = seed.resources.get("population_coupling", 0.5)
-    dc = seed.resources.get("data_coverage", 0.5)
-    large_n_mode = pc >= 0.90 and dc >= 0.85
-    n_candidates = _large_n_candidates(seed) if large_n_mode else None
-
-    for family in bg.candidate_families:
-        if large_n_mode:
-            ra = _FAMILY_LARGE_N_RA.get(family, _FAMILY_LARGE_N_RA["batch"])
-            fp = {"n": n_candidates, **ra}
-        else:
-            fp = _FAMILY_PARAMS.get(family, _FAMILY_PARAMS["batch"])
-        keys = list(fp.keys())
-        values = [fp[k] for k in keys]
-        for combo in itertools.product(*values):
-            params = dict(zip(keys, combo))
-            template = f"{family}_n{params['n']}_rho{params['rho']}"
-            description = (
-                f"{family.capitalize()} worldline with "
-                + ", ".join(f"{k}={v}" for k, v in params.items())
-            )
-            worldlines.append(
-                CandidateWorldline(
-                    family=family,
-                    template=template,
-                    params=params,
-                    description=description,
-                )
-            )
-    return worldlines
-
-
-# ---------------------------------------------------------------------------
-# Family lock sigmoid
-# ---------------------------------------------------------------------------
-
-_FAMILY_NC: Dict[str, float] = {
-    "batch":      5.0,
-    "network":    6.0,
-    "phase":      4.0,
-    "electrical": 7.0,
-    "ascetic":    2.0,
-    "hybrid":     5.5,
-    "composite":  8.0,
-}
-
-_FAMILY_SHARP: Dict[str, float] = {
-    "batch":      1.5,
-    "network":    1.2,
-    "phase":      1.8,
-    "electrical": 1.0,
-    "ascetic":    2.5,
-    "hybrid":     1.4,
-    "composite":  0.9,
-}
-
-
-def family_lock(family: str, n: float) -> float:
-    nc = _FAMILY_NC.get(family, 5.0)
-    sharp = _FAMILY_SHARP.get(family, 1.5)
-    return 1.0 / (1.0 + math.exp(-(n - nc) / sharp))
-
-
-# ---------------------------------------------------------------------------
-# Evaluate a single worldline
-# ---------------------------------------------------------------------------
-
-def evaluate_worldline(
-    seed: ProblemSeed,
-    field: Dict[str, float],
-    w: CandidateWorldline,
-) -> EvaluationResult:
-    n = w.params.get("n", 1.0)
-    rho = w.params.get("rho", 0.5)
-    A = w.params.get("A", 0.5)
-    sigma = w.params.get("sigma", 0.3)
-
-    fc = field.get("field_coherence", 0.5)
-    na = field.get("network_amplification", 0.5)
-    gd = field.get("governance_drag", 0.5)
-    pt = field.get("phase_turbulence", 0.5)
-    re = field.get("resource_elasticity", 0.5)
-
-    lock = family_lock(w.family, n)
-
-    # Feasibility: resource + amplification + lock alignment
-    feasibility = (
-        0.30 * re
-        + 0.25 * (1.0 - gd)
-        + 0.20 * na * rho
-        + 0.15 * lock
-        + 0.10 * A
-    )
-    feasibility = max(0.0, min(1.0, feasibility))
-
-    # Stability: coherence + low turbulence + low sigma
-    stability = (
-        0.35 * fc
-        + 0.25 * (1.0 - pt)
-        + 0.20 * (1.0 - sigma)
-        + 0.20 * (1.0 - gd * 0.5)
-    )
-    stability = max(0.0, min(1.0, stability))
-
-    # Field fit: how well params match field conditions
-    field_fit = (
-        0.30 * fc * A
-        + 0.25 * na * rho
-        + 0.25 * (1.0 - pt) * (1.0 - sigma)
-        + 0.20 * re * lock
-    )
-    field_fit = max(0.0, min(1.0, field_fit))
-
-    # Risk: high turbulence, low stability, high sigma, low resources
-    risk = (
-        0.30 * pt
-        + 0.25 * sigma
-        + 0.25 * gd
-        + 0.20 * (1.0 - re)
-    )
-    risk = max(0.0, min(1.0, risk))
-
-    # Coverage depth bonus (large-n regime only): all families compete at city scale,
-    # but the bonus weight reflects how directly n_opt maps to each family's physics.
-    # Applied to raw score directly to avoid distorting the pstdev balance penalty.
-    coverage_raw_bonus = 0.0
-    pc_val = seed.resources.get("population_coupling", 0.0)
-    dc_val = seed.resources.get("data_coverage", 0.0)
-    if pc_val >= 0.90 and dc_val >= 0.85:
-        n_opt_v = _batch_n_opt(seed)
-        if n_opt_v > 50:
-            log_ratio = math.log(max(n, 1.0) / n_opt_v)
-            coverage_depth = math.exp(-0.5 * (log_ratio / 0.8) ** 2)
-            weight = _FAMILY_COVERAGE_WEIGHT.get(w.family, 0.02)
-            coverage_raw_bonus = weight * coverage_depth
-
-    # Family theory alignment bonus: each family has a natural advantage in certain
-    # field conditions.  Small bonus derived from field variables, not from n.
-    # network:    excels when network_amplification is high
-    # electrical: excels when field_coherence is high (precision regime)
-    # hybrid:     benefits from combined amplification + resource slack
-    # phase:      benefits when phase_proximity is high and turbulence is low
-    # composite:  benefits when both coherence and amplification are strong
-    # batch/ascetic: no extra theory bonus (coverage_depth serves batch already)
-    theory_bonus = 0.0
-    if w.family == "network":
-        theory_bonus = 0.035 * na
-    elif w.family == "electrical":
-        theory_bonus = 0.030 * fc
-    elif w.family == "hybrid":
-        theory_bonus = 0.028 * (na + re) * 0.5
-    elif w.family == "phase":
-        theory_bonus = 0.025 * seed.subject.get("phase_proximity", 0.0) * (1.0 - pt)
-    elif w.family == "composite":
-        theory_bonus = 0.012 * math.sqrt(fc * na)
-
-    # Raw score
-    raw = 0.30 * feasibility + 0.30 * stability + 0.25 * field_fit - 0.15 * risk \
-          + coverage_raw_bonus + theory_bonus
-
-    # Penalize by spread (using population standard deviation of the three positive metrics)
-    vals = [feasibility, stability, field_fit]
-    mean_v = sum(vals) / 3.0
-    pstdev = math.sqrt(sum((v - mean_v) ** 2 for v in vals) / 3.0)
-    balanced_score = raw - 0.25 * pstdev
-
-    # Nutrient gain: route bonus based on family and field
-    nutrient_gain = _compute_nutrient_gain(w.family, n, rho, field)
-
-    # Branch status based on thresholds
-    branch_status = _classify_branch_status(balanced_score, risk, feasibility)
-
-    return EvaluationResult(
-        family=w.family,
-        template=w.template,
-        params=w.params,
-        feasibility=feasibility,
-        stability=stability,
-        field_fit=field_fit,
-        risk=risk,
-        balanced_score=balanced_score,
-        nutrient_gain=nutrient_gain,
-        branch_status=branch_status,
-    )
-
-
-def _compute_nutrient_gain(
-    family: str,
-    n: float,
-    rho: float,
-    field: Dict[str, float],
-) -> float:
-    na = field.get("network_amplification", 0.5)
-    re = field.get("resource_elasticity", 0.5)
-    fc = field.get("field_coherence", 0.5)
-
-    base = rho * 0.5 + re * 0.3 + fc * 0.2
-
-    route_bonus: Dict[str, float] = {
-        "network":    0.12 * na,
-        "composite":  0.10 * na * rho,
-        "hybrid":     0.08 * (na + re) * 0.5,
-        "electrical": 0.09 * rho,
-        "batch":      0.06 * re,
-        "phase":      0.05 * (1.0 - field.get("phase_turbulence", 0.5)),
-        "ascetic":    0.04 * (1.0 - field.get("governance_drag", 0.5)),
-    }
-    bonus = route_bonus.get(family, 0.05)
-    return max(0.0, min(1.0, base + bonus))
-
-
-def _classify_branch_status(
-    balanced_score: float,
-    risk: float,
-    feasibility: float,
-) -> str:
-    if balanced_score >= 0.45 and risk <= 0.45:
-        return "active"
-    elif balanced_score >= 0.30 and risk <= 0.60:
-        return "restricted"
-    elif balanced_score >= 0.15 or feasibility >= 0.25:
-        return "starved"
+    use_torch = False
+    if _TORCH_OK:
+        if device is None:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        use_torch = True
     else:
-        return "withered"
+        device = "cpu"
+
+    candidates   = generate_candidates(seed, bg)
+    B            = len(candidates)
+    carr_np      = prepare_candidate_arrays(candidates)
+    state_np     = encode_initial_state(seed, candidates, NX, NY)
+
+    screen_steps = max(4, steps // 4)
+    refine_steps = steps - screen_steps
+
+    # ---- Phase 1: screening on all B candidates ----
+    if use_torch:
+        carr_t  = _carr_to_torch(carr_np, device)
+        state_t = _state_to_torch(state_np, device)
+        final1_t, phase1_t = _torch_rollout(
+            state_t, carr_t, dt, DX, DY, screen_steps,
+            step_offset=0, total_steps=steps)
+        final1 = _state_to_numpy(final1_t)
+        phase1 = phase1_t.cpu().numpy()
+        carr   = _carr_to_numpy(carr_t)
+    else:
+        final1, phase1 = unified_rollout(
+            state_np, carr_np, dt, DX, DY, screen_steps,
+            step_offset=0, total_steps=steps)
+        carr = carr_np
+
+    scores1   = score_candidates(final1, phase1, carr, seed)
+    statuses1 = classify_relative(scores1)
+
+    alive_idx  = [i for i, s in enumerate(statuses1) if s != "withered"]
+    pruned_idx = [i for i, s in enumerate(statuses1) if s == "withered"]
+
+    ctrl = AngioResourceController(total_steps=max(1, refine_steps))
+    flow = ctrl.allocate(statuses1)
+
+    # ---- Phase 2: refinement on alive subset only ----
+    if alive_idx and refine_steps > 0:
+        if use_torch:
+            state_alive = _subset_state(final1_t, alive_idx)
+            carr_alive  = _subset_carr(carr_t, alive_idx, B)
+            final2_t, phase2_t = _torch_rollout(
+                state_alive, carr_alive, dt, DX, DY, refine_steps,
+                step_offset=screen_steps, total_steps=steps)
+            final2 = _state_to_numpy(final2_t)
+            phase2 = phase2_t.cpu().numpy()
+        else:
+            state_alive = _subset_state(final1, alive_idx)
+            carr_alive  = _subset_carr(carr_np, alive_idx, B)
+            final2, phase2 = unified_rollout(
+                state_alive, carr_alive, dt, DX, DY, refine_steps,
+                step_offset=screen_steps, total_steps=steps)
+
+        # Reconstruct full (B, steps) phase_series
+        idx_np       = np.array(alive_idx)
+        phase_series = np.zeros((B, steps), dtype=np.float32)
+        phase_series[:, :screen_steps] = phase1
+        phase_series[idx_np, screen_steps:] = phase2
+        # Withered candidates hold their last screening phase value
+        for i in pruned_idx:
+            phase_series[i, screen_steps:] = phase1[i, -1]
+
+        # Reconstruct full B-dim final state (withered keep final1 values)
+        final = _merge_states(final1, final2, alive_idx, B)
+    else:
+        # No alive branches or no refinement steps — pad phase_series to full width
+        pad = np.zeros((B, refine_steps), dtype=np.float32)
+        for i in range(B):
+            pad[i, :] = phase1[i, -1]
+        phase_series = np.concatenate([phase1, pad], axis=1)
+        final = final1
+
+    scores   = score_candidates(final, phase_series, carr, seed)
+    statuses = classify_relative(scores)
+    hydro    = td_hydro_control(scores)
+    hydro["pruned_count"] = len(pruned_idx)
+    hydro["reflow_bonus"] = float(flow.reflow_bonus)
+    hydro["alive_count"]  = len(alive_idx)
+
+    top_idx = np.argsort(scores)[::-1][:top_k]
+    top_results: List[EvaluationResult] = []
+    for i in top_idx:
+        c = candidates[i]
+        p = c["params"]
+        ph  = float(final.phase[i])
+        st  = float(final.stress[i])
+        ins = float(final.instability[i])
+        sc  = float(scores[i])
+        sig = float(p["sigma"])
+        rho = float(p["rho"])
+        A   = float(p["A"])
+
+        feasibility = float(np.clip(
+            0.35*ph + 0.25*(1-st) + 0.20*A*(0.55+0.45*rho) + 0.20*(1-sig*10), 0, 1))
+        stability   = float(np.clip(
+            0.40*(1-ins) + 0.30*(1-st) + 0.30*(1-min(sig*5, 1.0)), 0, 1))
+        field_fit   = float(np.clip(0.40*ph + 0.35*sc + 0.25*A, 0, 1))
+        risk        = float(np.clip(0.45*st + 0.35*ins + 0.20*min(sig*5, 1.0), 0, 1))
+        nutrient    = float(np.clip(A * rho * (1 - sig), 0, 1))
+
+        top_results.append(EvaluationResult(
+            family=c["family"],
+            template=c["template"],
+            params={k: p[k] for k in ("n", "rho", "A", "sigma")},
+            feasibility=feasibility,
+            stability=stability,
+            field_fit=field_fit,
+            risk=risk,
+            balanced_score=sc,
+            nutrient_gain=nutrient,
+            branch_status=statuses[i],
+            weather_score=sc,
+            weather_alignment=ph,
+            final_balanced_score=sc,
+        ))
+
+    return top_results, hydro
+
+
+# ---------------------------------------------------------------------------
+# Legacy shims
+# ---------------------------------------------------------------------------
+CandidateWorldline = EvaluationResult
+
+def generate_worldlines(seed: ProblemSeed, bg: ProblemBackground):
+    return generate_candidates(seed, bg)
+
+def evaluate_worldline(seed, field, w):
+    from .background_inference import infer_problem_background
+    bg = infer_problem_background(seed)
+    results, _ = run_tree_diagram(seed, bg, NX=8, NY=8, steps=1, top_k=1)
+    return results[0] if results else None
+
+def attach_weather_alignment(results, weather_scores):
+    return results
