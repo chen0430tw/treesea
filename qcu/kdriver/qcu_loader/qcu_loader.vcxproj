@@ -1,0 +1,167 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+
+  <!-- ── Configurations ─────────────────────────────────────────── -->
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+
+  <!-- ── Globals ────────────────────────────────────────────────── -->
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{5B8C9D0E-F1A2-3456-BCDE-789F01234567}</ProjectGuid>
+    <RootNamespace>qcu_loader</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+
+  <!-- ── Configuration: Debug ───────────────────────────────────── -->
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+    <SpectreMitigation>false</SpectreMitigation>
+  </PropertyGroup>
+
+  <!-- ── Configuration: Release ────────────────────────────────── -->
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+    <SpectreMitigation>false</SpectreMitigation>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+
+  <ImportGroup Label="ExtensionSettings" />
+  <ImportGroup Label="Shared" />
+
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props"
+            Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')"
+            Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props"
+            Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')"
+            Label="LocalAppDataPlatform" />
+  </ImportGroup>
+
+  <PropertyGroup Label="UserMacros" />
+
+  <!-- ── Output dirs ────────────────────────────────────────────── -->
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <OutDir>$(SolutionDir)x64\$(Configuration)\</OutDir>
+    <IntDir>$(SolutionDir)Intermediate\$(ProjectName)\$(Configuration)\</IntDir>
+    <!-- kdmapper source, relative to this .vcxproj -->
+    <IncludePath>$(ProjectDir)..\kdmapper\kdmapper\include;$(IncludePath)</IncludePath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <OutDir>$(SolutionDir)x64\$(Configuration)\</OutDir>
+    <IntDir>$(SolutionDir)Intermediate\$(ProjectName)\$(Configuration)\</IntDir>
+    <IncludePath>$(ProjectDir)..\kdmapper\kdmapper\include;$(IncludePath)</IncludePath>
+  </PropertyGroup>
+
+  <!-- ── Compiler: Debug ────────────────────────────────────────── -->
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <Optimization>Disabled</Optimization>
+      <SDLCheck>true</SDLCheck>
+      <WarningLevel>Level4</WarningLevel>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <ConformanceMode>true</ConformanceMode>
+      <!--
+        KDLIBMODE: prevents kdmapper/main.cpp from defining its own wmain,
+        so only our loader.cpp's wmain is compiled.
+      -->
+      <PreprocessorDefinitions>KDLIBMODE;_UNICODE;UNICODE;_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <!-- Must run as Administrator to load/unload kernel drivers -->
+      <UACExecutionLevel>RequireAdministrator</UACExecutionLevel>
+      <AdditionalDependencies>version.lib;kernel32.lib;advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+
+  <!-- ── Compiler: Release ──────────────────────────────────────── -->
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <Optimization>MaxSpeed</Optimization>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>true</SDLCheck>
+      <WarningLevel>Level4</WarningLevel>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <ConformanceMode>true</ConformanceMode>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <PreprocessorDefinitions>KDLIBMODE;_UNICODE;UNICODE;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <UACExecutionLevel>RequireAdministrator</UACExecutionLevel>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <AdditionalDependencies>version.lib;kernel32.lib;advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+    <!-- Copy qcu_kdrv.sys next to the loader exe for convenience -->
+    <PostBuildEvent>
+      <Command>if exist "$(SolutionDir)x64\$(Configuration)\qcu_kdrv.sys" (
+  echo [QCU] qcu_kdrv.sys already in output dir
+) else (
+  echo [QCU] Warning: build qcu_kdrv first so qcu_loader can find qcu_kdrv.sys
+)</Command>
+    </PostBuildEvent>
+  </ItemDefinitionGroup>
+
+  <!-- ── Source files ───────────────────────────────────────────── -->
+  <ItemGroup>
+    <!-- Our loader -->
+    <ClCompile Include="loader.cpp" />
+  </ItemGroup>
+
+  <!--
+    kdmapper source — compiled directly into qcu_loader.exe
+    (no separate lib build needed). KDLIBMODE excludes kdmapper's own main().
+  -->
+  <ItemGroup>
+    <ClCompile Include="..\kdmapper\kdmapper\intel_driver.cpp" />
+    <ClCompile Include="..\kdmapper\kdmapper\kdmapper.cpp" />
+    <ClCompile Include="..\kdmapper\kdmapper\KDSymbolsHandler.cpp" />
+    <ClCompile Include="..\kdmapper\kdmapper\portable_executable.cpp" />
+    <ClCompile Include="..\kdmapper\kdmapper\service.cpp" />
+    <ClCompile Include="..\kdmapper\kdmapper\utils.cpp" />
+    <!-- main.cpp excluded — KDLIBMODE makes it a no-op, but exclude it
+         explicitly to avoid the unused wmain warning -->
+    <ClCompile Include="..\kdmapper\kdmapper\main.cpp">
+      <ExcludedFromBuild>true</ExcludedFromBuild>
+    </ClCompile>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ClInclude Include="..\kdmapper\kdmapper\include\intel_driver.hpp" />
+    <ClInclude Include="..\kdmapper\kdmapper\include\intel_driver_resource.hpp" />
+    <ClInclude Include="..\kdmapper\kdmapper\include\kdmapper.hpp" />
+    <ClInclude Include="..\kdmapper\kdmapper\include\KDSymbolsHandler.h" />
+    <ClInclude Include="..\kdmapper\kdmapper\include\nt.hpp" />
+    <ClInclude Include="..\kdmapper\kdmapper\include\portable_executable.hpp" />
+    <ClInclude Include="..\kdmapper\kdmapper\include\service.hpp" />
+    <ClInclude Include="..\kdmapper\kdmapper\include\utils.hpp" />
+  </ItemGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets" />
+
+</Project>
