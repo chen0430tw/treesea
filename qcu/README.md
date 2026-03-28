@@ -117,12 +117,13 @@ QCU 加速 hash 搜索不是「更快算一个 hash」，而是**通过坍缩减
 
 ## 目录说明
 
-- `qcu/core/`：核心求解模块
+- `qcu/core/`：核心求解模块（Lindblad RK4、相位调制、读出、纠缠度量）
 - `qcu/io/`：状态与结果 I/O
 - `qcu/runtime/`：运行时
 - `qcu/cli/`：命令入口
 - `qcu/distributed/`：分布式执行
 - `qcu/workloads/`：任务类型，如 factorization / hash_search / collapse_scan
+- `qcu_lang/`：量子语言桥接库（三层 ISA、编译器、QASM/Qiskit 前端）
 - `jobs/`：作业定义
 - `slurm/`：Slurm 模板
 - `mpi/`：MPI 启动脚本
@@ -202,6 +203,64 @@ DIM=144 的矩阵太小，单次 matmul 仅需数微秒，但 CUDA kernel launch
 
 ---
 
+## qcu_lang — 量子语言桥接库
+
+`qcu_lang` 是 QCU 的编程接口层，让标准量子程序（QASM、Qiskit）能直接在 QCU 上运行，无需了解内部相位动力学。
+
+### 三层指令集架构
+
+```
+Layer 0   标准量子门       H X CX CCX …        （Clifford+T 通用门集）
+              ↓ 门分解 + 相位映射
+Layer 1   QCU 相位指令    PHASE_TRIM DRIVE_BOOST …   （直接对应物理旋钮）
+              ↓
+Layer 2   QCU 涌现指令    QCL_BOOST SYNC_EMERGE …    （整协议级操作）
+              ↓
+       IQPU 执行引擎（Lindblad RK4）
+```
+
+外部看到标准量子门接口，内部映射到相位动力学参数。桥接转换在编译器层完成，不影响与现有量子工具链的兼容。
+
+### 快速上手
+
+```python
+from qcu_lang import QCircuit, QCUExecutor, from_qasm_str, optimize, compile_circuit
+
+# 方式一：手写电路
+circ = QCircuit(n_qubits=2)
+circ.h(0).cx(0, 1)
+result = QCUExecutor(verbose=False).run(circ)
+print(f"C_end={result.final_C:.4f}  dtheta={result.final_dtheta:.6f}")
+
+# 方式二：从 QASM 导入
+circ = from_qasm_str("""
+OPENQASM 2.0; include "qelib1.inc";
+qreg q[2]; h q[0]; cx q[0],q[1];
+""")
+steps = optimize(compile_circuit(circ))   # 编译 + 优化
+result = QCUExecutor(verbose=False).run(circ)
+
+# 方式三：三层混合（标准门 + 相位微调 + 涌现协议）
+circ = QCircuit(n_qubits=2, n_clbits=2, name="mixed")
+circ.h(0).rz(0.785, 0).cx(0, 1)       # Layer 0
+circ.phase_trim(0, 1, 0.012)           # Layer 1
+circ.qcl_boost(4.0, 0.9, 0.012, 2.0)  # Layer 2
+circ.measure(0, 0).measure(1, 1)
+```
+
+### 覆盖范围（48/48 全部通过测试）
+
+| 层 | 指令 | 状态 |
+|----|------|------|
+| Layer 0 单量子比特 | X Y Z H S SDG T TDG SX RX RY RZ P U ID BARRIER RESET | ✅ |
+| Layer 0 多量子比特 | CX CY CZ SWAP iSWAP ECR CCX CSWAP MCX MEAS | ✅ |
+| Layer 1 Phase 指令 | PHASE_SHIFT TRIM LOCK DRIVE_SET BOOST DISPERSIVE_WAIT FREE_EVOLVE | ✅ |
+| Layer 2 Emerge 指令 | QCL_PCM QIM BOOST RUN SYNC_EMERGE PHASE_LOCK_WAIT PHASE_ANNEAL | ✅ |
+
+编译器优化 pass：合并相邻 `phase_shift`、相消清零、`noop` 剥离，CCX 43 步 → 优化后 35 步。
+
+---
+
 ## 路线图
 
 ### 已完成
@@ -209,23 +268,12 @@ DIM=144 的矩阵太小，单次 matmul 仅需数微秒，但 CUDA kernel launch
 - `qcu_kdrv.sys`：Windows 内核驱动（ObReferenceObjectByName 方案）
 - GPU 加速：cupy-cuda13x 双后端
 - 工作负载：Shor 因式分解、哈希坍缩搜索、collapse_scan
+- `qcu_lang`：三层 ISA + 编译器 + QASM/Qiskit 前端 + 优化 pass（48/48 测试通过）
 
-### 下一阶段：QCU-ISA + qcu-lang
-
-QCU 当前缺少指令集层——外部量子语言（Q#、QASM、Qiskit）没有编译目标。
-规划在 IQPU 和外部语言之间增加两层：
-
-```
-Q# / QASM / Qiskit
-      ↓ qcu-lang 编译器
-  QCU-ISA 基础门集        ← QCU 的「汇编语言」
-      ↓ 相位映射
-   IQPU 执行引擎
-```
-
-基础门集：`{ RZ(θ), RX(θ), X, CZ, MEAS, ID(t) }`，映射到色散耦合和相位协议参数。
-
-详见 [`docs/QCU_ISA_LANG_PLAN.md`](docs/QCU_ISA_LANG_PLAN.md)
+### 下一阶段
+- Cirq / Q# 前端（低优先级）
+- 多 qubit 动态分配（当前固定 Nq=2）
+- 噪声模型与 IQPUConfig 参数从电路注解自动推导
 
 ---
 
