@@ -202,6 +202,33 @@ DIM=144 的矩阵太小，单次 matmul 仅需数微秒，但 CUDA kernel launch
 
 ---
 
+## 路线图
+
+### 已完成
+- `qcu/core/`：Lindblad RK4 求解器、相位调制、读出、纠缠度量
+- `qcu_kdrv.sys`：Windows 内核驱动（ObReferenceObjectByName 方案）
+- GPU 加速：cupy-cuda13x 双后端
+- 工作负载：Shor 因式分解、哈希坍缩搜索、collapse_scan
+
+### 下一阶段：QCU-ISA + qcu-lang
+
+QCU 当前缺少指令集层——外部量子语言（Q#、QASM、Qiskit）没有编译目标。
+规划在 IQPU 和外部语言之间增加两层：
+
+```
+Q# / QASM / Qiskit
+      ↓ qcu-lang 编译器
+  QCU-ISA 基础门集        ← QCU 的「汇编语言」
+      ↓ 相位映射
+   IQPU 执行引擎
+```
+
+基础门集：`{ RZ(θ), RX(θ), X, CZ, MEAS, ID(t) }`，映射到色散耦合和相位协议参数。
+
+详见 [`docs/QCU_ISA_LANG_PLAN.md`](docs/QCU_ISA_LANG_PLAN.md)
+
+---
+
 ## 当前迁移状态
 
 当前原型保存在：
