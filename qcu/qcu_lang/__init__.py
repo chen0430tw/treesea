@@ -31,6 +31,7 @@ from .ir.circuit import QGate, QCircuit
 
 # 前端
 from .frontend.qasm import from_qasm_str, from_qasm_file
+from .frontend.qsharp import from_qsharp_str, from_qsharp_file
 
 # 编译器
 from .compiler.phase_map import compile_circuit, PhaseStep
@@ -46,6 +47,7 @@ __all__ = [
     "QGate", "QCircuit",
     # 前端
     "from_qasm_str", "from_qasm_file",
+    "from_qsharp_str", "from_qsharp_file",
     # 编译器
     "compile_circuit", "PhaseStep", "optimize",
     # 后端

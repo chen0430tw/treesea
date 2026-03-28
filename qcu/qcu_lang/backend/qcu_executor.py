@@ -76,27 +76,41 @@ class QCUExecutor:
     """
 
     def __init__(self, cfg=None, device: str = "cpu", verbose: bool = True):
-        from qcu.core.state_repr import IQPUConfig
-        from qcu.core.iqpu_runtime import IQPU
-
-        if cfg is None:
-            cfg = IQPUConfig(
-                Nq=2, Nm=2, d=6,
-                kappa=np.array([0.01, 0.01]),
-                T1=np.array([100., 100.]),
-                Tphi=np.array([200., 200.]),
-                t_max=8.0, dt=0.05, obs_every=20,
-                track_entanglement=False,
-                device=device,
-            )
-        self.cfg = cfg
+        self._user_cfg = cfg   # None → auto-detect Nq from circuit at run()
         self.device = device
         self.verbose = verbose
-        self._iqpu = IQPU(cfg)
+        self.cfg = cfg         # may be overwritten per-run when auto-detecting
+        self._iqpu = None
+
+    def _make_cfg(self, n_qubits: int):
+        """生成 IQPUConfig。
+
+        segment 级操作（单门/双门步骤）固定 Nq=2：每个 PhaseStep 最多涉及
+        2-body 局部相位交互，全局多 qubit 结构由步骤序列编码，不需要同时
+        仿真所有 qubit（否则 DIM 指数爆炸）。
+        emerge 级操作（整协议）才传入真实 n_qubits。
+        """
+        from qcu.core.state_repr import IQPUConfig
+        Nq = max(n_qubits, 2)   # 最小 2：C(t)=|⟨a₀⟩−⟨a₁⟩| 需要至少 2 mode
+        return IQPUConfig(
+            Nq=Nq, Nm=Nq, d=6,
+            kappa=np.full(Nq, 0.01),
+            T1=np.full(Nq, 100.),
+            Tphi=np.full(Nq, 200.),
+            t_max=8.0, dt=0.05, obs_every=20,
+            track_entanglement=False,
+            device=self.device,
+        )
 
     def run(self, circ: QCircuit) -> QCUExecResult:
         """执行量子电路，返回结果。"""
         import time
+        from qcu.core.iqpu_runtime import IQPU
+        # segment 级固定 Nq=2（局部相位交互），emerge 级才用 circ.n_qubits
+        seg_cfg    = self._user_cfg or self._make_cfg(2)
+        emerge_cfg = self._user_cfg or self._make_cfg(circ.n_qubits)
+        self.cfg   = seg_cfg          # 暴露给外部检查（代表 segment 级配置）
+        self._iqpu = IQPU(seg_cfg)
         steps = compile_circuit(circ)
         result = QCUExecResult(circuit_name=circ.name, n_steps=len(steps))
 
@@ -184,7 +198,7 @@ class QCUExecutor:
                 result.iqpu_results.append(r)
 
             elif step.kind == "emerge":
-                # 完整 QCL v6 协议
+                # 完整 QCL v6 协议 — 用 emerge_cfg（包含真实 n_qubits）
                 trim = phase_accumulator
                 phase_accumulator = 0.0
                 r = self._run_segment(
@@ -193,6 +207,7 @@ class QCUExecutor:
                     gamma_boost=0.9, boost_duration=3.0,
                     gamma_reset=0.25, gamma_phi0=0.6,
                     eps_boost=4.0, boost_phase_trim=trim,
+                    _cfg=emerge_cfg,
                 )
                 sr.readout = {
                     "C_end": r.C_end,
@@ -237,8 +252,11 @@ class QCUExecutor:
         result.elapsed_sec = time.time() - t0
         return result
 
-    def _run_segment(self, **kw) -> Any:
-        """运行一段 QCL v6 协议（重新初始化 IQPU 保证状态干净）。"""
+    def _run_segment(self, *, _cfg=None, **kw) -> Any:
+        """运行一段 QCL v6 协议（重新初始化 IQPU 保证状态干净）。
+
+        _cfg : 可选，传入则覆盖 self.cfg（emerge 步骤用 emerge_cfg）。
+        """
         from qcu.core.iqpu_runtime import IQPU
-        iqpu = IQPU(self.cfg)
+        iqpu = IQPU(_cfg if _cfg is not None else self.cfg)
         return iqpu.run_qcl_v6(label="seg", **kw)
