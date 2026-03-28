@@ -37,8 +37,8 @@ def get_xp(device: str):
 # ──────────────────────────────────────────────
 
 def dagger(a: np.ndarray) -> np.ndarray:
-    """共轭转置"""
-    return np.conjugate(a.T)
+    """共轭转置（numpy / cupy 均可）"""
+    return a.conj().T
 
 
 def kron(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -76,9 +76,14 @@ def coherent_state(d: int, alpha: complex) -> np.ndarray:
 
 
 def enforce_density_matrix(rho: np.ndarray) -> None:
-    """原地强制密度矩阵：Hermitian 化 + 迹归一"""
+    """原地强制密度矩阵：Hermitian 化 + 迹归一（numpy / cupy 均可）"""
+    try:
+        import cupy
+        xp = cupy.get_array_module(rho)
+    except ImportError:
+        xp = np
     rho[:] = 0.5 * (rho + dagger(rho))
-    rho /= (np.trace(rho) + 1e-15)
+    rho /= (xp.trace(rho) + 1e-15)
 
 
 def wrap_pi(x: float) -> float:

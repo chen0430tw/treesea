@@ -36,7 +36,12 @@ def expect(rho: np.ndarray, op: np.ndarray) -> complex:
     complex
         期望值（物理量通常取实部）
     """
-    return np.trace(rho @ op)
+    try:
+        import cupy
+        xp = cupy.get_array_module(rho)
+    except ImportError:
+        xp = np
+    return xp.trace(rho @ op)
 
 
 @dataclass
