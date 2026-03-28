@@ -327,3 +327,89 @@ if failed:
         if not ok:
             print(f"  ✗ {name}: {info}")
 print(SEP)
+
+# ─────────────────────────────────────────────────────────────
+# Cirq 前端测试
+# ─────────────────────────────────────────────────────────────
+try:
+    import cirq as _cirq
+    _HAS_CIRQ = True
+except ImportError:
+    _HAS_CIRQ = False
+
+if _HAS_CIRQ:
+    print()
+    print(SEP)
+    print("【Cirq 前端】from_cirq + to_cirq")
+    print(SEP)
+    from qcu_lang.frontend.cirq_frontend import from_cirq, to_cirq
+    import cirq
+
+    def t_cirq_bell():
+        q0, q1 = cirq.LineQubit.range(2)
+        c = cirq.Circuit([cirq.H(q0), cirq.CNOT(q0, q1),
+                          cirq.measure(q0, key='m0'), cirq.measure(q1, key='m1')])
+        qcirc = from_cirq(c, name='bell')
+        assert qcirc.n_qubits == 2
+        ops = [g.op for g in qcirc.gates]
+        assert GateType.H in ops and GateType.CX in ops and GateType.MEAS in ops
+        r = ex.run(qcirc)
+        assert r.final_C is not None
+        return f"n_qubits={qcirc.n_qubits}  C={r.final_C:.4f}"
+
+    def t_cirq_toffoli():
+        q0, q1, q2 = cirq.LineQubit.range(3)
+        c = cirq.Circuit([cirq.X(q0), cirq.X(q1), cirq.CCX(q0, q1, q2)])
+        qcirc = from_cirq(c, name='toffoli')
+        assert qcirc.n_qubits == 3
+        raw = compile_circuit(qcirc)
+        opt = optimize(raw)
+        r = ex.run(qcirc)
+        return f"n_qubits={qcirc.n_qubits}  raw={len(raw)} opt={len(opt)}  C={r.final_C:.4f}"
+
+    def t_cirq_rot():
+        q = cirq.LineQubit(0)
+        c = cirq.Circuit([cirq.rz(1.57)(q), cirq.ry(0.78)(q), cirq.rx(3.14)(q)])
+        qcirc = from_cirq(c)
+        ops = [g.op for g in qcirc.gates]
+        assert GateType.RZ in ops and GateType.RY in ops and GateType.RX in ops
+        rz = next(g for g in qcirc.gates if g.op == GateType.RZ)
+        assert abs(rz.params[0] - 1.57) < 1e-6
+        return f"gates={[g.op.name for g in qcirc.gates]}"
+
+    def t_cirq_pow():
+        q = cirq.LineQubit(0)
+        c = cirq.Circuit([cirq.Z(q)**0.5, cirq.X(q)**0.5])
+        qcirc = from_cirq(c)
+        ops = [g.op for g in qcirc.gates]
+        assert GateType.RZ in ops   # Z^0.5 → RZ(π/2)
+        assert GateType.SX in ops   # X^0.5 → SX
+        return f"Z^0.5→RZ, X^0.5→SX ✓"
+
+    def t_cirq_to_cirq():
+        q0, q1 = cirq.LineQubit.range(2)
+        c = cirq.Circuit([cirq.H(q0), cirq.CNOT(q0, q1)])
+        qcirc = from_cirq(c)
+        c_back = to_cirq(qcirc)
+        assert len(list(c_back.all_operations())) == 2
+        return f"roundtrip ops={[str(op.gate) for m in c_back for op in m.operations]}"
+
+    check("Cirq Bell 解析 + 执行",  t_cirq_bell)
+    check("Cirq Toffoli（3-qubit）", t_cirq_toffoli)
+    check("Cirq 旋转门 rz/ry/rx",    t_cirq_rot)
+    check("Cirq ZPow/XPow 门",       t_cirq_pow)
+    check("to_cirq 双向转换",         t_cirq_to_cirq)
+
+    total  = len(results)
+    passed = sum(1 for _, ok, _ in results if ok)
+    failed = total - passed
+    print()
+    print(SEP)
+    print(f"最终汇总（含 Cirq）：{passed}/{total} PASS  {'✓ 全部通过' if not failed else f'✗ {failed} 个失败'}")
+    if failed:
+        for name, ok, info in results:
+            if not ok:
+                print(f"  ✗ {name}: {info}")
+    print(SEP)
+else:
+    print("\n[跳过] cirq-core 未安装，Cirq 前端测试略过")

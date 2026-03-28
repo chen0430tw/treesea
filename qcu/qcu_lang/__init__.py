@@ -32,6 +32,10 @@ from .ir.circuit import QGate, QCircuit
 # 前端
 from .frontend.qasm import from_qasm_str, from_qasm_file
 from .frontend.qsharp import from_qsharp_str, from_qsharp_file
+try:
+    from .frontend.cirq_frontend import from_cirq, to_cirq
+except ImportError:
+    pass   # cirq-core 未安装时跳过
 
 # 编译器
 from .compiler.phase_map import compile_circuit, PhaseStep
