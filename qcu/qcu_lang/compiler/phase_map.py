@@ -150,6 +150,15 @@ def _gate_to_steps(gate: QGate) -> List[PhaseStep]:
             PhaseStep("phase_shift", {"mode": 0, "theta": math.pi/2}, gate),
         ]
 
+    if op == GateType.CY:
+        ctrl, tgt = q[0], q[1]
+        # CY = S†(tgt) · CX(ctrl,tgt) · S(tgt)
+        return [
+            PhaseStep("phase_shift", {"mode": 0, "theta": -math.pi/2}, gate),
+            *_gate_to_steps(QGate(GateType.CX, (ctrl, tgt))),
+            PhaseStep("phase_shift", {"mode": 0, "theta":  math.pi/2}, gate),
+        ]
+
     if op == GateType.SWAP:
         # SWAP = CX(a,b) · CX(b,a) · CX(a,b)
         a, b = q[0], q[1]
