@@ -100,6 +100,7 @@ class IQPU:
         gamma_phi0: float,
         eps_boost: float,
         boost_phase_trim: float,
+        init_rho=None,        # 可选初态密度矩阵；None → build_initial_state
     ) -> IQPURunResult:
         """运行 QCL v6 四阶段协议并返回结果。
 
@@ -145,7 +146,10 @@ class IQPU:
         ops = self.ops
 
         # ── 初始化密度矩阵（numpy 构建后移到目标设备）──
-        rho = self.xp.asarray(build_initial_state(cfg, self.dimQ, self.dimM))
+        if init_rho is not None:
+            rho = self.xp.asarray(init_rho)
+        else:
+            rho = self.xp.asarray(build_initial_state(cfg, self.dimQ, self.dimM))
 
         # ── 构建各阶段 Hamiltonian ──
         H_pulse = 0.5 * float(omega_x) * ops.sxJ[0]
@@ -212,6 +216,7 @@ class IQPU:
             C_end=C_end,
             dtheta_end=dtheta_end,
             N_end=N_end,
+            final_rho=np.array(rho) if hasattr(rho, '__array__') else rho,
         )
 
     # ──────────────────────────────────────────────

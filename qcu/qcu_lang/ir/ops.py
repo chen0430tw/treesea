@@ -67,10 +67,12 @@ class GateType(Enum):
 
     测量 / 初始化
     -------------
-    MEAS    测量并写入经典比特，触发波函数坍缩
-    RESET   将 qubit 强制复位到 |0⟩
-    ID      恒等门（空闲，保持 qubit 不变，持续 t 时间）
-    BARRIER 同步屏障，阻止编译器跨越此点重排门
+    MEAS      测量并写入经典比特，触发波函数坍缩
+    PROJ_MEAS 投影测量：先跑高强度辨别协议（eps_boost=8.0），再读出
+              sz 值被推向 ±1，bit 结果更确定；用于需要明确 0/1 的算法
+    RESET     将 qubit 强制复位到 |0⟩
+    ID        恒等门（空闲，保持 qubit 不变，持续 t 时间）
+    BARRIER   同步屏障，阻止编译器跨越此点重排门
     """
 
     # 单比特 Pauli / Clifford
@@ -105,10 +107,11 @@ class GateType(Enum):
     MCX  = auto()
 
     # 测量 / 初始化
-    MEAS  = auto()
-    RESET = auto()
-    ID    = auto()
-    BARRIER = auto()
+    MEAS      = auto()
+    PROJ_MEAS = auto()
+    RESET     = auto()
+    ID        = auto()
+    BARRIER   = auto()
 
 
 # 各门所需参数数量
@@ -122,7 +125,8 @@ GATE_PARAM_COUNT: dict[GateType, int] = {
     GateType.CX: 0, GateType.CY: 0, GateType.CZ: 0,
     GateType.SWAP: 0, GateType.ISWAP: 0, GateType.ECR: 0,
     GateType.CCX: 0, GateType.CSWAP: 0, GateType.MCX: 0,
-    GateType.MEAS: 0, GateType.RESET: 0,
+    GateType.MEAS: 0, GateType.PROJ_MEAS: 0,
+    GateType.RESET: 0,
     GateType.ID: 0, GateType.BARRIER: 0,
 }
 
@@ -136,7 +140,8 @@ GATE_QUBIT_COUNT: dict[GateType, int] = {
     GateType.CX: 2, GateType.CY: 2, GateType.CZ: 2,
     GateType.SWAP: 2, GateType.ISWAP: 2, GateType.ECR: 2,
     GateType.CCX: 3, GateType.CSWAP: 3, GateType.MCX: -1,
-    GateType.MEAS: 1, GateType.RESET: 1,
+    GateType.MEAS: 1, GateType.PROJ_MEAS: 1,
+    GateType.RESET: 1,
     GateType.ID: 1, GateType.BARRIER: -1,
 }
 

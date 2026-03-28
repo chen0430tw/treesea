@@ -242,6 +242,7 @@ class IQPURunResult:
     C_end: float
     dtheta_end: float
     N_end: Optional[float]
+    final_rho: Optional[np.ndarray] = None  # 末态密度矩阵，供下一 gate 作初态
 
 
 # ──────────────────────────────────────────────

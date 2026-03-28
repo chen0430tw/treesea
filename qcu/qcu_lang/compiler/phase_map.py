@@ -170,6 +170,12 @@ def _gate_to_steps(gate: QGate) -> List[PhaseStep]:
         return [PhaseStep("readout", {"qubit": q[0],
                                        "clbit": gate.clbits[0] if gate.clbits else 0}, gate)]
 
+    if op == GateType.PROJ_MEAS:
+        # 投影测量：先跑高强度辨别协议，再读出
+        # eps_boost=8.0 将腔-qubit 纠缠推向 ±1，给出更确定的 bit 结果
+        return [PhaseStep("proj_readout", {"qubit": q[0],
+                                            "clbit": gate.clbits[0] if gate.clbits else 0}, gate)]
+
     if op == GateType.RESET:
         return [PhaseStep("qim_evolve", {"qubit": q[0], "omega_x": 0.0,
                                           "duration": 0.1, "reset": True}, gate)]

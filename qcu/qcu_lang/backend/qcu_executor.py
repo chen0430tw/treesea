@@ -50,15 +50,17 @@ class QCUExecResult:
     final_sz: Optional[List[float]] = None
     final_n: Optional[List[float]] = None
     final_rel_phase: Optional[List[float]] = None
+    bit_results: Optional[List[int]] = None   # sz > 0 → 0, sz ≤ 0 → 1
     elapsed_sec: float = 0.0
     iqpu_results: List[Any] = field(default_factory=list)
 
     def __repr__(self) -> str:
         c = f"{self.final_C:.4f}" if self.final_C is not None else "N/A"
         d = f"{self.final_dtheta:.4f}" if self.final_dtheta is not None else "N/A"
+        b = self.bit_results if self.bit_results is not None else "N/A"
         return (
             f"QCUExecResult({self.circuit_name!r}, "
-            f"steps={self.n_steps}, C_end={c}, dtheta={d})"
+            f"steps={self.n_steps}, C_end={c}, dtheta={d}, bits={b})"
         )
 
 
@@ -158,6 +160,27 @@ class QCUExecutor:
                         "rel_phase": last.final_rel_phase,
                     }
 
+            elif step.kind == "proj_readout":
+                # 投影测量：高强度辨别协议（eps_boost=8.0）→ sz 推向 ±1
+                trim = phase_accumulator
+                phase_accumulator = 0.0
+                r = self._run_segment(
+                    t1=0.1, t2=0.3,
+                    omega_x=0.0,
+                    gamma_pcm=0.3, gamma_qim=0.0,
+                    gamma_boost=0.9, boost_duration=0.2,
+                    gamma_reset=0.0, gamma_phi0=0.0,
+                    eps_boost=8.0,
+                    boost_phase_trim=trim,
+                )
+                sr.readout = {
+                    "C_end": r.C_end,
+                    "sz": r.final_sz,
+                    "n": r.final_n,
+                    "rel_phase": r.final_rel_phase,
+                }
+                result.iqpu_results.append(r)
+
             elif step.kind == "qcl_phase":
                 phase = step.params.get("phase", "pcm")
                 duration = step.params.get("duration", 1.0)
@@ -241,15 +264,20 @@ class QCUExecutor:
             result.final_sz = last.final_sz
             result.final_n = last.final_n
             result.final_rel_phase = last.final_rel_phase
+            # 经典 bit 读出：⟨σz⟩ > 0 → |0⟩ → bit=0；≤ 0 → |1⟩ → bit=1
+            if last.final_sz is not None:
+                result.bit_results = [0 if sz > 0 else 1 for sz in last.final_sz]
 
         result.elapsed_sec = time.time() - t0
         return result
 
-    def _run_segment(self, *, _cfg=None, **kw) -> Any:
-        """运行一段 QCL v6 协议（重新初始化 IQPU 保证状态干净）。
+    def _run_segment(self, *, _cfg=None, _init_rho=None, **kw) -> Any:
+        """运行一段 QCL v6 协议。
 
-        _cfg : 可选，传入则覆盖 self.cfg（emerge 步骤用 emerge_cfg）。
+        _cfg      : 可选，传入则覆盖 self.cfg（emerge 步骤用 emerge_cfg）。
+        _init_rho : 可选初态密度矩阵；传入则从上一 gate 末态继续演化，
+                    实现 gate 间量子态连续传递。None → 从 |0⟩ 初始化。
         """
         from qcu.core.iqpu_runtime import IQPU
         iqpu = IQPU(_cfg if _cfg is not None else self.cfg)
-        return iqpu.run_qcl_v6(label="seg", **kw)
+        return iqpu.run_qcl_v6(label="seg", init_rho=_init_rho, **kw)

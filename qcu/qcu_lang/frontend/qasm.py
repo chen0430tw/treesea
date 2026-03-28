@@ -57,8 +57,9 @@ _QASM2_GATE_MAP: Dict[str, GateType] = {
     "toffoli": GateType.CCX,
     "cswap": GateType.CSWAP,
     # 测量 / 初始化
-    "measure": GateType.MEAS,
-    "reset":   GateType.RESET,
+    "measure":   GateType.MEAS,
+    "proj_meas": GateType.PROJ_MEAS,
+    "reset":     GateType.RESET,
     "id":      GateType.ID,
     "barrier": GateType.BARRIER,
 }
