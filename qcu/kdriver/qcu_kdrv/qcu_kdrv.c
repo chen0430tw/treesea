@@ -388,8 +388,7 @@ static NTSTATUS HandleGetNumaInfo(PIRP Irp, PIO_STACK_LOCATION Stack)
     QCU_NUMA_INFO *info = (QCU_NUMA_INFO*)Irp->AssociatedIrp.SystemBuffer;
     RtlZeroMemory(info, sizeof(QCU_NUMA_INFO));
 
-    USHORT highest = 0;
-    KeQueryHighestNodeNumber(&highest);
+    USHORT highest = KeQueryHighestNodeNumber();
     info->node_count = (ULONG)highest + 1;
     if (info->node_count > QCU_MAX_NUMA_NODES)
         info->node_count = QCU_MAX_NUMA_NODES;
@@ -461,9 +460,9 @@ static NTSTATUS HandleReadPmc(PIRP Irp, PIO_STACK_LOCATION Stack)
     ctx.counter_id = req->counter_id;
     KeInitializeEvent(&ctx.done, NotificationEvent, FALSE);
 
-    CCHAR target_cpu = (req->cpu_index == 0)
+    CCHAR target_cpu = (CCHAR)(UCHAR)((req->cpu_index == 0)
         ? KeGetCurrentProcessorNumberEx(NULL)
-        : (CCHAR)req->cpu_index;
+        : req->cpu_index);
 
     KeInitializeDpc(&ctx.dpc, PmcDpcRoutine, &ctx);
     KeSetTargetProcessorDpc(&ctx.dpc, target_cpu);
@@ -486,8 +485,7 @@ static NTSTATUS HandleQueryStatus(PIRP Irp, PIO_STACK_LOCATION Stack)
         return CompleteIrp(Irp, STATUS_BUFFER_TOO_SMALL, 0);
 
     QCU_STATUS *s = (QCU_STATUS*)Irp->AssociatedIrp.SystemBuffer;
-    USHORT highest = 0;
-    KeQueryHighestNodeNumber(&highest);
+    USHORT highest = KeQueryHighestNodeNumber();
 
     s->version           = QCU_DRIVER_VERSION;
     s->active_allocs     = (ULONG)g_alloc_count;
