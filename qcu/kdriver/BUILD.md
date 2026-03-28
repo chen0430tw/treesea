@@ -291,6 +291,71 @@ kdmapper 成功输出包含：
 
 ---
 
+## 蓝屏排查速查
+
+蓝屏后重启，按以下顺序找信息，30 秒内能定位问题。
+
+### 第一步：看事件日志（最快，不需要 sudo）
+
+```powershell
+Get-WinEvent -LogName Application -MaxEvents 100 |
+  Where-Object { $_.Id -eq 1001 } |
+  Select-Object -First 3 |
+  Format-List TimeCreated, Message
+```
+
+输出里找 `OcaBucket` — 这是崩溃模块名，例如：
+- `AV_nt!IoCreateDevice` = ntoskrnl 的 IoCreateDevice 崩溃
+- `AV_qcu_kdrv!xxx` = 我们自己的驱动崩溃
+
+### 第二步：确认 Minidump 文件存在
+
+```powershell
+# 需要 sudo（Minidump 目录权限受保护）
+sudo powershell.exe -Command "ls C:\Windows\Minidump\ | Sort-Object LastWriteTime -Descending | Select-Object -First 3 | Format-Table Name, LastWriteTime -AutoSize"
+```
+
+文件名格式：`MMDDYY-XXXXX-01.dmp`，按时间倒序，第一个就是最近一次。
+
+### 第三步：从事件日志读 Stop Code 和参数
+
+```powershell
+Get-WinEvent -LogName Application -MaxEvents 100 |
+  Where-Object { $_.Id -eq 1001 -and $_.ProviderName -like '*Error*' } |
+  Select-Object -First 1 |
+  Format-List Message
+```
+
+关键字段：
+| 字段 | 含义 |
+|------|------|
+| P1 | 故障地址（发生 fault 的内存地址） |
+| P2 | 操作类型（0=读, 1=写, 2=执行） |
+| P3 | RIP（崩溃时 CPU 正在执行的地址） |
+| P4 | 模式（2=内核模式） |
+| OcaBucket | 崩溃模块 + 函数名 |
+
+### 常见 Stop Code
+
+| Code | 名称 | 驱动开发常见原因 |
+|------|------|----------------|
+| 0x50 | PAGE_FAULT_IN_NONPAGED_AREA | 解引用 NULL 或野指针 |
+| 0xBE | ATTEMPTED_WRITE_TO_READONLY_MEMORY | 写了只读页（如写代码段） |
+| 0x3B | SYSTEM_SERVICE_EXCEPTION | 内核系统调用时的访问违规 |
+| 0x1E | KMODE_EXCEPTION_NOT_HANDLED | 内核未处理异常（通常是除零或非法指令） |
+| 0x7E | SYSTEM_THREAD_EXCEPTION_NOT_HANDLED | 内核线程异常 |
+
+### P1 地址的判断规律
+
+| P1 值范围 | 说明 |
+|-----------|------|
+| `0x0` ~ `0xFFFF` | NULL 指针加小偏移，经典空指针解引用 |
+| `0xFFFFFFFFFFFFxxxx` | 负数偏移，通常是 NULL - offset |
+| `0xDEAD????` / `0xBAD????` | 内存已被释放（use-after-free）或未初始化 |
+| 正常内核地址但不可访问 | 页面未映射，分页内存在 IRQL > DISPATCH_LEVEL 被访问 |
+
+---
+
 ### 11. 蓝屏 STOP 0x50 PAGE_FAULT_IN_NONPAGED_AREA（kdmapper DriverObject=NULL）
 
 **现象**：驱动被 kdmapper 成功映射并执行，但立即蓝屏。
