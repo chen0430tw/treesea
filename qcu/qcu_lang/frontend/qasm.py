@@ -68,16 +68,25 @@ _QASM2_GATE_MAP: Dict[str, GateType] = {
 
 def _parse_qasm2(text: str) -> QCircuit:
     """轻量 QASM 2.0 解析器（不依赖外部库）。"""
-    lines = text.splitlines()
-    qreg: Dict[str, int] = {}    # 寄存器名 → 起始索引
+    # 按分号展开为独立语句（先剥注释，再分割）
+    stmts = []
+    for raw in text.splitlines():
+        raw = raw.split("//")[0]
+        for part in raw.split(";"):
+            s = part.strip()
+            if s:
+                stmts.append(s)
+
+    qreg: Dict[str, int] = {}       # 寄存器名 → 起始索引
+    qreg_size: Dict[str, int] = {}  # 寄存器名 → 大小
     creg: Dict[str, int] = {}
+    creg_size: Dict[str, int] = {}
     total_q = 0
     total_c = 0
     gates: List[QGate] = []
     name = ""
 
-    for lineno, raw in enumerate(lines, 1):
-        line = raw.split("//")[0].strip().rstrip(";")
+    for lineno, line in enumerate(stmts, 1):
         if not line:
             continue
 
@@ -94,6 +103,7 @@ def _parse_qasm2(text: str) -> QCircuit:
         if m:
             rname, size = m.group(1), int(m.group(2))
             qreg[rname] = total_q
+            qreg_size[rname] = size
             total_q += size
             continue
 
@@ -102,10 +112,11 @@ def _parse_qasm2(text: str) -> QCircuit:
         if m:
             rname, size = m.group(1), int(m.group(2))
             creg[rname] = total_c
+            creg_size[rname] = size
             total_c += size
             continue
 
-        # measure 语句：measure q[i] -> c[j]
+        # measure 语句：measure q[i] -> c[j]（逐位）
         m = re.match(r"measure\s+(\w+)\[(\d+)\]\s*->\s*(\w+)\[(\d+)\]", line)
         if m:
             qr, qi, cr, ci = m.group(1), int(m.group(2)), m.group(3), int(m.group(4))
@@ -113,6 +124,19 @@ def _parse_qasm2(text: str) -> QCircuit:
             c_idx = creg.get(cr, 0) + ci
             gates.append(QGate(GateType.MEAS, (q_idx,), clbits=(c_idx,),
                                meta={"line": lineno}))
+            continue
+
+        # measure 语句：measure q -> c（整寄存器广播）
+        m = re.match(r"measure\s+(\w+)\s*->\s*(\w+)$", line)
+        if m:
+            qr, cr = m.group(1), m.group(2)
+            if qr in qreg and cr in creg:
+                size = qreg_size.get(qr, 1)
+                for i in range(size):
+                    gates.append(QGate(GateType.MEAS,
+                                       (qreg[qr] + i,),
+                                       clbits=(creg[cr] + i,),
+                                       meta={"line": lineno}))
             continue
 
         # 门指令解析
@@ -139,20 +163,30 @@ def _parse_qasm2(text: str) -> QCircuit:
                 except Exception:
                     params.append(0.0)
 
-        # 解析 qubit 参数
-        qubits = []
-        for arg in args_str.split(","):
-            arg = arg.strip()
+        # 解析 qubit 参数：支持 q[i]（索引）和 q（整寄存器广播）
+        raw_args = [a.strip() for a in args_str.split(",")]
+        resolved: List[List[int]] = []  # 每个参数位置的候选 qubit 列表
+        broadcast_size = 1
+        for arg in raw_args:
             mm = re.match(r"(\w+)\[(\d+)\]", arg)
             if mm:
                 rname, idx = mm.group(1), int(mm.group(2))
-                qubits.append(qreg.get(rname, 0) + idx)
+                resolved.append([qreg.get(rname, 0) + idx])
             elif arg in qreg:
-                # 整个寄存器（广播，取第 0 个）
-                qubits.append(qreg[arg])
+                sz = qreg_size.get(arg, 1)
+                broadcast_size = max(broadcast_size, sz)
+                resolved.append([qreg[arg] + i for i in range(sz)])
+            else:
+                resolved.append([0])
 
-        gates.append(QGate(gate_type, tuple(qubits), params=tuple(params),
-                           meta={"line": lineno}))
+        # 广播展开：每个广播位置生成一个 gate
+        for bi in range(broadcast_size):
+            qubits = tuple(
+                slots[bi] if len(slots) > 1 else slots[0]
+                for slots in resolved
+            )
+            gates.append(QGate(gate_type, qubits, params=tuple(params),
+                               meta={"line": lineno}))
 
     circ = QCircuit(n_qubits=total_q, n_clbits=total_c, gates=gates,
                     name=name, metadata={"source": "qasm2"})
