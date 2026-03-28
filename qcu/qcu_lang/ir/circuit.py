@@ -182,6 +182,49 @@ class QCircuit:
     def phase_anneal(self, schedule: list):
         return self.append(QGate(EmergeOp.PHASE_ANNEAL, meta={"schedule": schedule}))
 
+    def set_noise(self, *,
+                  T1: float = None,
+                  Tphi: float = None,
+                  kappa: float = None,
+                  d: int = None,
+                  preset: str = None) -> "QCircuit":
+        """标注电路噪声参数，供 QCUExecutor 自动推导 IQPUConfig。
+
+        Parameters
+        ----------
+        T1 : float, optional
+            qubit 纵向弛豫时间（μs），典型值 50–200
+        Tphi : float, optional
+            纯退相干时间（μs），典型值 100–500
+        kappa : float, optional
+            腔泄漏率，典型值 0.005–0.05
+        d : int, optional
+            Fock 截断维度，默认 6
+        preset : str, optional
+            预设档位："ideal" / "nisq" / "noisy"
+            显式参数会覆盖预设值
+
+        Returns
+        -------
+        QCircuit
+            self（支持链式调用）
+
+        Examples
+        --------
+        >>> circ.set_noise(preset="nisq")
+        >>> circ.set_noise(T1=50., Tphi=100., kappa=0.02)
+        >>> circ.set_noise(preset="ideal", d=8)   # ideal + 更高 Fock 截断
+        """
+        noise: dict = {}
+        if preset is not None:
+            noise["preset"] = preset
+        if T1    is not None: noise["T1"]    = float(T1)
+        if Tphi  is not None: noise["Tphi"]  = float(Tphi)
+        if kappa is not None: noise["kappa"] = float(kappa)
+        if d     is not None: noise["d"]     = int(d)
+        self.metadata["noise"] = noise
+        return self
+
     # ── 查询接口 ──────────────────────────────
 
     def layer0_gates(self) -> List[QGate]:

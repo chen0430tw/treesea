@@ -82,35 +82,28 @@ class QCUExecutor:
         self.cfg = cfg         # may be overwritten per-run when auto-detecting
         self._iqpu = None
 
-    def _make_cfg(self, n_qubits: int):
-        """生成 IQPUConfig。
+    def _make_cfg(self, circ: QCircuit, Nq: int):
+        """从电路推导 IQPUConfig（含噪声模型推导）。
 
-        segment 级操作（单门/双门步骤）固定 Nq=2：每个 PhaseStep 最多涉及
-        2-body 局部相位交互，全局多 qubit 结构由步骤序列编码，不需要同时
-        仿真所有 qubit（否则 DIM 指数爆炸）。
-        emerge 级操作（整协议）才传入真实 n_qubits。
+        segment 级操作固定 Nq=2（局部相位交互，DIM=144）；
+        emerge 级才用真实 n_qubits。噪声参数来自 circ.set_noise() 注解，
+        未注解时按电路双比特门数自动校正。
         """
-        from qcu.core.state_repr import IQPUConfig
-        Nq = max(n_qubits, 2)   # 最小 2：C(t)=|⟨a₀⟩−⟨a₁⟩| 需要至少 2 mode
-        return IQPUConfig(
-            Nq=Nq, Nm=Nq, d=6,
-            kappa=np.full(Nq, 0.01),
-            T1=np.full(Nq, 100.),
-            Tphi=np.full(Nq, 200.),
-            t_max=8.0, dt=0.05, obs_every=20,
-            track_entanglement=False,
-            device=self.device,
-        )
+        from ..compiler.noise_infer import infer_iqpu_config
+        return infer_iqpu_config(circ, Nq=Nq, device=self.device)
 
     def run(self, circ: QCircuit) -> QCUExecResult:
         """执行量子电路，返回结果。"""
         import time
         from qcu.core.iqpu_runtime import IQPU
+        from ..compiler.noise_infer import noise_summary
         # segment 级固定 Nq=2（局部相位交互），emerge 级才用 circ.n_qubits
-        seg_cfg    = self._user_cfg or self._make_cfg(2)
-        emerge_cfg = self._user_cfg or self._make_cfg(circ.n_qubits)
+        seg_cfg    = self._user_cfg or self._make_cfg(circ, Nq=2)
+        emerge_cfg = self._user_cfg or self._make_cfg(circ, Nq=circ.n_qubits)
         self.cfg   = seg_cfg          # 暴露给外部检查（代表 segment 级配置）
         self._iqpu = IQPU(seg_cfg)
+        if self.verbose:
+            print(f"  noise: {noise_summary(circ)}")
         steps = compile_circuit(circ)
         result = QCUExecResult(circuit_name=circ.name, n_steps=len(steps))
 

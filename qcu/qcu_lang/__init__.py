@@ -36,6 +36,7 @@ from .frontend.qsharp import from_qsharp_str, from_qsharp_file
 # 编译器
 from .compiler.phase_map import compile_circuit, PhaseStep
 from .compiler.optimizer import optimize
+from .compiler.noise_infer import infer_noise_params, noise_summary
 
 # 后端
 from .backend.qcu_executor import QCUExecutor, QCUExecResult
@@ -50,6 +51,7 @@ __all__ = [
     "from_qsharp_str", "from_qsharp_file",
     # 编译器
     "compile_circuit", "PhaseStep", "optimize",
+    "infer_noise_params", "noise_summary",
     # 后端
     "QCUExecutor", "QCUExecResult",
 ]
