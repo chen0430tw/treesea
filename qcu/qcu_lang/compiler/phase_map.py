@@ -207,8 +207,13 @@ def _gate_to_steps(gate: QGate) -> List[PhaseStep]:
 
 
 def compile_circuit(circ: QCircuit) -> List[PhaseStep]:
-    """将 QCircuit 编译为 PhaseStep 执行序列。"""
+    """将 QCircuit 编译为 PhaseStep 执行序列。
+
+    流程：decompose（复合门展开）→ phase_map（门→PhaseStep）
+    """
+    from .decompose import decompose_circuit
+    expanded = decompose_circuit(circ.gates)
     steps = []
-    for gate in circ.gates:
+    for gate in expanded:
         steps.extend(_gate_to_steps(gate))
     return steps
