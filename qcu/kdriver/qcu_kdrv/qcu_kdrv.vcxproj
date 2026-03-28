@@ -80,7 +80,7 @@
       <WarningLevel>Level3</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
       <CompileAs>CompileAsC</CompileAs>
-      <SpectreMitigation>false</SpectreMitigation>
+      <SpectreMitigation>Disabled</SpectreMitigation>
       <PreprocessorDefinitions>_AMD64_;_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalOptions>/Zp8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
@@ -101,7 +101,7 @@
       <WarningLevel>Level3</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
       <CompileAs>CompileAsC</CompileAs>
-      <SpectreMitigation>false</SpectreMitigation>
+      <SpectreMitigation>Disabled</SpectreMitigation>
       <PreprocessorDefinitions>_AMD64_;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalOptions>/Zp8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
