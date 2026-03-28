@@ -1,6 +1,6 @@
 # QCU-ISA 与 qcu-lang 规划文档
 
-> **状态：已全部完成** ✅（2026-03-28）
+> **状态：已全部完成** ✅（2026-03-29，含 PROJ_MEAS/DISC/Deutsch benchmark）
 > 本文档保留原始规划内容以供参考，末尾附实际完成状态对照。
 
 ## 背景：为什么 QCU 需要指令集
@@ -172,6 +172,39 @@ Phase 4 — 后端执行
   ✅ qcu_lang/backend/qcu_executor.py   接入 IQPU，局部相位执行
 
 Phase 5 — 测试
-  ✅ tests/test_isa_full.py   60/60 PASS（含 Cirq 5 项 + 噪声模型 7 项）
+  ✅ tests/test_isa_full.py   65/65 PASS（含 Cirq 5 项 + 噪声模型 7 项 + PROJ_MEAS/DISC 5 项）
   ✅ tests/test_qsharp.py      7/7  PASS
+
+Phase 6 — 判决指令与 QASM 解析修复
+  ✅ qcu_lang/ir/ops.py          新增 PROJ_MEAS / DISC GateType
+  ✅ qcu_lang/compiler/phase_map.py  PROJ_MEAS → proj_readout，DISC → discriminate
+  ✅ qcu_lang/backend/qcu_executor.py  proj_readout / discriminate 执行器
+  ✅ qcu_lang/frontend/qasm.py       修复广播 measure（measure q -> c），修复同行多语句
+  ✅ qcu_lang/frontend/qasm.py       新增 proj_meas / disc 门名解析
+
+Phase 7 — 基础量子 benchmark（第一层 sanity check）
+  ✅ qcu/gates/__init__.py
+  ✅ qcu/gates/deutsch.py    QCU 原生 Deutsch benchmark
+                              oracle 编码：boost_phase_trim=0（常数）/ π（平衡）
+                              准确率：100%（4/4），C 间隔 186.99
+
+  实现说明
+  ────────
+  QCU 架构设计时已预留量子门风格控制层（boost_phase_trim、脉冲驱动、
+  相位调制、Hamiltonian 局部作用项等），具备运行门级 benchmark 的物理基础。
+  本阶段工作是以 boost_phase_trim 为 oracle 载体，将其封装为
+  正式的 Deutsch benchmark 管线（qcu/gates/deutsch.py）。
+```
+
+### 验证矩阵（当前完整状态）
+
+```
+第一层：基础量子 sanity check
+  ✅ Deutsch benchmark（qcu/gates/deutsch.py）
+
+第二层：结构显形验证
+  ✅ tri-mode / HMPL / local collapse demos
+
+第三层：高复杂任务验证
+  ✅ Shor 风格 / Hash 正向统计 / reverse hash whitelist / prefix-zero / collision scan
 ```

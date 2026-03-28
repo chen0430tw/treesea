@@ -413,3 +413,79 @@ if _HAS_CIRQ:
     print(SEP)
 else:
     print("\n[跳过] cirq-core 未安装，Cirq 前端测试略过")
+
+# ─────────────────────────────────────────────────────────────
+# 新增指令测试：PROJ_MEAS / DISC
+# ─────────────────────────────────────────────────────────────
+print()
+print(SEP)
+print("【新增指令】PROJ_MEAS / DISC 编译 + 执行")
+print(SEP)
+
+def t_proj_meas_compile():
+    g = QGate(GateType.PROJ_MEAS, (0,), clbits=(0,))
+    steps = compile_circuit(QCircuit(1, n_clbits=1, gates=[g]))
+    assert len(steps) == 1 and steps[0].kind == "proj_readout"
+    return f"kind={steps[0].kind} ✓"
+
+def t_disc_compile():
+    g = QGate(GateType.DISC, (0,), params=(0.05,), clbits=(0,))
+    steps = compile_circuit(QCircuit(1, n_clbits=1, gates=[g]))
+    assert len(steps) == 1 and steps[0].kind == "discriminate"
+    assert abs(steps[0].params["threshold"] - 0.05) < 1e-9
+    return f"kind={steps[0].kind}  threshold={steps[0].params['threshold']} ✓"
+
+def t_disc_exec():
+    # Bell + DISC：判决结果应是 0 或 1
+    circ = from_qasm_str("""OPENQASM 2.0;
+qreg q[2]; creg c[2];
+h q[0]; cx q[0],q[1];
+measure q[0]->c[0]; measure q[1]->c[1];""")
+    # 追加 DISC 指令
+    circ.n_clbits = max(circ.n_clbits, 1)
+    circ.gates.append(QGate(GateType.DISC, (0,), params=(0.01,), clbits=(0,)))
+    r = ex.run(circ)
+    assert r.bit_results is not None
+    bit = r.bit_results[0]
+    assert bit in (0, 1)
+    return f"C={r.final_C:.4f}  DISC bit={bit} ✓"
+
+def t_qasm_proj_meas():
+    qasm = """OPENQASM 2.0;
+qreg q[1]; creg c[1];
+h q[0];
+proj_meas q[0] -> c[0];"""
+    circ = from_qasm_str(qasm)
+    ops = [g.op for g in circ.gates]
+    assert GateType.PROJ_MEAS in ops
+    return f"PROJ_MEAS 从 QASM 解析 ✓  gates={[g.op.name for g in circ.gates]}"
+
+def t_qasm_disc():
+    qasm = """OPENQASM 2.0;
+qreg q[1]; creg c[1];
+h q[0];
+disc(0.05) q[0] -> c[0];"""
+    circ = from_qasm_str(qasm)
+    ops = [g.op for g in circ.gates]
+    assert GateType.DISC in ops
+    disc_gate = next(g for g in circ.gates if g.op == GateType.DISC)
+    assert abs(disc_gate.params[0] - 0.05) < 1e-9
+    return f"DISC 从 QASM 解析 ✓  threshold={disc_gate.params[0]}"
+
+check("PROJ_MEAS 编译 → proj_readout",   t_proj_meas_compile)
+check("DISC 编译 → discriminate",        t_disc_compile)
+check("DISC 端到端执行 bit 判决",         t_disc_exec)
+check("PROJ_MEAS 从 QASM 解析",          t_qasm_proj_meas)
+check("DISC 从 QASM 解析",               t_qasm_disc)
+
+total  = len(results)
+passed = sum(1 for _, ok, _ in results if ok)
+failed = total - passed
+print()
+print(SEP)
+print(f"最终汇总（含新增指令）：{passed}/{total} PASS  {'✓ 全部通过' if not failed else f'✗ {failed} 个失败'}")
+if failed:
+    for name, ok, info in results:
+        if not ok:
+            print(f"  ✗ {name}: {info}")
+print(SEP)

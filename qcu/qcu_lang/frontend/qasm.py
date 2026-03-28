@@ -59,6 +59,7 @@ _QASM2_GATE_MAP: Dict[str, GateType] = {
     # 测量 / 初始化
     "measure":   GateType.MEAS,
     "proj_meas": GateType.PROJ_MEAS,
+    "disc":      GateType.DISC,
     "reset":     GateType.RESET,
     "id":      GateType.ID,
     "barrier": GateType.BARRIER,

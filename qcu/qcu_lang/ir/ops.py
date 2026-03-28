@@ -109,6 +109,7 @@ class GateType(Enum):
     # 测量 / 初始化
     MEAS      = auto()
     PROJ_MEAS = auto()
+    DISC      = auto()   # 诱导判决：C > threshold → bit=0，否则 bit=1
     RESET     = auto()
     ID        = auto()
     BARRIER   = auto()

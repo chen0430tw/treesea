@@ -171,10 +171,13 @@ def _gate_to_steps(gate: QGate) -> List[PhaseStep]:
                                        "clbit": gate.clbits[0] if gate.clbits else 0}, gate)]
 
     if op == GateType.PROJ_MEAS:
-        # 投影测量：先跑高强度辨别协议，再读出
-        # eps_boost=8.0 将腔-qubit 纠缠推向 ±1，给出更确定的 bit 结果
         return [PhaseStep("proj_readout", {"qubit": q[0],
                                             "clbit": gate.clbits[0] if gate.clbits else 0}, gate)]
+
+    if op == GateType.DISC:
+        # 诱导判决：用 C 值与阈值比较输出 bit，不跑额外 IQPU 步骤
+        threshold = gate.params[0] if gate.params else 0.01
+        return [PhaseStep("discriminate", {"qubit": q[0], "threshold": threshold}, gate)]
 
     if op == GateType.RESET:
         return [PhaseStep("qim_evolve", {"qubit": q[0], "omega_x": 0.0,

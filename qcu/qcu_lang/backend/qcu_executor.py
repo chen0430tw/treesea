@@ -149,6 +149,20 @@ class QCUExecutor:
                 }
                 result.iqpu_results.append(r)
 
+            elif step.kind == "discriminate":
+                # 诱导判决：C > threshold → bit=0，否则 bit=1
+                threshold = step.params.get("threshold", 0.01)
+                last_C = result.iqpu_results[-1].C_end if result.iqpu_results else 0.0
+                bit = 0 if last_C > threshold else 1
+                qubit = step.params.get("qubit", 0)
+                if result.bit_results is None:
+                    result.bit_results = []
+                # 确保列表够长
+                while len(result.bit_results) <= qubit:
+                    result.bit_results.append(0)
+                result.bit_results[qubit] = bit
+                sr.readout = {"C": last_C, "threshold": threshold, "bit": bit}
+
             elif step.kind == "readout":
                 # 读出当前（最后一次 IQPU 运行的末态）
                 if result.iqpu_results:
