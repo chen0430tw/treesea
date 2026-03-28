@@ -1,5 +1,5 @@
 /*
- * qcu_kdrv.c  —  QCU Kernel Driver
+ * qcu_kdrv.c  -  QCU Kernel Driver
  *
  * Loaded via kdmapper (unsigned, no registry entry, disappears on reboot).
  * Entry point: CustomDriverEntry (not DriverEntry).
@@ -18,11 +18,11 @@
 #include <wdm.h>
 #include "qcu_kdrv.h"
 
-/* ── Version ─────────────────────────────────────────────────────── */
+/* -- Version ------------------------------------------------------- */
 #define QCU_DRIVER_VERSION  0x00010000u  /* 1.0 */
 #define QCU_POOL_TAG        'uqCQ'       /* 'QCqu' reversed for pool tag display */
 
-/* ── Allocation tracking ─────────────────────────────────────────── */
+/* -- Allocation tracking ------------------------------------------- */
 typedef struct _QCU_ALLOC_ENTRY {
     LIST_ENTRY      list;
     PVOID           kernel_va;
@@ -40,7 +40,7 @@ static LONG64       g_alloc_bytes = 0;
 
 static PDEVICE_OBJECT g_device_obj = NULL;
 
-/* ── Forward declarations ────────────────────────────────────────── */
+/* -- Forward declarations ------------------------------------------ */
 static NTSTATUS QcuCreate      (PDEVICE_OBJECT DevObj, PIRP Irp);
 static NTSTATUS QcuClose       (PDEVICE_OBJECT DevObj, PIRP Irp);
 static NTSTATUS QcuDeviceControl(PDEVICE_OBJECT DevObj, PIRP Irp);
@@ -56,7 +56,7 @@ static NTSTATUS HandleQueryStatus   (PIRP Irp, PIO_STACK_LOCATION Stack);
 
 static PQCU_ALLOC_ENTRY FindEntry(ULONG64 handle);
 
-/* ── Helpers ─────────────────────────────────────────────────────── */
+/* -- Helpers ------------------------------------------------------- */
 static NTSTATUS CompleteIrp(PIRP Irp, NTSTATUS status, ULONG_PTR info)
 {
     Irp->IoStatus.Status      = status;
@@ -65,10 +65,10 @@ static NTSTATUS CompleteIrp(PIRP Irp, NTSTATUS status, ULONG_PTR info)
     return status;
 }
 
-/* ── CustomDriverEntry ───────────────────────────────────────────── */
+/* -- CustomDriverEntry --------------------------------------------- */
 /*
  * kdmapper calls this instead of the standard DriverEntry.
- * DriverObject is a fabricated stub — we can still use it for
+ * DriverObject is a fabricated stub - we can still use it for
  * registering dispatch routines and creating device objects.
  */
 NTSTATUS CustomDriverEntry(
@@ -127,7 +127,7 @@ NTSTATUS CustomDriverEntry(
     return STATUS_SUCCESS;
 }
 
-/* ── IRP_MJ_CREATE / IRP_MJ_CLOSE ───────────────────────────────── */
+/* -- IRP_MJ_CREATE / IRP_MJ_CLOSE --------------------------------- */
 static NTSTATUS QcuCreate(PDEVICE_OBJECT DevObj, PIRP Irp)
 {
     UNREFERENCED_PARAMETER(DevObj);
@@ -140,7 +140,7 @@ static NTSTATUS QcuClose(PDEVICE_OBJECT DevObj, PIRP Irp)
     return CompleteIrp(Irp, STATUS_SUCCESS, 0);
 }
 
-/* ── DriverUnload ────────────────────────────────────────────────── */
+/* -- DriverUnload -------------------------------------------------- */
 static VOID QcuUnload(PDRIVER_OBJECT DriverObj)
 {
     UNREFERENCED_PARAMETER(DriverObj);
@@ -177,7 +177,7 @@ static VOID QcuUnload(PDRIVER_OBJECT DriverObj)
     DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL, "[QCU] Unloaded.\n");
 }
 
-/* ── IRP_MJ_DEVICE_CONTROL dispatcher ───────────────────────────── */
+/* -- IRP_MJ_DEVICE_CONTROL dispatcher ----------------------------- */
 static NTSTATUS QcuDeviceControl(PDEVICE_OBJECT DevObj, PIRP Irp)
 {
     UNREFERENCED_PARAMETER(DevObj);
@@ -197,7 +197,7 @@ static NTSTATUS QcuDeviceControl(PDEVICE_OBJECT DevObj, PIRP Irp)
     }
 }
 
-/* ── IOCTL: ALLOC_PHYSICAL ───────────────────────────────────────── */
+/* -- IOCTL: ALLOC_PHYSICAL ----------------------------------------- */
 static NTSTATUS HandleAllocPhysical(PIRP Irp, PIO_STACK_LOCATION Stack)
 {
     ULONG in_len  = Stack->Parameters.DeviceIoControl.InputBufferLength;
@@ -262,7 +262,7 @@ static NTSTATUS HandleAllocPhysical(PIRP Irp, PIO_STACK_LOCATION Stack)
     return CompleteIrp(Irp, STATUS_SUCCESS, sizeof(QCU_ALLOC_RESPONSE));
 }
 
-/* ── IOCTL: FREE_PHYSICAL ────────────────────────────────────────── */
+/* -- IOCTL: FREE_PHYSICAL ------------------------------------------ */
 static NTSTATUS HandleFreePhysical(PIRP Irp, PIO_STACK_LOCATION Stack)
 {
     if (Stack->Parameters.DeviceIoControl.InputBufferLength < sizeof(QCU_FREE_REQUEST))
@@ -295,7 +295,7 @@ static NTSTATUS HandleFreePhysical(PIRP Irp, PIO_STACK_LOCATION Stack)
     return CompleteIrp(Irp, STATUS_SUCCESS, 0);
 }
 
-/* ── IOCTL: MAP_TO_USER ──────────────────────────────────────────── */
+/* -- IOCTL: MAP_TO_USER -------------------------------------------- */
 static NTSTATUS HandleMapToUser(PIRP Irp, PIO_STACK_LOCATION Stack)
 {
     ULONG in_len  = Stack->Parameters.DeviceIoControl.InputBufferLength;
@@ -339,7 +339,7 @@ static NTSTATUS HandleMapToUser(PIRP Irp, PIO_STACK_LOCATION Stack)
         resp->size_bytes = e->size;
 
         DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL,
-            "[QCU] Mapped handle=0x%llX → user_va=0x%llX\n",
+            "[QCU] Mapped handle=0x%llX -> user_va=0x%llX\n",
             req->handle, (ULONG64)user_va);
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -350,7 +350,7 @@ static NTSTATUS HandleMapToUser(PIRP Irp, PIO_STACK_LOCATION Stack)
     return CompleteIrp(Irp, STATUS_SUCCESS, sizeof(QCU_MAP_RESPONSE));
 }
 
-/* ── IOCTL: UNMAP_FROM_USER ──────────────────────────────────────── */
+/* -- IOCTL: UNMAP_FROM_USER ---------------------------------------- */
 static NTSTATUS HandleUnmapFromUser(PIRP Irp, PIO_STACK_LOCATION Stack)
 {
     if (Stack->Parameters.DeviceIoControl.InputBufferLength < sizeof(QCU_UNMAP_REQUEST))
@@ -379,7 +379,7 @@ static NTSTATUS HandleUnmapFromUser(PIRP Irp, PIO_STACK_LOCATION Stack)
     return CompleteIrp(Irp, STATUS_SUCCESS, 0);
 }
 
-/* ── IOCTL: GET_NUMA_INFO ────────────────────────────────────────── */
+/* -- IOCTL: GET_NUMA_INFO ------------------------------------------ */
 static NTSTATUS HandleGetNumaInfo(PIRP Irp, PIO_STACK_LOCATION Stack)
 {
     if (Stack->Parameters.DeviceIoControl.OutputBufferLength < sizeof(QCU_NUMA_INFO))
@@ -403,7 +403,7 @@ static NTSTATUS HandleGetNumaInfo(PIRP Irp, PIO_STACK_LOCATION Stack)
         KeQueryNodeActiveAffinity2(node, NULL, 0, NULL);
         /* Use MmAvailablePages as a rough proxy (node-level API limited) */
         info->node_memory_bytes[node] = (ULONG64)MmGetPhysicalMemoryRanges() != 0
-            ? 0  /* placeholder — filled below */
+            ? 0  /* placeholder - filled below */
             : 0;
 
         /* CPU count per node via affinity mask popcount */
@@ -421,7 +421,7 @@ static NTSTATUS HandleGetNumaInfo(PIRP Irp, PIO_STACK_LOCATION Stack)
     return CompleteIrp(Irp, STATUS_SUCCESS, sizeof(QCU_NUMA_INFO));
 }
 
-/* ── PMC DPC context ─────────────────────────────────────────────── */
+/* -- PMC DPC context ----------------------------------------------- */
 typedef struct _QCU_PMC_DPC_CTX {
     KDPC        dpc;
     ULONG       counter_id;
@@ -444,7 +444,7 @@ static VOID PmcDpcRoutine(PKDPC Dpc, PVOID Ctx, PVOID S1, PVOID S2)
     KeSetEvent(&ctx->done, 0, FALSE);
 }
 
-/* ── IOCTL: READ_PMC ─────────────────────────────────────────────── */
+/* -- IOCTL: READ_PMC ----------------------------------------------- */
 static NTSTATUS HandleReadPmc(PIRP Irp, PIO_STACK_LOCATION Stack)
 {
     ULONG in_len  = Stack->Parameters.DeviceIoControl.InputBufferLength;
@@ -479,7 +479,7 @@ static NTSTATUS HandleReadPmc(PIRP Irp, PIO_STACK_LOCATION Stack)
     return CompleteIrp(Irp, STATUS_SUCCESS, sizeof(QCU_PMC_RESPONSE));
 }
 
-/* ── IOCTL: QUERY_STATUS ─────────────────────────────────────────── */
+/* -- IOCTL: QUERY_STATUS ------------------------------------------- */
 static NTSTATUS HandleQueryStatus(PIRP Irp, PIO_STACK_LOCATION Stack)
 {
     if (Stack->Parameters.DeviceIoControl.OutputBufferLength < sizeof(QCU_STATUS))
@@ -498,7 +498,7 @@ static NTSTATUS HandleQueryStatus(PIRP Irp, PIO_STACK_LOCATION Stack)
     return CompleteIrp(Irp, STATUS_SUCCESS, sizeof(QCU_STATUS));
 }
 
-/* ── FindEntry (spinlock held externally if needed) ──────────────── */
+/* -- FindEntry (spinlock held externally if needed) ---------------- */
 static PQCU_ALLOC_ENTRY FindEntry(ULONG64 handle)
 {
     KIRQL irql;
