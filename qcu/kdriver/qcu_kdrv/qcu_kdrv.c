@@ -56,6 +56,31 @@ static NTSTATUS HandleQueryStatus   (PIRP Irp, PIO_STACK_LOCATION Stack);
 
 static PQCU_ALLOC_ENTRY FindEntry(ULONG64 handle);
 
+/* -- Undocumented ntoskrnl exports (kdmapper DriverObject borrow) --- */
+/*
+ * ObReferenceObjectByName: look up a kernel object by its NT path.
+ * Used to borrow \Driver\Null's DRIVER_OBJECT, which is a real Object
+ * Manager object with a proper OBJECT_HEADER — unlike a fake allocation
+ * from NonPagedPool which would have garbage metadata where the header
+ * should be, causing IofCallDriver to corrupt the stack (BSOD 0x139).
+ */
+NTKERNELAPI NTSTATUS ObReferenceObjectByName(
+    PUNICODE_STRING ObjectName,
+    ULONG           Attributes,
+    PACCESS_STATE   AccessState,
+    ACCESS_MASK     DesiredAccess,
+    POBJECT_TYPE    ObjectType,
+    KPROCESSOR_MODE AccessMode,
+    PVOID           ParseContext,
+    PVOID          *Object);
+
+extern POBJECT_TYPE *IoDriverObjectType;
+
+/* Original \Driver\Null dispatch routines saved before we hook them */
+static PDRIVER_DISPATCH g_orig_create = NULL;
+static PDRIVER_DISPATCH g_orig_close  = NULL;
+static PDRIVER_DISPATCH g_orig_ioctl  = NULL;
+
 /* -- Helpers ------------------------------------------------------- */
 static NTSTATUS CompleteIrp(PIRP Irp, NTSTATUS status, ULONG_PTR info)
 {
@@ -81,26 +106,35 @@ NTSTATUS CustomDriverEntry(
     UNICODE_STRING   dev_name, symlink_name;
 
     /* 0. kdmapper passes DriverObject=NULL (param1=0).
-     *    IoCreateDevice needs a valid DRIVER_OBJECT with DriverExtension.
-     *    Allocate a minimal fake one from NonPagedPool.
+     *
+     *    A fake DRIVER_OBJECT from NonPagedPool CANNOT be used here:
+     *    the pool block header immediately before it would be read as
+     *    OBJECT_HEADER by IofCallDriver, corrupting the stack cookie
+     *    and triggering BSOD 0x139 LEGACY_GS_VIOLATION.
+     *
+     *    Instead, borrow \Driver\Null's DRIVER_OBJECT, which already
+     *    has a valid OBJECT_HEADER written by the Object Manager.
+     *    We save its original dispatch routines and hook our own in,
+     *    forwarding IRPs that aren't for our device back to the originals.
      */
+    PDRIVER_OBJECT real_drv = NULL;
     if (!DriverObject) {
-        DriverObject = (PDRIVER_OBJECT)ExAllocatePoolWithTag(
-            NonPagedPool, sizeof(DRIVER_OBJECT), 'OvrD');
-        if (!DriverObject)
-            return STATUS_INSUFFICIENT_RESOURCES;
-        RtlZeroMemory(DriverObject, sizeof(DRIVER_OBJECT));
-        DriverObject->Type = IO_TYPE_DRIVER;
-        DriverObject->Size = sizeof(DRIVER_OBJECT);
-
-        DriverObject->DriverExtension = (PDRIVER_EXTENSION)ExAllocatePoolWithTag(
-            NonPagedPool, sizeof(DRIVER_EXTENSION), 'ExtD');
-        if (!DriverObject->DriverExtension) {
-            ExFreePoolWithTag(DriverObject, 'OvrD');
-            return STATUS_INSUFFICIENT_RESOURCES;
+        UNICODE_STRING null_drv_name;
+        RtlInitUnicodeString(&null_drv_name, L"\\Driver\\Null");
+        NTSTATUS s2 = ObReferenceObjectByName(
+            &null_drv_name,
+            OBJ_CASE_INSENSITIVE,
+            NULL, 0,
+            *IoDriverObjectType,
+            KernelMode,
+            NULL,
+            (PVOID*)&real_drv);
+        if (!NT_SUCCESS(s2) || !real_drv) {
+            DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL,
+                "[QCU] ObReferenceObjectByName(\\Driver\\Null) failed: 0x%08X\n", s2);
+            return STATUS_UNSUCCESSFUL;
         }
-        RtlZeroMemory(DriverObject->DriverExtension, sizeof(DRIVER_EXTENSION));
-        DriverObject->DriverExtension->DriverObject = DriverObject;
+        DriverObject = real_drv;
     }
 
     /* 1. Init allocation tracking */
@@ -134,11 +168,21 @@ NTSTATUS CustomDriverEntry(
         return status;
     }
 
-    /* 4. Register dispatch routines */
+    /* 4. Save \Driver\Null's original dispatch routines, then hook ours in.
+     *    Any IRP for a device other than g_device_obj is forwarded to the
+     *    originals so the Null device keeps working normally.
+     *    DO NOT set DriverUnload — \Driver\Null must stay alive.
+     */
+    g_orig_create = DriverObject->MajorFunction[IRP_MJ_CREATE];
+    g_orig_close  = DriverObject->MajorFunction[IRP_MJ_CLOSE];
+    g_orig_ioctl  = DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL];
+
     DriverObject->MajorFunction[IRP_MJ_CREATE]         = QcuCreate;
     DriverObject->MajorFunction[IRP_MJ_CLOSE]          = QcuClose;
     DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = QcuDeviceControl;
-    DriverObject->DriverUnload                          = QcuUnload;
+
+    /* Release the extra reference taken by ObReferenceObjectByName */
+    if (real_drv) ObDereferenceObject(real_drv);
 
     /* 5. Enable direct I/O for IOCTL buffers */
     g_device_obj->Flags |= DO_BUFFERED_IO;
@@ -153,13 +197,19 @@ NTSTATUS CustomDriverEntry(
 /* -- IRP_MJ_CREATE / IRP_MJ_CLOSE --------------------------------- */
 static NTSTATUS QcuCreate(PDEVICE_OBJECT DevObj, PIRP Irp)
 {
-    UNREFERENCED_PARAMETER(DevObj);
+    if (DevObj != g_device_obj) {
+        if (g_orig_create) return g_orig_create(DevObj, Irp);
+        return CompleteIrp(Irp, STATUS_SUCCESS, 0);
+    }
     return CompleteIrp(Irp, STATUS_SUCCESS, 0);
 }
 
 static NTSTATUS QcuClose(PDEVICE_OBJECT DevObj, PIRP Irp)
 {
-    UNREFERENCED_PARAMETER(DevObj);
+    if (DevObj != g_device_obj) {
+        if (g_orig_close) return g_orig_close(DevObj, Irp);
+        return CompleteIrp(Irp, STATUS_SUCCESS, 0);
+    }
     return CompleteIrp(Irp, STATUS_SUCCESS, 0);
 }
 
@@ -203,7 +253,10 @@ static VOID QcuUnload(PDRIVER_OBJECT DriverObj)
 /* -- IRP_MJ_DEVICE_CONTROL dispatcher ----------------------------- */
 static NTSTATUS QcuDeviceControl(PDEVICE_OBJECT DevObj, PIRP Irp)
 {
-    UNREFERENCED_PARAMETER(DevObj);
+    if (DevObj != g_device_obj) {
+        if (g_orig_ioctl) return g_orig_ioctl(DevObj, Irp);
+        return CompleteIrp(Irp, STATUS_INVALID_DEVICE_REQUEST, 0);
+    }
     PIO_STACK_LOCATION stack = IoGetCurrentIrpStackLocation(Irp);
     ULONG code = stack->Parameters.DeviceIoControl.IoControlCode;
 
@@ -479,25 +532,38 @@ static NTSTATUS HandleReadPmc(PIRP Irp, PIO_STACK_LOCATION Stack)
     QCU_PMC_REQUEST  *req  = (QCU_PMC_REQUEST*)Irp->AssociatedIrp.SystemBuffer;
     QCU_PMC_RESPONSE *resp = (QCU_PMC_RESPONSE*)Irp->AssociatedIrp.SystemBuffer;
 
-    QCU_PMC_DPC_CTX ctx = {0};
-    ctx.counter_id = req->counter_id;
-    KeInitializeEvent(&ctx.done, NotificationEvent, FALSE);
+    /* DPC context must be in NonPagedPool, NOT on the stack.
+     * KeInsertQueueDpc enqueues the DPC asynchronously; if the stack frame
+     * were destroyed before the DPC fires, the system would corrupt memory.
+     */
+    QCU_PMC_DPC_CTX *ctx = (QCU_PMC_DPC_CTX*)ExAllocatePoolWithTag(
+        NonPagedPool, sizeof(QCU_PMC_DPC_CTX), QCU_POOL_TAG);
+    if (!ctx)
+        return CompleteIrp(Irp, STATUS_INSUFFICIENT_RESOURCES, 0);
+
+    RtlZeroMemory(ctx, sizeof(QCU_PMC_DPC_CTX));
+    ctx->counter_id = req->counter_id;
+    KeInitializeEvent(&ctx->done, NotificationEvent, FALSE);
 
     CCHAR target_cpu = (CCHAR)(UCHAR)((req->cpu_index == 0)
         ? KeGetCurrentProcessorNumberEx(NULL)
         : req->cpu_index);
 
-    KeInitializeDpc(&ctx.dpc, PmcDpcRoutine, &ctx);
-    KeSetTargetProcessorDpc(&ctx.dpc, target_cpu);
-    KeSetImportanceDpc(&ctx.dpc, HighImportance);
-    KeInsertQueueDpc(&ctx.dpc, NULL, NULL);
+    KeInitializeDpc(&ctx->dpc, PmcDpcRoutine, ctx);
+    KeSetTargetProcessorDpc(&ctx->dpc, target_cpu);
+    KeSetImportanceDpc(&ctx->dpc, HighImportance);
+    KeInsertQueueDpc(&ctx->dpc, NULL, NULL);
 
     LARGE_INTEGER timeout = { .QuadPart = -10 * 1000 * 1000 }; /* 1 second */
-    NTSTATUS s = KeWaitForSingleObject(&ctx.done, Executive, KernelMode, FALSE, &timeout);
+    NTSTATUS s = KeWaitForSingleObject(&ctx->done, Executive, KernelMode, FALSE, &timeout);
+
+    ULONG64 pmc_value = ctx->result;
+    ExFreePoolWithTag(ctx, QCU_POOL_TAG);
+
     if (s != STATUS_SUCCESS)
         return CompleteIrp(Irp, STATUS_TIMEOUT, 0);
 
-    resp->value = ctx.result;
+    resp->value = pmc_value;
     return CompleteIrp(Irp, STATUS_SUCCESS, sizeof(QCU_PMC_RESPONSE));
 }
 

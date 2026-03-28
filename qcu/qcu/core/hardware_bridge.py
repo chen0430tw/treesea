@@ -151,13 +151,25 @@ class QcuKernelBridge:
     User-mode Python interface to qcu_kdrv.sys.
 
     Lifecycle:
-        bridge = QcuKernelBridge()    # opens \\.\QcuKdrv
+        bridge = QcuKernelBridge()    # opens r"\\.\QcuKdrv"
         ...
         bridge.close()                # releases the handle
     """
 
     def __init__(self, path: str = QCU_USERMODE_PATH):
         k32 = ctypes.windll.kernel32
+        k32.CreateFileW.restype = wt.HANDLE
+        k32.DeviceIoControl.argtypes = [
+            wt.HANDLE,      # hDevice
+            wt.DWORD,       # dwIoControlCode
+            ctypes.c_void_p,  # lpInBuffer
+            wt.DWORD,       # nInBufferSize
+            ctypes.c_void_p,  # lpOutBuffer
+            wt.DWORD,       # nOutBufferSize
+            ctypes.POINTER(wt.DWORD),  # lpBytesReturned
+            ctypes.c_void_p,  # lpOverlapped
+        ]
+        k32.DeviceIoControl.restype = wt.BOOL
         self._handle = k32.CreateFileW(
             path,
             GENERIC_READ | GENERIC_WRITE,

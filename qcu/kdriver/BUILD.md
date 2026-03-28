@@ -372,27 +372,72 @@ OcaBucket: AV_nt!IoCreateDevice
 
 **根因**：kdmapper 调用驱动入口时 `param1=0, param2=0`，即 `CustomDriverEntry(NULL, NULL)`。`IoCreateDevice` 内部访问 `DriverObject->DriverExtension`（偏移约 +0x28~+0x30），NULL 指针加偏移 = 非法地址，触发 PAGE_FAULT。
 
-**修复**：在 `CustomDriverEntry` 开头检测 NULL，从 NonPagedPool 分配并初始化假的 DRIVER_OBJECT 和 DRIVER_EXTENSION：
+**初始错误修复（会引发后续蓝屏）**：从 NonPagedPool 分配假的 DRIVER_OBJECT。这能解决 0x50，但会导致 0x139（见坑 12）。
+
+**注意**：用 kdmapper 加载的驱动都会遇到这个问题，因为 kdmapper 不走正常的 `IopLoadDriver` 流程，不会自动分配 DRIVER_OBJECT。这是 kdmapper 驱动开发的必走坑之一。
+
+---
+
+### 12. 蓝屏 STOP 0x139 KERNEL_SECURITY_CHECK_FAILURE（假 DRIVER_OBJECT 破坏栈 cookie）
+
+**现象**：驱动加载、设备创建成功，但第一次打开设备（DeviceIoControl）时立即蓝屏。
+
+**事件日志（Event ID 1001）**：
+```
+检测错误: 0x00000139
+P1: 0000000000000003  (LEGACY_GS_VIOLATION)
+P2: ...（内核栈地址）
+P3: ...
+OcaBucket: GSOD_nt!IofCallDriver
+```
+
+**根因**：`LEGACY_GS_VIOLATION` = 栈 cookie 被破坏。
+
+IofCallDriver 进入驱动的分发函数前，会读 `DriverObject->OBJECT_HEADER`（位于 DriverObject 指针前的固定负偏移）来做类型验证和引用计数。从 NonPagedPool 分配的假 DRIVER_OBJECT，其前面是 pool 块头（`POOL_HEADER`），内容完全是垃圾。内核把这些垃圾当作 OBJECT_HEADER 读取，写入了不正确的值，破坏了相邻的栈 cookie，触发 GS cookie 检查失败。
+
+**结论**：NonPagedPool 分配的对象**永远不能**当作 Object Manager 对象使用。只有通过 `ObCreateObject` 等 API 创建的对象才有合法的 OBJECT_HEADER 前缀。
+
+**正确修复**：借用 `\Driver\Null` 的 DRIVER_OBJECT（这是一个真正的 OB 对象），保存其原有分发例程，hook 进我们自己的，对不属于我们设备的 IRP 转发回原例程：
 
 ```c
-if (!DriverObject) {
-    DriverObject = (PDRIVER_OBJECT)ExAllocatePoolWithTag(
-        NonPagedPool, sizeof(DRIVER_OBJECT), 'OvrD');
-    if (!DriverObject)
-        return STATUS_INSUFFICIENT_RESOURCES;
-    RtlZeroMemory(DriverObject, sizeof(DRIVER_OBJECT));
-    DriverObject->Type = IO_TYPE_DRIVER;
-    DriverObject->Size = sizeof(DRIVER_OBJECT);
+// 声明未导出的 API
+NTKERNELAPI NTSTATUS ObReferenceObjectByName(
+    PUNICODE_STRING ObjectName, ULONG Attributes,
+    PACCESS_STATE AccessState, ACCESS_MASK DesiredAccess,
+    POBJECT_TYPE ObjectType, KPROCESSOR_MODE AccessMode,
+    PVOID ParseContext, PVOID *Object);
+extern POBJECT_TYPE *IoDriverObjectType;
 
-    DriverObject->DriverExtension = (PDRIVER_EXTENSION)ExAllocatePoolWithTag(
-        NonPagedPool, sizeof(DRIVER_EXTENSION), 'ExtD');
-    if (!DriverObject->DriverExtension) {
-        ExFreePoolWithTag(DriverObject, 'OvrD');
-        return STATUS_INSUFFICIENT_RESOURCES;
+// 保存原始例程
+static PDRIVER_DISPATCH g_orig_create, g_orig_close, g_orig_ioctl;
+
+// 在 CustomDriverEntry 里
+PDRIVER_OBJECT real_drv = NULL;
+if (!DriverObject) {
+    UNICODE_STRING null_name;
+    RtlInitUnicodeString(&null_name, L"\\Driver\\Null");
+    ObReferenceObjectByName(&null_name, OBJ_CASE_INSENSITIVE,
+        NULL, 0, *IoDriverObjectType, KernelMode, NULL, (PVOID*)&real_drv);
+    DriverObject = real_drv;
+}
+
+// Hook（不设置 DriverUnload，\Driver\Null 必须保持存活）
+g_orig_create = DriverObject->MajorFunction[IRP_MJ_CREATE];
+g_orig_close  = DriverObject->MajorFunction[IRP_MJ_CLOSE];
+g_orig_ioctl  = DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL];
+DriverObject->MajorFunction[IRP_MJ_CREATE]         = QcuCreate;
+DriverObject->MajorFunction[IRP_MJ_CLOSE]          = QcuClose;
+DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = QcuDeviceControl;
+if (real_drv) ObDereferenceObject(real_drv);
+
+// 分发函数里转发非 QCU 设备的 IRP
+static NTSTATUS QcuCreate(PDEVICE_OBJECT DevObj, PIRP Irp) {
+    if (DevObj != g_device_obj) {
+        if (g_orig_create) return g_orig_create(DevObj, Irp);
+        return CompleteIrp(Irp, STATUS_SUCCESS, 0);
     }
-    RtlZeroMemory(DriverObject->DriverExtension, sizeof(DRIVER_EXTENSION));
-    DriverObject->DriverExtension->DriverObject = DriverObject;
+    return CompleteIrp(Irp, STATUS_SUCCESS, 0);
 }
 ```
 
-**注意**：用 kdmapper 加载的驱动都会遇到这个问题，因为 kdmapper 不走正常的 `IopLoadDriver` 流程，不会自动分配 DRIVER_OBJECT。这是 kdmapper 驱动开发的必走坑之一。
+**注意**：不能设置 `DriverObject->DriverUnload`，因为这是 `\Driver\Null` 的卸载回调，设置后系统卸载 Null 驱动时会调用我们的卸载函数（或更糟糕的问题）。
