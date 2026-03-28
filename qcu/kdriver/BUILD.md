@@ -291,6 +291,43 @@ kdmapper 成功输出包含：
 
 ---
 
-## 已知问题
+### 11. 蓝屏 STOP 0x50 PAGE_FAULT_IN_NONPAGED_AREA（kdmapper DriverObject=NULL）
 
-- **蓝屏**：驱动被成功映射并执行，但运行时崩溃。Stop Code 待记录，需要通过 WinDbg 分析 Minidump。
+**现象**：驱动被 kdmapper 成功映射并执行，但立即蓝屏。
+
+**事件日志（Event ID 1001）**：
+```
+检测错误: 0x00000050
+P1: ffffffffffffffd0  (故障地址)
+P2: 0000000000000002
+P3: fffff8031c74b254  (RIP，位于 ntoskrnl)
+P4: 0000000000000002  (内核模式)
+OcaBucket: AV_nt!IoCreateDevice
+```
+
+**根因**：kdmapper 调用驱动入口时 `param1=0, param2=0`，即 `CustomDriverEntry(NULL, NULL)`。`IoCreateDevice` 内部访问 `DriverObject->DriverExtension`（偏移约 +0x28~+0x30），NULL 指针加偏移 = 非法地址，触发 PAGE_FAULT。
+
+**修复**：在 `CustomDriverEntry` 开头检测 NULL，从 NonPagedPool 分配并初始化假的 DRIVER_OBJECT 和 DRIVER_EXTENSION：
+
+```c
+if (!DriverObject) {
+    DriverObject = (PDRIVER_OBJECT)ExAllocatePoolWithTag(
+        NonPagedPool, sizeof(DRIVER_OBJECT), 'OvrD');
+    if (!DriverObject)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    RtlZeroMemory(DriverObject, sizeof(DRIVER_OBJECT));
+    DriverObject->Type = IO_TYPE_DRIVER;
+    DriverObject->Size = sizeof(DRIVER_OBJECT);
+
+    DriverObject->DriverExtension = (PDRIVER_EXTENSION)ExAllocatePoolWithTag(
+        NonPagedPool, sizeof(DRIVER_EXTENSION), 'ExtD');
+    if (!DriverObject->DriverExtension) {
+        ExFreePoolWithTag(DriverObject, 'OvrD');
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    RtlZeroMemory(DriverObject->DriverExtension, sizeof(DRIVER_EXTENSION));
+    DriverObject->DriverExtension->DriverObject = DriverObject;
+}
+```
+
+**注意**：用 kdmapper 加载的驱动都会遇到这个问题，因为 kdmapper 不走正常的 `IopLoadDriver` 流程，不会自动分配 DRIVER_OBJECT。这是 kdmapper 驱动开发的必走坑之一。

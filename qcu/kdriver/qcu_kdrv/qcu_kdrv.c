@@ -80,6 +80,29 @@ NTSTATUS CustomDriverEntry(
     NTSTATUS         status;
     UNICODE_STRING   dev_name, symlink_name;
 
+    /* 0. kdmapper passes DriverObject=NULL (param1=0).
+     *    IoCreateDevice needs a valid DRIVER_OBJECT with DriverExtension.
+     *    Allocate a minimal fake one from NonPagedPool.
+     */
+    if (!DriverObject) {
+        DriverObject = (PDRIVER_OBJECT)ExAllocatePoolWithTag(
+            NonPagedPool, sizeof(DRIVER_OBJECT), 'OvrD');
+        if (!DriverObject)
+            return STATUS_INSUFFICIENT_RESOURCES;
+        RtlZeroMemory(DriverObject, sizeof(DRIVER_OBJECT));
+        DriverObject->Type = IO_TYPE_DRIVER;
+        DriverObject->Size = sizeof(DRIVER_OBJECT);
+
+        DriverObject->DriverExtension = (PDRIVER_EXTENSION)ExAllocatePoolWithTag(
+            NonPagedPool, sizeof(DRIVER_EXTENSION), 'ExtD');
+        if (!DriverObject->DriverExtension) {
+            ExFreePoolWithTag(DriverObject, 'OvrD');
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+        RtlZeroMemory(DriverObject->DriverExtension, sizeof(DRIVER_EXTENSION));
+        DriverObject->DriverExtension->DriverObject = DriverObject;
+    }
+
     /* 1. Init allocation tracking */
     InitializeListHead(&g_alloc_list);
     KeInitializeSpinLock(&g_alloc_lock);
