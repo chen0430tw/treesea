@@ -399,7 +399,7 @@ static NTSTATUS HandleGetNumaInfo(PIRP Irp, PIO_STACK_LOCATION Stack)
     for (ULONG node = 0; node < info->node_count; node++) {
         /* Available memory on this node */
         ULONGLONG avail = 0;
-        KeQueryNodeActiveAffinity2(node, NULL, 0, NULL);
+        KeQueryNodeActiveAffinity2((USHORT)node, NULL, 0, NULL);
         /* Use MmAvailablePages as a rough proxy (node-level API limited) */
         info->node_memory_bytes[node] = (ULONG64)MmGetPhysicalMemoryRanges() != 0
             ? 0  /* placeholder - filled below */
@@ -408,7 +408,7 @@ static NTSTATUS HandleGetNumaInfo(PIRP Irp, PIO_STACK_LOCATION Stack)
         /* CPU count per node via affinity mask popcount */
         GROUP_AFFINITY aff = {0};
         USHORT         aff_count = 1;
-        NTSTATUS s = KeQueryNodeActiveAffinity2(node, &aff, 1, &aff_count);
+        NTSTATUS s = KeQueryNodeActiveAffinity2((USHORT)node, &aff, 1, &aff_count);
         if (NT_SUCCESS(s)) {
             ULONG cnt = 0;
             ULONG_PTR mask = aff.Mask;
