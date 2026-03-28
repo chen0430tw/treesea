@@ -172,6 +172,6 @@ Phase 4 — 后端执行
   ✅ qcu_lang/backend/qcu_executor.py   接入 IQPU，局部相位执行
 
 Phase 5 — 测试
-  ✅ tests/test_isa_full.py   55/55 PASS（含噪声模型）
-  ✅ tests/test_qsharp.py     7/7  PASS
+  ✅ tests/test_isa_full.py   60/60 PASS（含 Cirq 5 项 + 噪声模型 7 项）
+  ✅ tests/test_qsharp.py      7/7  PASS
 ```
