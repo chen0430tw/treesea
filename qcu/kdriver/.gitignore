@@ -1,0 +1,6 @@
+kdmapper/
+*.sys
+*.exe
+*.obj
+*.pdb
+*.log
