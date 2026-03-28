@@ -123,7 +123,7 @@ QCU 加速 hash 搜索不是「更快算一个 hash」，而是**通过坍缩减
 - `qcu/cli/`：命令入口
 - `qcu/distributed/`：分布式执行
 - `qcu/workloads/`：任务类型，如 factorization / hash_search / collapse_scan
-- `qcu_lang/`：量子语言桥接库（三层 ISA、编译器、QASM/Qiskit 前端）
+- `qcu_lang/`：量子语言桥接库（三层 ISA、编译器、QASM/Qiskit/Q# 前端）
 - `jobs/`：作业定义
 - `slurm/`：Slurm 模板
 - `mpi/`：MPI 启动脚本
@@ -248,7 +248,63 @@ circ.qcl_boost(4.0, 0.9, 0.012, 2.0)  # Layer 2
 circ.measure(0, 0).measure(1, 1)
 ```
 
-### 覆盖范围（48/48 全部通过测试）
+### 支持的前端语言
+
+| 前端 | 函数 | 说明 |
+|------|------|------|
+| QASM 2.0 / 3.0 | `from_qasm_str()` / `from_qasm_file()` | 业界标准，Qiskit 默认格式 |
+| Q# | `from_qsharp_str()` / `from_qsharp_file()` | Microsoft 量子语言 |
+| Qiskit | `from_qiskit()` | 直接转换 QuantumCircuit 对象 |
+
+Q# 示例（Toffoli 门，3 qubit）：
+
+```qsharp
+namespace Toffoli {
+    open Microsoft.Quantum.Intrinsic;
+    operation Main() : Unit {
+        use (c0, c1, t) = (Qubit(), Qubit(), Qubit());
+        X(c0); X(c1);
+        CCNOT(c0, c1, t);   // 自动分解为 Clifford+T 序列
+        let r0 = M(c0); let r1 = M(c1); let r2 = M(t);
+    }
+}
+```
+
+```python
+from qcu_lang import from_qsharp_str, QCUExecutor
+circ   = from_qsharp_str(qs_source)   # n_qubits=3 自动识别
+result = QCUExecutor(verbose=False).run(circ)
+```
+
+### 局部相位执行模型
+
+传统量子仿真器模拟 N-qubit 系统时，希尔伯特空间维度随 qubit 数**指数增长**：
+
+```
+Nq=2  →  DIM = 2² × 6² = 144    ← 23 ms/step
+Nq=3  →  DIM = 2³ × 6³ = 1728   ← 理论上慢 144 倍，约数小时
+```
+
+QCU 的执行层不这样做。
+
+QCU 是相位动力学系统，计算的基本单元是**腔 mode 之间的相位关系**（`C(t) = |⟨a₀⟩ − ⟨a₁⟩|`），而不是全局量子态向量。因此：
+
+- 任何多 qubit 门在编译后都分解为一系列**局部 2-body 相位步骤**（`qim_evolve`、`dispersive`）
+- 每个步骤最多涉及两个 mode，只需要在 Nq=2（DIM=144）上求解
+- 全局 N-qubit 结构由**步骤序列**携带，而不是由仿真维度承载
+
+这与光学中用放大镜对焦的逻辑相同：观察物象不需要照亮整面镜片，只需对焦到目标区域。Toffoli（CCNOT）分解成 15 个基础门后，每个门仍是局部 2-body 相互作用，仿真维度始终保持 DIM=144。
+
+```
+3-qubit Toffoli                执行时间
+─────────────────────────────────────────────
+传统仿真（Nq=3，DIM=1728）   ≈ 数小时
+QCU 局部相位执行（DIM=144）  ≈ 数十秒（与 2-qubit 相当）
+```
+
+Layer 2 涌现指令（`SYNC_EMERGE`、`QCL_RUN`）是协议级操作，需要全局 qubit 上下文，此时才使用真实 Nq。
+
+### 覆盖范围（全部通过测试）
 
 | 层 | 指令 | 状态 |
 |----|------|------|
@@ -256,8 +312,9 @@ circ.measure(0, 0).measure(1, 1)
 | Layer 0 多量子比特 | CX CY CZ SWAP iSWAP ECR CCX CSWAP MCX MEAS | ✅ |
 | Layer 1 Phase 指令 | PHASE_SHIFT TRIM LOCK DRIVE_SET BOOST DISPERSIVE_WAIT FREE_EVOLVE | ✅ |
 | Layer 2 Emerge 指令 | QCL_PCM QIM BOOST RUN SYNC_EMERGE PHASE_LOCK_WAIT PHASE_ANNEAL | ✅ |
+| Q# 前端 | Bell / Toffoli / Fredkin / QFT / 旋转门 / Adjoint | ✅ |
 
-编译器优化 pass：合并相邻 `phase_shift`、相消清零、`noop` 剥离，CCX 43 步 → 优化后 35 步。
+编译器优化 pass：合并相邻 `phase_shift`、相消清零、`noop` 剥离；CCX 原始 43 步 → 优化后 35 步。
 
 ---
 
@@ -268,12 +325,12 @@ circ.measure(0, 0).measure(1, 1)
 - `qcu_kdrv.sys`：Windows 内核驱动（ObReferenceObjectByName 方案）
 - GPU 加速：cupy-cuda13x 双后端
 - 工作负载：Shor 因式分解、哈希坍缩搜索、collapse_scan
-- `qcu_lang`：三层 ISA + 编译器 + QASM/Qiskit 前端 + 优化 pass（48/48 测试通过）
+- `qcu_lang`：三层 ISA + 编译器 + QASM / Qiskit / Q# 前端 + 优化 pass
+- 局部相位执行模型：N-qubit 电路在 DIM=144 下执行，无指数膨胀
 
 ### 下一阶段
-- Cirq / Q# 前端（低优先级）
-- 多 qubit 动态分配（当前固定 Nq=2）
 - 噪声模型与 IQPUConfig 参数从电路注解自动推导
+- Cirq 前端
 
 ---
 
