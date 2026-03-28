@@ -15,7 +15,7 @@
   <PropertyGroup Label="Globals">
     <ProjectGuid>{4A7B8C9D-E0F1-2345-ABCD-6789EF012345}</ProjectGuid>
     <RootNamespace>qcu_kdrv</RootNamespace>
-    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
