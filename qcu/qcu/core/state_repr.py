@@ -75,13 +75,16 @@ def coherent_state(d: int, alpha: complex) -> np.ndarray:
     return v
 
 
-def enforce_density_matrix(rho: np.ndarray) -> None:
-    """原地强制密度矩阵：Hermitian 化 + 迹归一（numpy / cupy 均可）"""
-    try:
-        import cupy
-        xp = cupy.get_array_module(rho)
-    except ImportError:
-        xp = np
+def enforce_density_matrix(xp, rho: np.ndarray) -> None:
+    """原地强制密度矩阵：Hermitian 化 + 迹归一。
+
+    Parameters
+    ----------
+    xp : module
+        numpy 或 cupy，由调用方传入，不在此处动态判断。
+    rho : ndarray
+        密度矩阵（原地修改）
+    """
     rho[:] = 0.5 * (rho + dagger(rho))
     rho /= (xp.trace(rho) + 1e-15)
 
@@ -159,7 +162,10 @@ class IQPUConfig:
     alpha0: Optional[List[complex]] = None
 
     track_entanglement: bool = True
+    negativity_every: int = 1     # 每隔多少 obs 步算一次 negativity；0 = 关闭
     device: str = "cpu"
+    profile: str = "full_physics" # "full_physics" 或 "fast_search"
+    dtype: str = "complex128"     # "complex128"（高保真）或 "complex64"（快搜）
 
     def finalize(self) -> "IQPUConfig":
         """填充所有 None 字段为合理默认值并转换为 ndarray。"""
@@ -249,7 +255,7 @@ class IQPURunResult:
 # 初始态构建
 # ──────────────────────────────────────────────
 
-def build_initial_state(cfg: IQPUConfig, dimQ: int, dimM: int) -> np.ndarray:
+def build_initial_state(cfg: IQPUConfig, dimQ: int, dimM: int, xp=None) -> np.ndarray:
     """根据配置构建初始密度矩阵 ρ(0)。
 
     Parameters
@@ -282,7 +288,10 @@ def build_initial_state(cfg: IQPUConfig, dimQ: int, dimM: int) -> np.ndarray:
         m = v if m is None else kron(m, v)
 
     psi = kron(q, m)
-    return psi @ dagger(psi)
+    rho = psi @ dagger(psi)
+    if xp is not None and xp is not np:
+        return xp.asarray(rho)
+    return rho
 
 
 # 公开别名（与原型文件保持兼容）

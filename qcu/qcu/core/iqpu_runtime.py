@@ -7,6 +7,11 @@ lindblad_solver / readout / entanglement_metrics，
 提供完整的虚拟量子芯片单次运行接口。
 
 公开别名：QCU = IQPU（与原型文件保持兼容）
+
+Profile
+-------
+full_physics  高保真模式：complex128，obs_every 密，完整 readout，negativity 可开
+fast_search   快搜模式：complex64，obs_every 稀疏，只算 C/rel_phase，negativity 关闭
 """
 
 from __future__ import annotations
@@ -22,10 +27,17 @@ from .collapse_operator import build_collapse_cache, CollapseCache
 from .lindblad_solver import alloc_rk4_buffers, rk4_step
 from .readout import (
     ReadoutSnapshot,
-    compute_step_snapshot,
+    compute_step_snapshot_fast,
+    compute_step_snapshot_full,
     compute_final_observables,
 )
 from .entanglement_metrics import negativity_qubit0_vs_rest
+
+# profile 默认参数
+_FAST_OBS_EVERY      = 8
+_FAST_NEG_EVERY      = 0
+_FAST_DTYPE          = np.complex64
+_FULL_DTYPE          = np.complex128
 
 
 class IQPU:
@@ -62,25 +74,45 @@ class IQPU:
 
         self.Nq = self.cfg.Nq
         self.Nm = self.cfg.Nm
-        self.d = self.cfg.d
+        self.d  = self.cfg.d
 
         self.dimQ: int = 2 ** self.Nq
         self.dimM: int = self.d ** self.Nm
-        self.DIM: int = self.dimQ * self.dimM
+        self.DIM:  int = self.dimQ * self.dimM
 
-        # 计算后端（numpy / cupy）
+        # 计算后端（numpy / cupy），初始化时确定，不在热路径重复判断
         self.xp = get_xp(self.cfg.device)
 
-        # 算符库（先用 numpy 构建，再移到目标设备）
+        # profile → dtype
+        self._dtype = (
+            _FAST_DTYPE if self.cfg.profile == "fast_search" else _FULL_DTYPE
+        )
+
+        # obs_every：fast_search 强制稀疏
+        self._obs_every = (
+            max(self.cfg.obs_every, _FAST_OBS_EVERY)
+            if self.cfg.profile == "fast_search"
+            else self.cfg.obs_every
+        )
+
+        # negativity_every：fast_search 强制关闭
+        self._neg_every = (
+            0 if self.cfg.profile == "fast_search"
+            else self.cfg.negativity_every
+        )
+
+        # 算符库（CPU 构建后移到目标设备）
         ops_cpu: OperatorBank = build_operator_bank(self.cfg)
         self.ops: OperatorBank = self._move_ops(ops_cpu)
 
-        # 基础 Hamiltonian（numpy 构建后移到目标设备）
+        # 基础 Hamiltonian
         H_base_cpu = build_H_base(self.cfg, ops_cpu)
-        self.H_base = self.xp.asarray(H_base_cpu)
+        self.H_base = self.xp.asarray(H_base_cpu.astype(
+            np.complex64 if self._dtype == np.complex64 else np.complex128
+        ))
 
-        # RK4 缓冲区（在目标设备上预分配）
-        self.buffers = alloc_rk4_buffers(self.DIM, self.xp)
+        # RK4 缓冲区（目标设备，目标 dtype）
+        self.buffers = alloc_rk4_buffers(self.DIM, self.xp, self._dtype)
 
     # ──────────────────────────────────────────────
     # 公开运行接口
@@ -100,87 +132,80 @@ class IQPU:
         gamma_phi0: float,
         eps_boost: float,
         boost_phase_trim: float,
-        init_rho=None,        # 可选初态密度矩阵；None → build_initial_state
+        init_rho=None,
     ) -> IQPURunResult:
         """运行 QCL v6 四阶段协议并返回结果。
 
         协议阶段
         --------
-        [0, t1)    PCM 阶段：基础 H + PCM 耗散
-        [t1, t2)   QIM 阶段：H_base + Ω_x σ_x,0 + QIM 耗散
-        [t2, t3)   BOOST 阶段：H_boost + BOOST 耗散（含强制复位与相位噪声）
-        [t3, t_max] PCM 阶段：回到基础 H + PCM 耗散
-
-        Parameters
-        ----------
-        label : str
-            运行标签，写入结果
-        t1 : float
-            QIM 阶段开始时刻
-        t2 : float
-            BOOST 阶段开始时刻
-        omega_x : float
-            QIM 阶段 qubit 0 的 σ_x 驱动频率
-        gamma_pcm : float
-            PCM 阶段 mode 间同步耗散率
-        gamma_qim : float
-            QIM 阶段 mode 间同步耗散率
-        gamma_boost : float
-            BOOST 阶段 mode 间同步耗散率
-        boost_duration : float
-            BOOST 阶段持续时间（超出 t_max 则截断）
-        gamma_reset : float
-            BOOST 阶段 qubit 0 强制复位率
-        gamma_phi0 : float
-            BOOST 阶段 qubit 0 相位噪声率
-        eps_boost : float
-            BOOST 驱动增强倍数
-        boost_phase_trim : float
-            BOOST 阶段两 mode 相位修正量（rad）
-
-        Returns
-        -------
-        IQPURunResult
+        [0, t1)    PCM 阶段
+        [t1, t2)   QIM 阶段
+        [t2, t3)   BOOST 阶段
+        [t3, t_max] PCM 阶段
         """
-        cfg = self.cfg
-        ops = self.ops
+        cfg  = self.cfg
+        ops  = self.ops
+        xp   = self.xp
+        dt   = np.float32(cfg.dt) if self._dtype == np.complex64 else cfg.dt
 
-        # ── 初始化密度矩阵（numpy 构建后移到目标设备）──
+        # ── 初始化密度矩阵 ──
         if init_rho is not None:
-            rho = self.xp.asarray(init_rho)
+            rho = xp.asarray(init_rho.astype(
+                np.complex64 if self._dtype == np.complex64 else np.complex128
+            ))
         else:
-            rho = self.xp.asarray(build_initial_state(cfg, self.dimQ, self.dimM))
+            rho = xp.asarray(
+                build_initial_state(cfg, self.dimQ, self.dimM).astype(
+                    np.complex64 if self._dtype == np.complex64 else np.complex128
+                )
+            )
 
         # ── 构建各阶段 Hamiltonian ──
         H_pulse = 0.5 * float(omega_x) * ops.sxJ[0]
-        H_boost = build_H_boost_trim(cfg, ops, self.H_base, eps_boost, boost_phase_trim)
+        H_boost = self.xp.asarray(
+            build_H_boost_trim(cfg, self._ops_cpu_ref, self._H_base_cpu_ref,
+                               eps_boost, boost_phase_trim).astype(
+                np.complex64 if self._dtype == np.complex64 else np.complex128
+            )
+        )
         t3 = min(cfg.t_max, t2 + boost_duration)
 
-        # ── 构建各阶段跳跃算符缓存 ──
-        c_pcm = self._make_cache(gamma_pcm, 0.0, 0.0)
-        c_qim = self._make_cache(gamma_qim, 0.0, 0.0)
-        c_boost = self._make_cache(gamma_boost, gamma_reset, gamma_phi0)
+        # ── 跳跃算符缓存 ──
+        c_pcm   = self._make_cache(gamma_pcm,   0.0,          0.0)
+        c_qim   = self._make_cache(gamma_qim,   0.0,          0.0)
+        c_boost = self._make_cache(gamma_boost, gamma_reset,  gamma_phi0)
 
         # ── 时间轴 ──
-        steps = int(np.ceil(cfg.t_max / cfg.dt))
+        steps   = int(np.ceil(cfg.t_max / cfg.dt))
         ts_full = np.linspace(0.0, steps * cfg.dt, steps + 1)
 
         t_log, C_log, rel_phase_log, neg_log = [], [], [], []
+        obs_idx = 0   # 用于 negativity_every 计数
 
         t_start = time.time()
         for i, t in enumerate(ts_full):
-            # 每 obs_every 步记录一次
-            if (i % cfg.obs_every) == 0:
-                snap = compute_step_snapshot(
-                    float(t), rho, ops, cfg.phi_ref, cfg.track_entanglement
-                )
-                t_log.append(snap.t)
-                C_log.append(snap.C)
-                rel_phase_log.append(snap.rel_phase)
-                if cfg.track_entanglement:
-                    neg_log.append(snap.negativity)
+            # 过程观测（稀疏）
+            if (i % self._obs_every) == 0:
+                if cfg.profile == "fast_search":
+                    C, rp = compute_step_snapshot_fast(xp, t, rho, ops.aJ, cfg.phi_ref)
+                    t_log.append(float(t))
+                    C_log.append(C)
+                    rel_phase_log.append(rp)
+                else:
+                    track_neg = (
+                        cfg.track_entanglement
+                        and self._neg_every > 0
+                        and (obs_idx % self._neg_every) == 0
+                    )
+                    snap = compute_step_snapshot_full(xp, t, rho, ops, cfg.phi_ref, track_neg)
+                    t_log.append(snap.t)
+                    C_log.append(snap.C)
+                    rel_phase_log.append(snap.rel_phase)
+                    if snap.negativity is not None:
+                        neg_log.append(snap.negativity)
+                obs_idx += 1
 
-            # 推进一步（最后一步不需要推进）
+            # RK4 推进
             if i < len(ts_full) - 1:
                 if t < t1:
                     Ht, cache = self.H_base, c_pcm
@@ -191,23 +216,25 @@ class IQPU:
                 else:
                     Ht, cache = self.H_base, c_pcm
 
-                rho_next = rk4_step(rho, cfg.dt, Ht, cache, self.buffers)
+                rho_next = rk4_step(xp, rho, dt, Ht, cache, self.buffers)
                 rho[:] = rho_next
 
         elapsed = time.time() - t_start
 
-        # ── 提取末态统计量 ──
+        # ── 末态统计量（一次性完整读出）──
         final_sz, final_n, final_rel_phase, C_end, dtheta_end = \
             compute_final_observables(rho, ops, cfg.phi_ref)
 
         N_end = float(neg_log[-1]) if (neg_log and cfg.track_entanglement) else None
+
+        rho_cpu = rho.get() if hasattr(rho, 'get') else np.array(rho)
 
         return IQPURunResult(
             label=label,
             DIM=self.DIM,
             elapsed_sec=elapsed,
             ts=np.array(t_log, dtype=np.float64),
-            rel_phase=np.array(rel_phase_log, dtype=np.float64),
+            rel_phase=np.array(rel_phase_log, dtype=object if rel_phase_log and isinstance(rel_phase_log[0], list) else np.float64),
             C_log=np.array(C_log, dtype=np.float64),
             neg_log=np.array(neg_log, dtype=np.float64) if neg_log else None,
             final_sz=final_sz,
@@ -216,7 +243,7 @@ class IQPU:
             C_end=C_end,
             dtheta_end=dtheta_end,
             N_end=N_end,
-            final_rho=rho.get() if hasattr(rho, 'get') else (np.array(rho) if hasattr(rho, '__array__') else rho),
+            final_rho=rho_cpu,
         )
 
     # ──────────────────────────────────────────────
@@ -224,16 +251,22 @@ class IQPU:
     # ──────────────────────────────────────────────
 
     def _move_ops(self, ops_cpu: OperatorBank) -> OperatorBank:
-        """将 numpy 算符库移到目标设备。"""
+        """将 numpy 算符库移到目标设备，并保留 CPU 引用供 H_boost 构建。"""
         xp = self.xp
+        dtype = self._dtype
+        self._ops_cpu_ref   = ops_cpu   # 保留 CPU 引用
+        self._H_base_cpu_ref = build_H_base(self.cfg, ops_cpu)  # CPU H_base 引用
+        cast = lambda a: xp.asarray(a.astype(
+            np.complex64 if dtype == np.complex64 else np.complex128
+        ))
         return OperatorBank(
             DIM=ops_cpu.DIM,
-            szJ=[xp.asarray(o) for o in ops_cpu.szJ],
-            sxJ=[xp.asarray(o) for o in ops_cpu.sxJ],
-            smJ=[xp.asarray(o) for o in ops_cpu.smJ],
-            aJ= [xp.asarray(o) for o in ops_cpu.aJ],
-            adJ=[xp.asarray(o) for o in ops_cpu.adJ],
-            nJ= [xp.asarray(o) for o in ops_cpu.nJ],
+            szJ=[cast(o) for o in ops_cpu.szJ],
+            sxJ=[cast(o) for o in ops_cpu.sxJ],
+            smJ=[cast(o) for o in ops_cpu.smJ],
+            aJ= [cast(o) for o in ops_cpu.aJ],
+            adJ=[cast(o) for o in ops_cpu.adJ],
+            nJ= [cast(o) for o in ops_cpu.nJ],
         )
 
     def _make_cache(
@@ -258,5 +291,5 @@ class IQPU:
         )
 
 
-# 公开别名（与原型文件保持兼容）
+# 公开别名
 QCU = IQPU

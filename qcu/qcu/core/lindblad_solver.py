@@ -23,11 +23,13 @@ from typing import List, Tuple
 
 import numpy as np
 
+from .state_repr import enforce_density_matrix
+
 # 跳跃算符缓存类型：list of (c, c†, c†c)
 CollapseCache = List[Tuple[np.ndarray, np.ndarray, np.ndarray]]
 
 
-def alloc_rk4_buffers(DIM: int, xp=None):
+def alloc_rk4_buffers(DIM: int, xp=None, dtype=None):
     """预分配 RK4 求解所需的 8 个工作缓冲区。
 
     Parameters
@@ -36,20 +38,19 @@ def alloc_rk4_buffers(DIM: int, xp=None):
         希尔伯特空间维度
     xp : module, optional
         numpy 或 cupy；默认 numpy。
-
-    Returns
-    -------
-    tuple of 8 ndarray
-        (tmp1, tmp2, k1, k2, k3, k4, work, out)
+    dtype : dtype, optional
+        缓冲区数据类型；fast_search 用 complex64，full_physics 用 complex128。
     """
     if xp is None:
         xp = np
+    if dtype is None:
+        dtype = np.complex128
     shape = (DIM, DIM)
-    dtype = np.complex128
     return tuple(xp.zeros(shape, dtype=dtype) for _ in range(8))
 
 
 def lindblad_rhs(
+    xp,
     rho: np.ndarray,
     H: np.ndarray,
     c_cache: CollapseCache,
@@ -63,6 +64,8 @@ def lindblad_rhs(
 
     Parameters
     ----------
+    xp : module
+        numpy 或 cupy，由调用方在初始化时确定，不在热路径中重复判断。
     rho : ndarray
         当前密度矩阵
     H : ndarray
@@ -79,12 +82,6 @@ def lindblad_rhs(
     out : ndarray
         dρ/dt
     """
-    try:
-        import cupy
-        xp = cupy.get_array_module(rho)
-    except ImportError:
-        xp = np
-
     # 相干项：−i[H, ρ]
     xp.matmul(H, rho, out=tmp1)
     xp.matmul(rho, H, out=tmp2)
@@ -97,15 +94,16 @@ def lindblad_rhs(
         out[:] += tmp2
 
         xp.matmul(cd_c, rho, out=tmp1)
-        out[:] -= 0.5 * tmp1
+        out[:] += -0.5 * tmp1
 
         xp.matmul(rho, cd_c, out=tmp1)
-        out[:] -= 0.5 * tmp1
+        out[:] += -0.5 * tmp1
 
     return out
 
 
 def rk4_step(
+    xp,
     rho: np.ndarray,
     dt: float,
     H: np.ndarray,
@@ -116,6 +114,8 @@ def rk4_step(
 
     Parameters
     ----------
+    xp : module
+        numpy 或 cupy，由调用方传入。
     rho : ndarray
         当前密度矩阵（不修改）
     dt : float
@@ -132,21 +132,19 @@ def rk4_step(
     out : ndarray
         下一时刻密度矩阵（已 Hermitian 化 + 归一化）
     """
-    from .state_repr import enforce_density_matrix
-
     tmp1, tmp2, k1, k2, k3, k4, work, out = buffers
 
-    lindblad_rhs(rho, H, c_cache, tmp1, tmp2, k1)
+    lindblad_rhs(xp, rho, H, c_cache, tmp1, tmp2, k1)
 
     work[:] = rho + 0.5 * dt * k1
-    lindblad_rhs(work, H, c_cache, tmp1, tmp2, k2)
+    lindblad_rhs(xp, work, H, c_cache, tmp1, tmp2, k2)
 
     work[:] = rho + 0.5 * dt * k2
-    lindblad_rhs(work, H, c_cache, tmp1, tmp2, k3)
+    lindblad_rhs(xp, work, H, c_cache, tmp1, tmp2, k3)
 
     work[:] = rho + dt * k3
-    lindblad_rhs(work, H, c_cache, tmp1, tmp2, k4)
+    lindblad_rhs(xp, work, H, c_cache, tmp1, tmp2, k4)
 
     out[:] = rho + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
-    enforce_density_matrix(out)
+    enforce_density_matrix(xp, out)
     return out
