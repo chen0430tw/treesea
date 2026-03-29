@@ -216,7 +216,7 @@ class IQPU:
             C_end=C_end,
             dtheta_end=dtheta_end,
             N_end=N_end,
-            final_rho=np.array(rho) if hasattr(rho, '__array__') else rho,
+            final_rho=rho.get() if hasattr(rho, 'get') else (np.array(rho) if hasattr(rho, '__array__') else rho),
         )
 
     # ──────────────────────────────────────────────
