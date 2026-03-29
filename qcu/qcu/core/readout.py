@@ -86,7 +86,7 @@ def compute_step_snapshot_full(
     C = float(abs(a_vals[0] - a_vals[1])) if Nm >= 2 else 0.0
     rel_phase = [float(wrap_pi(np.angle(a_vals[k]) - phi_ref)) for k in range(Nm)]
 
-    neg = negativity_qubit0_vs_rest(rho) if track_negativity else None
+    neg = negativity_qubit0_vs_rest(xp, rho) if track_negativity else None
     return ReadoutSnapshot(t=t, C=C, rel_phase=rel_phase, negativity=neg)
 
 
