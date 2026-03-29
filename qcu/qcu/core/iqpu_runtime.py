@@ -133,6 +133,7 @@ class IQPU:
         eps_boost: float,
         boost_phase_trim: float,
         init_rho=None,
+        t_max_override: float = None,
     ) -> IQPURunResult:
         """运行 QCL v6 四阶段协议并返回结果。
 
@@ -142,6 +143,13 @@ class IQPU:
         [t1, t2)   QIM 阶段
         [t2, t3)   BOOST 阶段
         [t3, t_max] PCM 阶段
+
+        Parameters
+        ----------
+        t_max_override : float, optional
+            覆盖 cfg.t_max 的实际运行时长。用于 segment 级别的快速执行：
+            t3（物理结束点）之后只需短暂 PCM 尾，无需跑满 cfg.t_max=10。
+            传入时需保证 t_max_override >= t3（t2 + boost_duration）。
         """
         cfg  = self.cfg
         ops  = self.ops
@@ -168,7 +176,10 @@ class IQPU:
                 np.complex64 if self._dtype == np.complex64 else np.complex128
             )
         )
-        t3 = min(cfg.t_max, t2 + boost_duration)
+
+        # ── 有效 t_max（支持 segment 级收紧）──
+        eff_t_max = t_max_override if t_max_override is not None else cfg.t_max
+        t3 = min(eff_t_max, t2 + boost_duration)
 
         # ── 跳跃算符缓存 ──
         c_pcm   = self._make_cache(gamma_pcm,   0.0,          0.0)
@@ -176,7 +187,7 @@ class IQPU:
         c_boost = self._make_cache(gamma_boost, gamma_reset,  gamma_phi0)
 
         # ── 时间轴 ──
-        steps   = int(np.ceil(cfg.t_max / cfg.dt))
+        steps   = int(np.ceil(eff_t_max / cfg.dt))
         ts_full = np.linspace(0.0, steps * cfg.dt, steps + 1)
 
         t_log, C_log, rel_phase_log, neg_log = [], [], [], []

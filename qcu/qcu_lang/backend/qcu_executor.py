@@ -111,7 +111,13 @@ class QCUExecutor:
         seg_cfg    = self._user_cfg or self._make_cfg(circ, Nq=2)
         emerge_cfg = self._user_cfg or self._make_cfg(circ, Nq=circ.n_qubits)
         self.cfg   = seg_cfg          # 暴露给外部检查（代表 segment 级配置）
-        self._iqpu = IQPU(seg_cfg)
+
+        # ── 预建 IQPU 实例，整个电路执行期间复用 ──
+        # 原实现每次 _run_segment 都 IQPU(cfg)，算符库 + Hamiltonian + buffer
+        # 重建 N_seg 次，这里改为一次建两个实例（seg / emerge）全程复用。
+        self._iqpu        = IQPU(seg_cfg)
+        self._emerge_iqpu = IQPU(emerge_cfg)
+
         if self.verbose:
             print(f"  noise: {noise_summary(circ)}")
         steps = compile_circuit(circ)
@@ -293,13 +299,35 @@ class QCUExecutor:
         result.elapsed_sec = time.time() - t0
         return result
 
-    def _run_segment(self, *, _cfg=None, _init_rho=None, **kw) -> Any:
+    def _run_segment(self, *, _cfg=None, _init_rho=None, _pcm_tail=0.5, **kw) -> Any:
         """运行一段 QCL v6 协议。
 
         _cfg      : 可选，传入则覆盖 self.cfg（emerge 步骤用 emerge_cfg）。
         _init_rho : 可选初态密度矩阵；传入则从上一 gate 末态继续演化，
                     实现 gate 间量子态连续传递。None → 从 |0⟩ 初始化。
+        _pcm_tail : 物理结束点（t3）之后额外保留的 PCM 时长（秒）。
+                    默认 0.5s，足够相干衰减到稳态读出。
+                    emerge 步骤（_cfg is not None）不收紧，跑满 cfg.t_max。
+
+        性能优化（两层）：
+        1. 复用 run() 预建的 IQPU 实例，避免每段重建算符库。
+        2. 非 emerge 段自动收紧 t_max_override = t3 + _pcm_tail，
+           避免跑满 cfg.t_max=10（200 步）。
+           例：qim_evolve(duration=0.5) → t3=0.7 → t_max_override=1.2 → 24 步（原 200 步）。
         """
-        from qcu.core.iqpu_runtime import IQPU
-        iqpu = IQPU(_cfg if _cfg is not None else self.cfg)
-        return iqpu.run_qcl_v6(label="seg", init_rho=_init_rho, **kw)
+        is_emerge = _cfg is not None
+        iqpu = self._emerge_iqpu if is_emerge else self._iqpu
+
+        t_max_override = None
+        if not is_emerge:
+            t2 = kw.get('t2', 0.1)
+            boost_duration = kw.get('boost_duration', 0.0)
+            t3 = t2 + boost_duration
+            t_max_override = t3 + _pcm_tail
+
+        return iqpu.run_qcl_v6(
+            label="seg",
+            init_rho=_init_rho,
+            t_max_override=t_max_override,
+            **kw,
+        )
