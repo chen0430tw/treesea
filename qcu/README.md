@@ -72,6 +72,15 @@ QCU 加速 hash 搜索不是「更快算一个 hash」，而是**通过坍缩减
 
 这类似于侦探用物证圈出最可能的嫌疑人，再逐个确认——不是更快审问，而是需要审问的人更少了。
 
+### Hash 搜索实测（RTX 3070，fast_search profile）
+
+| 目标密码 | 类型 | 候选池大小 | 目标位置 | C 值 | 模式 | 耗时 |
+|---------|------|-----------|---------|------|------|------|
+| `abc123` | 小写+数字，6字符 | 801 | 654 | 0.0161 | sharpened | **1.43s** |
+| `Tr0ub4dor$3` | 大小写+数字+符号，11字符 | 1501 | 1401 | 0.0059 | sharpened | **1.91s** |
+
+候选池大小从 801 增至 1501（近翻倍），耗时仅从 1.43s 增至 1.91s——QCU 演化时间与候选池大小**无关**，候选规模增长不线性传导到搜索时间。
+
 ## 系统职责
 
 - 状态表示与初始化
@@ -176,6 +185,40 @@ QCU 核心求解层（Lindblad RK4）原生支持 CPU / CUDA 双后端，通过 
 DIM=144 的矩阵太小，单次 matmul 仅需数微秒，但 CUDA kernel launch 本身有 10–50 μs 开销。整个 rk4_step 涉及约 16 次 kernel 调用，launch 开销与计算时间相当，GPU 利用率极低。
 
 **建议**：生产环境使用 `d ≥ 12`（DIM ≥ 576），或通过批量参数扫描让单次 kernel 处理多个初态，以分摊 launch 开销。
+
+### 双 Profile 架构（v2 优化后）
+
+v2 引入 `fast_search` / `full_physics` 双 profile，把「物理仿真精度」和「任务搜索速度」正式拆开：
+
+| Profile | dtype | obs_every | negativity | 适用场景 |
+|---------|-------|-----------|------------|---------|
+| `full_physics` | complex128 | 1 | 稀疏（每 8 步） | 论文图、完整 Lindblad 验证 |
+| `fast_search` | complex64 | 8 | 关闭 | hash 搜索、候选筛选、参数扫描 |
+
+**性能对比**（cpu，DIM=144，t_max=10s）：
+
+| 配置 | 耗时 |
+|------|------|
+| 原版（neg_every=1，obs=1） | 2.45s |
+| full_physics（neg_every=8） | 1.62s（−34%） |
+| fast_search（neg=off，f32） | 1.37s（−44%） |
+| cuda fast_search | **1.43s**（含首次 JIT warmup） |
+
+使用方式：
+
+```python
+from qcu.core.state_repr import IQPUConfig
+from qcu.core.iqpu_runtime import IQPU
+from qcu.core.profiles import IQPUFastProfile, apply_profile
+
+cfg = IQPUConfig(Nq=2, Nm=2, d=6)
+apply_profile(cfg, IQPUFastProfile(backend="cuda"))   # fast_search + GPU
+iqpu = IQPU(cfg)
+
+# QCUExecutor 直接传 profile 参数
+from qcu_lang import QCUExecutor
+ex = QCUExecutor(device="cuda", profile="fast_search")
+```
 
 ---
 
@@ -390,6 +433,14 @@ disc(0.05) q[0] -> c[0];  // 诱导判决，阈值 0.05
   - `deutsch.py`：QCU 原生 Deutsch 算法（100% 准确率，C 间隔 186.99）
     oracle 编码为 `boost_phase_trim`——架构设计时预留的腔相位注入接口，
     本阶段将其封装为正式 benchmark 管线
+- **v2 双 profile 架构**：`fast_search` / `full_physics` 正式分离
+  - Lindblad RK4 热路径外提 `xp`，去除动态 backend 判断
+  - `alloc_rk4_buffers` / `entanglement_metrics` dtype 参数化
+  - readout 拆为 fast（只算 C/rel_phase）/ full（完整）两版
+  - `negativity_every` 稀疏化，fast_search 默认关闭
+  - `qcu/core/profiles.py`：`IQPUFastProfile` / `IQPUFullProfile` dataclass
+  - `QCUExecutor` 新增 `profile` 参数
+  - `benchmarks/perf_compare.py`：full vs fast / obs_every / numpy vs cupy 对照
 
 ### 下一阶段
 

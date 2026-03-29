@@ -77,9 +77,11 @@ class QCUExecutor:
         是否打印每步执行信息
     """
 
-    def __init__(self, cfg=None, device: str = "cpu", verbose: bool = True):
+    def __init__(self, cfg=None, device: str = "cpu",
+                 profile: str = "full_physics", verbose: bool = True):
         self._user_cfg = cfg   # None → auto-detect Nq from circuit at run()
         self.device = device
+        self.profile = profile
         self.verbose = verbose
         self.cfg = cfg         # may be overwritten per-run when auto-detecting
         self._iqpu = None
@@ -92,7 +94,13 @@ class QCUExecutor:
         未注解时按电路双比特门数自动校正。
         """
         from ..compiler.noise_infer import infer_iqpu_config
-        return infer_iqpu_config(circ, Nq=Nq, device=self.device)
+        from qcu.core.profiles import IQPUFastProfile, IQPUFullProfile, apply_profile
+        cfg = infer_iqpu_config(circ, Nq=Nq, device=self.device)
+        if self.profile == "fast_search":
+            apply_profile(cfg, IQPUFastProfile(backend=self.device))
+        else:
+            apply_profile(cfg, IQPUFullProfile(backend=self.device))
+        return cfg
 
     def run(self, circ: QCircuit) -> QCUExecResult:
         """执行量子电路，返回结果。"""
