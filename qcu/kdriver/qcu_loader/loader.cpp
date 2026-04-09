@@ -32,6 +32,9 @@
 #include <utils.hpp>
 #include <intel_driver.hpp>
 
+/* ── CFG bitmap registration ─────────────────────────────────────── */
+#include "cfg_patch.hpp"
+
 /* ── Crash handler ───────────────────────────────────────────────── */
 LONG WINAPI QcuCrashHandler(EXCEPTION_POINTERS* ExceptionInfo)
 {
@@ -52,16 +55,22 @@ LONG WINAPI QcuCrashHandler(EXCEPTION_POINTERS* ExceptionInfo)
 /* ── MapDriver callback ──────────────────────────────────────────── */
 /*
  * Called by kdmapper just before it jumps to CustomDriverEntry.
- * param1 / param2 are passed as arguments to CustomDriverEntry.
- * We don't need custom params — CustomDriverEntry ignores RegistryPath anyway.
+ * We save allocationPtr/allocationSize so we can register them in the
+ * kernel CFG bitmap (step 3.5) while iqvw64e.sys is still loaded.
  */
+static ULONG64 g_alloc_ptr  = 0;
+static ULONG64 g_alloc_size = 0;
+
 static bool OnBeforeDriverEntry(ULONG64* param1, ULONG64* param2,
                                 ULONG64 allocationPtr, ULONG64 allocationSize)
 {
     UNREFERENCED_PARAMETER(param1);
     UNREFERENCED_PARAMETER(param2);
+    g_alloc_ptr  = allocationPtr;
+    g_alloc_size = allocationSize;
     kdmLog(L"[QCU] Driver mapped at kernel pool 0x" << std::hex << allocationPtr
            << L"  size=0x" << allocationSize << std::endl);
+
     return true;
 }
 
@@ -144,6 +153,26 @@ int wmain(int argc, wchar_t** argv)
     }
 
     kdmLog(L"[QCU] Driver mapped and initialized." << std::endl);
+
+    /* ── Step 3.5: Register CFG bitmap (KDU approach) ───────────── */
+    /*
+     * iqvw64e.sys is still loaded here.  Use its read/write primitives
+     * (KDU-style) to locate nt!MiCfgBitMap and mark every 16-byte
+     * granule in the mapped allocation as a valid CFG indirect-call
+     * target.  This prevents BSOD 0x139 LEGACY_GS_VIOLATION when
+     * IofCallDriver calls QcuCreate / QcuClose / QcuDeviceControl
+     * after a forced process termination (e.g. kshutdown64 APC kill).
+     */
+    kdmLog(L"[QCU] Registering CFG bitmap for mapped range..." << std::endl);
+    if (g_alloc_ptr && g_alloc_size) {
+        if (!cfg_patch::RegisterRange(g_alloc_ptr, g_alloc_size)) {
+            kdmLog(L"[QCU] Warning: CFG bitmap registration incomplete. "
+                   L"Driver will still work normally; BSOD risk only if "
+                   L"process is forcibly terminated while handle is open." << std::endl);
+        } else {
+            kdmLog(L"[QCU] CFG bitmap registered." << std::endl);
+        }
+    }
 
     /* ── Step 4: Unload the vulnerable driver ────────────────────── */
     if (!NT_SUCCESS(intel_driver::Unload())) {
