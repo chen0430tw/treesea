@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import math
+import re
 from typing import Any, Dict, List
 
 
@@ -70,10 +71,71 @@ def extract_td_features(tree_output: dict) -> Dict[str, float]:
 
 
 def extract_candidate_features(candidate_params: dict) -> Dict[str, float]:
-    """从 QCU 候选参数提取特征向量。"""
+    """从 QCU 候选参数提取特征向量。
+
+    如果 payload 包含 strategy_tags，则用标签直接设置语义特征，
+    跳过从 label 文本推断的不精确路径。
+    """
     raw = _extract_candidate_raw_features(candidate_params)
     semantic = _extract_candidate_identity_features(candidate_params)
-    return _collapse_candidate_semantics(raw, semantic)
+    features = _collapse_candidate_semantics(raw, semantic)
+
+    # strategy_tags 覆盖：如果用户提供了显式标签，直接映射到特征维度
+    tags = candidate_params.get("strategy_tags", [])
+    if tags:
+        features = _apply_strategy_tags(features, tags)
+
+    return features
+
+
+# 策略标签 → 特征维度映射
+_TAG_FEATURE_MAP: Dict[str, Dict[str, float]] = {
+    # 风格标签
+    "conservative": {"conservatism": 0.85, "recklessness": 0.05, "survivability": 0.80},
+    "moderate": {"balance": 0.85, "aggressiveness": 0.55, "conservatism": 0.50},
+    "aggressive": {"aggressiveness": 0.85, "recklessness": 0.50, "execution_speed": 0.80},
+    "ultra_aggressive": {"aggressiveness": 0.95, "recklessness": 0.85, "survivability": 0.10},
+    # 能力标签
+    "validated": {"evidence_maturity": 0.80, "deployability_signal": 0.70},
+    "unproven": {"evidence_maturity": 0.10, "exploration": 0.70},
+    "iterative": {"optionality": 0.80, "stepwise_signal": 0.70, "balance": 0.75},
+    "all_in": {"optionality": 0.10, "recklessness": 0.60},
+    # 协作标签
+    "joint": {"coordination": 0.85, "alliance_synergy": 0.90},
+    "institutional": {"institutional_capacity": 0.80, "legitimacy_signal": 0.70},
+    "commercial": {"commercial_drive": 0.80, "execution_speed": 0.75},
+    "state_backed": {"state_drive": 0.80, "institutional_capacity": 0.70},
+    # 风险标签
+    "low_risk": {"risk_appetite": 0.15, "survivability": 0.80, "containment_signal": 0.60},
+    "high_risk": {"risk_appetite": 0.80, "recklessness": 0.60},
+    "moderate_risk": {"risk_appetite": 0.45, "balance": 0.70},
+    # 执行标签
+    "fast": {"execution_speed": 0.85, "patience": 0.20},
+    "slow": {"patience": 0.85, "execution_speed": 0.20},
+    "proven_tech": {"evidence_maturity": 0.85, "deployability_signal": 0.75},
+    "experimental": {"exploration": 0.80, "evidence_maturity": 0.15},
+    # 伦理标签
+    "ethical": {"ethical_legibility": 0.85, "harm_cost": 0.10},
+    "harmful": {"harm_cost": 0.80, "ethical_legibility": 0.10},
+    "transparent": {"visibility_signal": 0.80, "broadcast_signal": 0.70},
+}
+
+
+def _apply_strategy_tags(features: Dict[str, float], tags: List[str]) -> Dict[str, float]:
+    """用策略标签覆盖特征值。多个标签取平均。"""
+    overrides: Dict[str, List[float]] = {}
+    for tag in tags:
+        tag_lower = tag.lower().replace("-", "_").replace(" ", "_")
+        mapping = _TAG_FEATURE_MAP.get(tag_lower, {})
+        for feat_key, feat_val in mapping.items():
+            overrides.setdefault(feat_key, []).append(feat_val)
+
+    if overrides:
+        features = dict(features)
+        for feat_key, values in overrides.items():
+            features[feat_key] = sum(values) / len(values)
+
+    return features
 
 
 def _extract_candidate_raw_features(candidate_params: dict) -> Dict[str, float]:
@@ -106,6 +168,7 @@ def _extract_candidate_identity_features(candidate_params: dict) -> Dict[str, fl
 
     token_map = _build_candidate_token_map(text)
     institutional_support = _compute_institutional_support(token_map)
+    lexical_signals = _compute_candidate_lexical_signals(text)
 
     return {
         "alliance_synergy": float(token_map["joint"]),
@@ -113,6 +176,7 @@ def _extract_candidate_identity_features(candidate_params: dict) -> Dict[str, fl
         "commercial_drive": float(token_map["spacex"]),
         "state_drive": float(token_map["china"]),
         "schedule_inertia": float(token_map["slip"]),
+        **lexical_signals,
     }
 
 
@@ -146,6 +210,97 @@ def _has_joint_marker(text: str) -> bool:
     return ("+" in text) or ("joint" in text)
 
 
+def _candidate_tokens(text: str) -> set[str]:
+    normalized = text.replace("+", " ").replace("-", "_")
+    return {token for token in re.split(r"[^a-z0-9_]+|_", normalized) if token}
+
+
+def _signal_overlap(tokens: set[str], lexicon: tuple[str, ...]) -> float:
+    if not lexicon:
+        return 0.0
+    matches = sum(1 for token in lexicon if token in tokens)
+    return min(1.0, matches / max(len(lexicon) * 0.5, 1.0))
+
+
+def _compute_candidate_lexical_signals(text: str) -> Dict[str, float]:
+    tokens = _candidate_tokens(text)
+    lexicons = {
+        "containment_signal": (
+            "evacuate", "isolate", "lockdown", "shelter", "brake",
+            "life", "support", "stockpile", "contain", "quarantine",
+            "retreat", "comfort", "palliative", "geological", "storage",
+        ),
+        "mobility_signal": (
+            "evacuate", "evacuation", "isolate", "retreat", "brake",
+            "reroute", "relocate", "withdraw",
+        ),
+        "deployability_signal": (
+            "wind", "solar", "renewable", "storage", "mrna",
+            "therapy", "car", "targeted", "asymmetric", "diversify",
+            "checkpoint", "guardrails", "platform", "pilot",
+        ),
+        "broadcast_signal": (
+            "media", "public", "campaign", "expose", "broadcast",
+            "anonymous", "regulator", "gdpr",
+        ),
+        "stepwise_signal": (
+            "gate", "gaa", "storage", "targeted", "diversify",
+            "platform", "guardrails", "checkpoint", "hybrid", "pilot",
+            "iterate", "mvp", "adjacent", "bilateral", "managed",
+        ),
+        "visibility_signal": (
+            "public", "media", "anonymous", "regulator", "gdpr",
+            "framework", "appeal", "court", "fight", "whistleblower",
+            "expose", "campaign",
+        ),
+        "guardrail_signal": (
+            "guardrails", "geofenced", "checkpoint", "targeted",
+            "asymmetric", "bilateral", "start", "triage", "gaa",
+            "gate", "managed",
+        ),
+        "durability_signal": (
+            "deep", "geological", "permanent", "repository", "storage",
+            "metro", "grid", "seawall", "deterrence",
+        ),
+        "legitimacy_signal": (
+            "legal", "regulator", "anonymous", "appeal", "court",
+            "media", "public", "framework", "guardrails", "blind",
+            "waiting", "match", "start", "triage",
+        ),
+        "platform_signal": (
+            "platform", "pilot", "iterate", "hybrid", "mvp",
+            "modular", "storage", "geofenced", "guardrails", "checkpoint",
+            "bilateral", "diversify", "isru",
+        ),
+        "optionality_signal": (
+            "pilot", "iterate", "gradual", "hybrid", "appeal", "anonymous",
+            "negotiate", "adjacent", "bilateral", "checkpoint", "weighted",
+            "start", "tit", "match", "palliative",
+        ),
+        "evidence_signal": (
+            "standard", "traditional", "best", "match", "checkpoint",
+            "deterrence", "start", "weighted", "appeal", "proven",
+        ),
+        "harm_signal": (
+            "strike", "torture", "enhanced", "scorched", "strongest",
+            "bidder", "defect", "preemptive", "ransom", "ignore",
+            "flee", "replace", "hype", "nepotism",
+        ),
+        "novelty_signal": (
+            "experimental", "mrna", "ai", "hydrogen", "cfet", "serverless",
+            "digital", "rewrite", "phage", "vaporware",
+        ),
+        "fairness_signal": (
+            "anonymous", "weighted", "waiting", "lottery", "blind",
+            "tit", "start", "best", "match", "appeal",
+        ),
+    }
+    return {
+        name: _signal_overlap(tokens, lexicon)
+        for name, lexicon in lexicons.items()
+    }
+
+
 def _collapse_candidate_semantics(
     raw_features: Dict[str, float],
     semantic_features: Dict[str, float],
@@ -155,17 +310,82 @@ def _collapse_candidate_semantics(
     patience = raw_features["patience"]
     risk_appetite = raw_features["risk_appetite"]
     aggressiveness = raw_features["aggressiveness"]
+    balance = raw_features["balance"]
 
     alliance_synergy = semantic_features["alliance_synergy"]
     institutional_support = semantic_features["institutional_support"]
     commercial_drive = semantic_features["commercial_drive"]
     state_drive = semantic_features["state_drive"]
     schedule_inertia = semantic_features["schedule_inertia"]
+    containment_signal = semantic_features.get("containment_signal", 0.0)
+    mobility_signal = semantic_features.get("mobility_signal", 0.0)
+    deployability_signal = semantic_features.get("deployability_signal", 0.0)
+    broadcast_signal = semantic_features.get("broadcast_signal", 0.0)
+    stepwise_signal = semantic_features.get("stepwise_signal", 0.0)
+    visibility_signal = semantic_features.get("visibility_signal", 0.0)
+    guardrail_signal = semantic_features.get("guardrail_signal", 0.0)
+    durability_signal = semantic_features.get("durability_signal", 0.0)
+    legitimacy_signal = semantic_features.get("legitimacy_signal", 0.0)
+    platform_signal = semantic_features.get("platform_signal", 0.0)
+    optionality_signal = semantic_features.get("optionality_signal", 0.0)
+    evidence_signal = semantic_features.get("evidence_signal", 0.0)
+    harm_signal = semantic_features.get("harm_signal", 0.0)
+    novelty_signal = semantic_features.get("novelty_signal", 0.0)
+    fairness_signal = semantic_features.get("fairness_signal", 0.0)
 
-    survivability = min(1.0, 0.55 * conservatism + 0.25 * patience + 0.20 * (1.0 - risk_appetite))
-    execution_speed = min(1.0, 0.65 * aggressiveness + 0.20 * commercial_drive + 0.15 * (1.0 - schedule_inertia))
+    survivability = min(
+        1.0,
+        0.45 * conservatism
+        + 0.20 * patience
+        + 0.15 * (1.0 - risk_appetite)
+        + 0.15 * containment_signal
+        + 0.05 * mobility_signal,
+    )
+    execution_speed = min(
+        1.0,
+        0.50 * aggressiveness
+        + 0.15 * commercial_drive
+        + 0.15 * (1.0 - schedule_inertia)
+        + 0.10 * platform_signal
+        + 0.05 * guardrail_signal
+        + 0.05 * deployability_signal,
+    )
     coordination = min(1.0, 0.70 * alliance_synergy + 0.30 * institutional_support)
     institutional_capacity = institutional_support
+    optionality = min(
+        1.0,
+        0.35 * patience
+        + 0.25 * (1.0 - risk_appetite)
+        + 0.10 * balance
+        + 0.10 * optionality_signal
+        + 0.10 * platform_signal
+        + 0.05 * guardrail_signal
+        + 0.05 * stepwise_signal,
+    )
+    evidence_maturity = min(
+        1.0,
+        0.24 * survivability
+        + 0.20 * institutional_support
+        + 0.18 * evidence_signal
+        + 0.13 * (1.0 - novelty_signal)
+        + 0.13 * platform_signal
+        + 0.07 * durability_signal
+        + 0.05 * deployability_signal
+        + 0.05 * stepwise_signal,
+    )
+    ethical_legibility = min(
+        1.0,
+        0.22 * institutional_support
+        + 0.20 * fairness_signal
+        + 0.18 * (1.0 - harm_signal)
+        + 0.15 * coordination
+        + 0.15 * legitimacy_signal
+        + 0.05 * visibility_signal
+        + 0.05 * broadcast_signal,
+    )
+    decisiveness = min(1.0, 0.55 * aggressiveness + 0.25 * (1.0 - patience) + 0.20 * balance)
+    exploration = min(1.0, 0.55 * aggressiveness + 0.45 * risk_appetite)
+    harm_cost = harm_signal
 
     return {
         **raw_features,
@@ -174,6 +394,12 @@ def _collapse_candidate_semantics(
         "execution_speed": execution_speed,
         "coordination": coordination,
         "institutional_capacity": institutional_capacity,
+        "optionality": optionality,
+        "evidence_maturity": evidence_maturity,
+        "ethical_legibility": ethical_legibility,
+        "decisiveness": decisiveness,
+        "exploration": exploration,
+        "harm_cost": harm_cost,
     }
 
 
@@ -190,29 +416,39 @@ def _collapse_candidate_semantics(
 # Round 2 (43 samples): 84.9% pairwise, 58.1% top-1
 AFFINITY_GROUPS = {
     "survival_axis": [
-        ("seed_survival_need", "survivability", 0.0596, "align"),
-        ("seed_survival_need", "recklessness", 0.8955, "oppose"),
-        ("field_coherence", "survivability", 0.9882, "align"),
-        ("utm_drought", "survivability", 0.0649, "align"),
+        ("seed_survival_need", "survivability", 2.7106, "align"),
+        ("seed_survival_need", "recklessness", 0.0945, "oppose"),
+        ("seed_survival_need", "optionality", 0.0100, "align"),
+        ("seed_survival_need", "ethical_legibility", 2.7979, "align"),
+        ("seed_survival_need", "harm_cost", 0.1803, "oppose"),
+        ("field_coherence", "survivability", 1.4020, "align"),
+        ("utm_drought", "survivability", 0.2006, "align"),
     ],
     "execution_axis": [
-        ("seed_race_need", "execution_speed", 0.9828, "align"),
-        ("seed_urgency", "schedule_inertia", 3.9226, "oppose"),
-        ("seed_competition", "schedule_inertia", 0.1462, "oppose"),
-        ("seed_commercial_motivation", "commercial_drive", 0.3311, "align"),
-        ("seed_international_competition", "state_drive", 0.6554, "align"),
-        ("seed_readiness_gap", "state_drive", 1.4619, "oppose"),
+        ("seed_race_need", "execution_speed", 0.0248, "align"),
+        ("seed_race_need", "decisiveness", 2.1501, "align"),
+        ("seed_race_need", "optionality", 1.2740, "align"),
+        ("seed_urgency", "schedule_inertia", 0.4382, "oppose"),
+        ("seed_competition", "schedule_inertia", 0.1319, "oppose"),
+        ("seed_commercial_motivation", "commercial_drive", 0.1959, "align"),
+        ("seed_international_competition", "state_drive", 0.1476, "align"),
+        ("seed_readiness_gap", "state_drive", 0.2238, "oppose"),
+        ("seed_readiness_gap", "exploration", 0.4353, "oppose"),
     ],
     "coordination_axis": [
-        ("seed_coordination_need", "coordination", 0.5379, "align"),
+        ("seed_coordination_need", "coordination", 0.0100, "align"),
+        ("seed_coordination_need", "ethical_legibility", 0.0428, "align"),
     ],
     "institution_axis": [
-        ("seed_institution_need", "institutional_capacity", 0.4897, "align"),
-        ("best_feasibility", "institutional_capacity", 0.0232, "align"),
+        ("seed_institution_need", "institutional_capacity", 0.2210, "align"),
+        ("seed_institution_need", "evidence_maturity", 7.3499, "align"),
+        ("seed_institution_need", "ethical_legibility", 0.0415, "align"),
+        ("best_feasibility", "institutional_capacity", 0.0605, "align"),
     ],
     "risk_axis": [
-        ("seed_risk_tolerance", "risk_appetite", 0.0393, "align"),
-        ("vein_risk_mean", "risk_appetite", 0.1015, "oppose"),
+        ("seed_risk_tolerance", "risk_appetite", 0.0512, "align"),
+        ("seed_risk_tolerance", "exploration", 1.5478, "align"),
+        ("vein_risk_mean", "risk_appetite", 0.0360, "oppose"),
     ],
 }
 
@@ -333,11 +569,18 @@ def _compute_affinity(
 
 # 可训练的交叉权重
 CROSS_WEIGHTS = {
-    "crisis_moderate_bonus": 0.15,
-    "reckless_in_race_penalty": 0.20,
-    "joint_urgency_bonus": 0.12,
-    "no_race_conserv_bonus": 0.08,
-    "inaction_penalty": 0.30,
+    "crisis_moderate_bonus": 0.0277,
+    "reckless_in_race_penalty": 0.0100,
+    "joint_urgency_bonus": 0.1607,
+    "no_race_conserv_bonus": 0.2105,
+    "inaction_penalty": 0.1092,
+    "optionality_bonus": 1.3102,
+    "ethical_legibility_bonus": 0.0100,
+    "novelty_readiness_penalty": 0.0972,
+    "decisive_containment_bonus": 0.0800,
+    "platform_guardrail_bonus": 0.1200,
+    "visibility_legitimacy_bonus": 0.1000,
+    "deployability_bonus": 0.1000,
 }
 
 
@@ -364,30 +607,118 @@ def _compute_feature_crosses(
     survivability = cand_features.get("survivability", 0.5)
     execution_speed = cand_features.get("execution_speed", 0.5)
     coordination = cand_features.get("coordination", 0.0)
+    optionality = cand_features.get("optionality", 0.0)
+    evidence_maturity = cand_features.get("evidence_maturity", 0.0)
+    ethical_legibility = cand_features.get("ethical_legibility", 0.0)
+    exploration = cand_features.get("exploration", 0.0)
+    harm_cost = cand_features.get("harm_cost", 0.0)
+    deployability = cand_features.get("deployability_signal", 0.0)
+    visibility = cand_features.get("visibility_signal", 0.0)
+    broadcast = cand_features.get("broadcast_signal", 0.0)
+    legitimacy = cand_features.get("legitimacy_signal", 0.0)
+    containment = cand_features.get("containment_signal", 0.0)
+    mobility = cand_features.get("mobility_signal", 0.0)
+    guardrails = cand_features.get("guardrail_signal", 0.0)
+    platform = cand_features.get("platform_signal", 0.0)
+    stepwise = cand_features.get("stepwise_signal", 0.0)
 
     w = CROSS_WEIGHTS
+    institution_need = td_features.get("seed_institution_need", 0.0)
+    readiness = 1.0 - readiness_gap
+    schedule_inertia = cand_features.get("schedule_inertia", 0.0)
 
-    # X1: 高危机 + 中等策略 → 加分
+    # 独立计算每条交叉项，不原地修改 s
+    bonuses = [
+        _cross_crisis_moderate(survival_need, aggr, balance, w),
+        _cross_joint_urgency(race_need, coordination, w),
+        _cross_no_race_conserv(race_need, conserv, w),
+        _cross_optionality(survival_need, optionality, w),
+        _cross_ethical(institution_need, ethical_legibility, w),
+        _cross_decisive_containment(survival_need, containment, aggr, balance, w),
+        _cross_platform_guardrail(readiness_gap, race_need, platform, guardrails, w),
+        _cross_visibility(survival_need, td_features.get("seed_competition", 0.0), broadcast, legitimacy, visibility, w),
+        _cross_deployability(readiness, deployability, schedule_inertia, w),
+        _cross_mobility(survival_need, mobility, w),
+        _cross_stepwise(readiness, race_need, stepwise, w),
+    ]
+    penalties = [
+        _cross_reckless_race(race_need, readiness_gap, recklessness, w),
+        _cross_inaction(survival_need, conserv, aggr, w),
+        _cross_novelty_readiness(readiness_gap, exploration, evidence_maturity, w),
+    ]
+
+    return affinity_score + sum(bonuses) - sum(penalties)
+
+
+def _cross_crisis_moderate(survival_need, aggr, balance, w):
     if survival_need > 0.4 and 0.35 < aggr < 0.75 and balance > 0.6:
-        s += survival_need * balance * w["crisis_moderate_bonus"]
+        return survival_need * balance * w["crisis_moderate_bonus"]
+    return 0.0
 
-    # X2: 高竞争 + 低技术 + 高激进 → 惩罚
+def _cross_reckless_race(race_need, readiness_gap, recklessness, w):
     if race_need > 0.4 and readiness_gap > 0.3 and recklessness > 0.3:
-        s -= race_need * readiness_gap * recklessness * w["reckless_in_race_penalty"]
+        return race_need * readiness_gap * recklessness * w["reckless_in_race_penalty"]
+    return 0.0
 
-    # X3: 高紧迫 + 有协同能力 → 加分
+def _cross_joint_urgency(race_need, coordination, w):
     if race_need > 0.3 and coordination > 0.3:
-        s += race_need * coordination * w["joint_urgency_bonus"]
+        return race_need * coordination * w["joint_urgency_bonus"]
+    return 0.0
 
-    # X4: 低竞争 + 高保守 → 合理
+def _cross_no_race_conserv(race_need, conserv, w):
     if race_need < 0.3 and conserv > 0.6:
-        s += (1.0 - race_need) * conserv * w["no_race_conserv_bonus"]
+        return (1.0 - race_need) * conserv * w["no_race_conserv_bonus"]
+    return 0.0
 
-    # X5: 高危机 + 极端保守（inaction）→ 惩罚
+def _cross_inaction(survival_need, conserv, aggr, w):
     if survival_need > 0.5 and conserv > 0.8 and aggr < 0.4:
-        s -= survival_need * (conserv - 0.8) * w["inaction_penalty"]
+        return survival_need * (conserv - 0.8) * w["inaction_penalty"]
+    return 0.0
 
-    return s
+def _cross_optionality(survival_need, optionality, w):
+    if survival_need > 0.35 and optionality > 0.35:
+        return survival_need * optionality * w["optionality_bonus"]
+    return 0.0
+
+def _cross_ethical(institution_need, ethical_legibility, w):
+    if institution_need > 0.3 and ethical_legibility > 0.35:
+        return institution_need * ethical_legibility * w["ethical_legibility_bonus"]
+    return 0.0
+
+def _cross_novelty_readiness(readiness_gap, exploration, evidence_maturity, w):
+    if readiness_gap > 0.25 and exploration > evidence_maturity:
+        return readiness_gap * (exploration - evidence_maturity) * w["novelty_readiness_penalty"]
+    return 0.0
+
+def _cross_decisive_containment(survival_need, containment, aggr, balance, w):
+    if survival_need > 0.45 and containment > 0.35 and 0.35 < aggr < 0.75:
+        return survival_need * containment * balance * w["decisive_containment_bonus"]
+    return 0.0
+
+def _cross_platform_guardrail(readiness_gap, race_need, platform, guardrails, w):
+    if readiness_gap > 0.4 and race_need > 0.3 and (platform > 0.3 or guardrails > 0.3):
+        return readiness_gap * race_need * max(platform, guardrails) * w["platform_guardrail_bonus"]
+    return 0.0
+
+def _cross_visibility(survival_need, competition, broadcast, legitimacy, visibility, w):
+    if survival_need > 0.35 and competition < 0.2 and broadcast > 0.3:
+        return survival_need * max(broadcast, legitimacy, visibility) * w["visibility_legitimacy_bonus"]
+    return 0.0
+
+def _cross_deployability(readiness, deployability, schedule_inertia, w):
+    if 0.45 < readiness < 0.75 and deployability > 0.35:
+        return readiness * deployability * (1.0 - schedule_inertia) * w["deployability_bonus"]
+    return 0.0
+
+def _cross_mobility(survival_need, mobility, w):
+    if survival_need > 0.45 and mobility > 0.3:
+        return survival_need * mobility * w["decisive_containment_bonus"]
+    return 0.0
+
+def _cross_stepwise(readiness, race_need, stepwise, w):
+    if 0.35 < readiness < 0.85 and race_need > 0.25 and stepwise > 0.3:
+        return readiness * race_need * stepwise * w["deployability_bonus"]
+    return 0.0
 
 
 # ================================================================
@@ -513,16 +844,30 @@ def _score_candidate(td_features: Dict[str, float], candidate: Dict[str, Any]) -
     return _score_candidate_details(td_features, candidate)["constrained_score"]
 
 
+def _extract_and_score(td_features: Dict[str, float], candidate: Dict[str, Any]) -> Dict[str, float]:
+    """Step 1: 提取候选特征。"""
+    return extract_candidate_features(_get_candidate_payload(candidate))
+
+
+def _compute_breakdown(td_features: Dict[str, float], cand_features: Dict[str, float]) -> Dict[str, float]:
+    """Step 2: 计算各主轴亲和度 breakdown。"""
+    return _score_affinity_breakdown(td_features, cand_features)
+
+
+def _constrain_score(raw_score: float, td_features: Dict[str, float], cand_features: Dict[str, float]) -> float:
+    """Step 3: 施加硬约束。"""
+    return _apply_constraints(raw_score, td_features, cand_features)
+
+
 def _score_candidate_details(
     td_features: Dict[str, float],
     candidate: Dict[str, Any],
 ) -> Dict[str, Any]:
     """执行单个候选评分，并返回各主轴 breakdown。"""
-    payload = _get_candidate_payload(candidate)
-    cand_features = extract_candidate_features(payload)
-    affinity_breakdown = _score_affinity_breakdown(td_features, cand_features)
+    cand_features = _extract_and_score(td_features, candidate)
+    affinity_breakdown = _compute_breakdown(td_features, cand_features)
     raw_score = affinity_breakdown["total"]
-    constrained_score = _apply_constraints(raw_score, td_features, cand_features)
+    constrained_score = _constrain_score(raw_score, td_features, cand_features)
     return {
         "candidate_features": cand_features,
         "affinity_breakdown": affinity_breakdown,
