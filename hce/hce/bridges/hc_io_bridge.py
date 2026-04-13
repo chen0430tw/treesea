@@ -121,51 +121,55 @@ class HonkaiCoreIOBridge:
         c_mean = sum(c_ends) / len(c_ends) if c_ends else 0.5
         c_std = (sum((c - c_mean) ** 2 for c in c_ends) / max(len(c_ends), 1)) ** 0.5
 
-        # === 构建候选 ===
-        n_td = len(top_families)
-        n_vein = len(vein_nodes)
-        n_sea = len(sea_items)
-        n_candidates = max(n_sea, 1)
+        # === 注意力评分：每个候选获得差异化的 tree_score ===
+        from ..integration.candidate_attention import (
+            extract_td_features,
+            compute_attention_scores,
+            compute_auto_herrscher_risk,
+        )
 
+        td_features = extract_td_features(tree_output)
+
+        # 提取候选参数用于注意力计算
+        cand_payloads = []
+        for sea_entry in sea_items:
+            # QCU entry 的 metadata 里可能有原始参数
+            payload = sea_entry.get("metadata", {})
+            # 或者从 label 解析不了，直接用 QCU 运行参数
+            # 这些参数在 CollapseRequest 里传入，QCU entry 不一定保留
+            # fallback: 从 entry 的数值特征反推策略特性
+            if not any(k in payload for k in ("gamma_pcm", "gamma_boost")):
+                # 用 C_end 和 dtheta_end 反推策略特性
+                c_end = sea_entry.get("C_end", sea_entry.get("collapse_score", 0.5))
+                dtheta = abs(sea_entry.get("dtheta_end", 0.1))
+                elapsed = sea_entry.get("elapsed_sec", 1.0)
+                payload = {
+                    "gamma_pcm": min(0.3, c_end * 10),      # C_end 高 → 高同步耗散
+                    "gamma_boost": min(1.0, 1.0 - c_end),   # C_end 低 → 高增强
+                    "boost_duration": max(1.0, elapsed / 5), # 耗时长 → 长 duration
+                    "gamma_phi0": min(0.5, dtheta),          # dtheta 大 → 高相位噪声
+                }
+            cand_payloads.append(payload)
+
+        # 计算注意力分数 → tree_score
+        attention_scores = compute_attention_scores(
+            td_features, cand_payloads, temperature=0.5
+        )
+
+        # === 构建候选 ===
         candidates = []
         for i, sea_entry in enumerate(sea_items):
             cid = sea_entry.get("run_id", sea_entry.get("candidate_id", f"cand_{i}"))
             short_cid = cid.split("/")[-1] if "/" in cid else cid
             c_end = sea_entry.get("C_end", sea_entry.get("collapse_score", 0.5))
 
-            # tree_score: 从 TD 按顺序匹配，如果候选数不一致则插值
-            if i < n_td:
-                tf = top_families[i]
-                tree_score = tf.get("final_balanced_score", tf.get("balanced_score", 0.5))
-            elif n_td > 0:
-                # 用最后一个 TD 候选的分数衰减
-                last_score = top_families[-1].get("final_balanced_score", 0.5)
-                tree_score = last_score * (0.9 ** (i - n_td + 1))
-            else:
-                # 无 TD 数据，用 best_worldline
-                tree_score = best_wl.get("final_balanced_score", best_wl.get("balanced_score", 0.5))
-
-            # 归一化 tree_score 到 [0, 1]（TD 的 balanced_score 可能 >1）
-            tree_score = max(0.0, min(1.0, tree_score))
-
-            # stability: 从 vein_backbone 取，或用 1 - C_end
-            if i < n_vein:
-                stability = vein_nodes[i].get("stability", 1.0 - c_end)
-            else:
-                stability = 1.0 - c_end
-
-            # herrscher_risk: 从 vein_backbone 取 risk，结合 C_end 异常度
-            if i < n_vein:
-                base_risk = vein_nodes[i].get("risk", mean_risk)
-            else:
-                base_risk = mean_risk
-
-            # C_end 越偏离均值 → 越不稳定 → herrscher_risk 越高
-            c_deviation = abs(c_end - c_mean) / max(c_std, 1e-8) if c_std > 1e-8 else 0.0
-            herrscher_risk = min(1.0, base_risk + 0.1 * min(c_deviation, 3.0))
-
-            # noise
+            tree_score = attention_scores[i] if i < len(attention_scores) else 0.5
+            stability = 1.0 - c_end
             noise = abs(sea_entry.get("dtheta_end", 0.1))
+
+            herrscher_risk = compute_auto_herrscher_risk(
+                td_features, cand_payloads[i], c_end, c_mean, c_std
+            )
 
             candidates.append({
                 "candidate_id": short_cid,
