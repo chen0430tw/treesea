@@ -319,8 +319,75 @@ def _compute_affinity(
     td_features: Dict[str, float],
     cand_features: Dict[str, float],
 ) -> float:
-    """Stage 1: 计算单个候选的亲和度分数。"""
-    return _score_affinity_breakdown(td_features, cand_features)["total"]
+    """Stage 1 + 1.5: 线性亲和度 + 特征交叉。"""
+    linear = _score_affinity_breakdown(td_features, cand_features)["total"]
+    return _compute_feature_crosses(td_features, cand_features, linear)
+
+
+# ================================================================
+# Stage 1.5: FEATURE CROSS — 非线性交互项
+# ================================================================
+# 线性注意力的天花板在于无法表达条件组合。
+# 特征交叉捕获 "A AND B → bonus/penalty" 的交互。
+# 每条交叉规则: (condition_fn, bonus_fn, weight)
+
+# 可训练的交叉权重
+CROSS_WEIGHTS = {
+    "crisis_moderate_bonus": 0.15,
+    "reckless_in_race_penalty": 0.20,
+    "joint_urgency_bonus": 0.12,
+    "no_race_conserv_bonus": 0.08,
+    "inaction_penalty": 0.30,
+}
+
+
+def _compute_feature_crosses(
+    td_features: Dict[str, float],
+    cand_features: Dict[str, float],
+    affinity_score: float,
+) -> float:
+    """在线性亲和度分数上叠加非线性交互项。
+
+    每条交叉规则是一个条件判断 + 加成/惩罚。
+    和线性规则不同，这里的贡献是乘性的或阈值触发的。
+    """
+    s = affinity_score
+
+    survival_need = td_features.get("seed_survival_need", 0.0)
+    race_need = td_features.get("seed_race_need", 0.0)
+    readiness_gap = td_features.get("seed_readiness_gap", 0.0)
+
+    aggr = cand_features.get("aggressiveness", 0.5)
+    conserv = cand_features.get("conservatism", 0.5)
+    balance = cand_features.get("balance", 0.5)
+    recklessness = cand_features.get("recklessness", 0.0)
+    survivability = cand_features.get("survivability", 0.5)
+    execution_speed = cand_features.get("execution_speed", 0.5)
+    coordination = cand_features.get("coordination", 0.0)
+
+    w = CROSS_WEIGHTS
+
+    # X1: 高危机 + 中等策略 → 加分
+    if survival_need > 0.4 and 0.35 < aggr < 0.75 and balance > 0.6:
+        s += survival_need * balance * w["crisis_moderate_bonus"]
+
+    # X2: 高竞争 + 低技术 + 高激进 → 惩罚
+    if race_need > 0.4 and readiness_gap > 0.3 and recklessness > 0.3:
+        s -= race_need * readiness_gap * recklessness * w["reckless_in_race_penalty"]
+
+    # X3: 高紧迫 + 有协同能力 → 加分
+    if race_need > 0.3 and coordination > 0.3:
+        s += race_need * coordination * w["joint_urgency_bonus"]
+
+    # X4: 低竞争 + 高保守 → 合理
+    if race_need < 0.3 and conserv > 0.6:
+        s += (1.0 - race_need) * conserv * w["no_race_conserv_bonus"]
+
+    # X5: 高危机 + 极端保守（inaction）→ 惩罚
+    if survival_need > 0.5 and conserv > 0.8 and aggr < 0.4:
+        s -= survival_need * (conserv - 0.8) * w["inaction_penalty"]
+
+    return s
 
 
 # ================================================================

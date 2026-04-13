@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "honkai_core"))
 
 from hce.integration.candidate_attention import (
     AFFINITY_GROUPS,
+    CROSS_WEIGHTS,
     _collapse_td_semantics,
     extract_candidate_features,
     compute_attention_scores,
@@ -127,24 +128,20 @@ def evaluate_dataset(samples: List[dict], temperature: float = 1.0) -> dict:
 
 
 def get_trainable_params() -> List[float]:
-    """从当前 AFFINITY_GROUPS 和 _collapse_td_semantics 提取可训练参数。"""
+    """从 AFFINITY_GROUPS + CROSS_WEIGHTS 提取可训练参数。"""
     params = []
     # AFFINITY_GROUPS weights (15 params)
     for group_name in sorted(AFFINITY_GROUPS.keys()):
         for rule in AFFINITY_GROUPS[group_name]:
-            params.append(rule[2])  # weight
-    # collapse weights (9 params): survival(4) + race_dampen(1) + race(3) + coord(3) + inst(3)
-    # 用固定顺序编码
-    params.extend([0.35, 0.20, 0.20, 0.25])  # survival_need
-    params.extend([0.55])                      # race_dampen
-    params.extend([0.45, 0.30, 0.25])          # race_need
-    params.extend([0.65, 0.20, 0.15])          # coordination_need
-    params.extend([0.45, 0.25, 0.30])          # institution_need
+            params.append(rule[2])
+    # CROSS_WEIGHTS (5 params)
+    for key in sorted(CROSS_WEIGHTS.keys()):
+        params.append(CROSS_WEIGHTS[key])
     return params
 
 
 def apply_params(params: List[float]) -> None:
-    """将参数写回 AFFINITY_GROUPS（原地修改）。"""
+    """将参数写回 AFFINITY_GROUPS + CROSS_WEIGHTS。"""
     idx = 0
     for group_name in sorted(AFFINITY_GROUPS.keys()):
         new_rules = []
@@ -152,22 +149,18 @@ def apply_params(params: List[float]) -> None:
             new_rules.append((rule[0], rule[1], max(0.01, params[idx]), rule[3]))
             idx += 1
         AFFINITY_GROUPS[group_name] = new_rules
-    # collapse weights 不能原地改（写在函数里），先跳过
-    # 只训练 AFFINITY 权重
+    # CROSS_WEIGHTS
+    for key in sorted(CROSS_WEIGHTS.keys()):
+        CROSS_WEIGHTS[key] = max(0.01, params[idx])
+        idx += 1
 
 
-def perturb(params: List[float], sigma: float, n_affinity: int) -> List[float]:
+def perturb(params: List[float], sigma: float) -> List[float]:
     """对参数施加高斯扰动。"""
     new_params = []
-    for i, p in enumerate(params):
-        if i < n_affinity:
-            # AFFINITY weights: 扰动范围 ±sigma
-            new_p = p + random.gauss(0, sigma * max(abs(p), 0.1))
-            new_params.append(max(0.01, new_p))
-        else:
-            # collapse weights: 小扰动
-            new_p = p + random.gauss(0, sigma * 0.3)
-            new_params.append(max(0.01, min(1.0, new_p)))
+    for p in params:
+        new_p = p + random.gauss(0, sigma * max(abs(p), 0.1))
+        new_params.append(max(0.01, new_p))
     return new_params
 
 
@@ -183,9 +176,6 @@ def train(
 
     每轮生成 population_size 个扰动参数，评估，保留最优。
     """
-    # 计算 AFFINITY 规则数
-    n_affinity = sum(len(rules) for rules in AFFINITY_GROUPS.values())
-
     best_params = get_trainable_params()
     best_result = evaluate_dataset(samples, temperature)
     best_score = best_result["pairwise_accuracy"] + 2.0 * best_result["top1_accuracy"]
@@ -199,7 +189,7 @@ def train(
         improved = False
 
         for _ in range(population_size):
-            trial_params = perturb(best_params, sigma, n_affinity)
+            trial_params = perturb(best_params, sigma)
             apply_params(trial_params)
 
             result = evaluate_dataset(samples, temperature)
@@ -249,8 +239,15 @@ def export_weights(params: List[float], output_path: str | Path) -> None:
             idx += 1
         groups[group_name] = rules
 
+    # CROSS_WEIGHTS
+    cross = {}
+    for key in sorted(CROSS_WEIGHTS.keys()):
+        cross[key] = round(params[idx], 4)
+        idx += 1
+
     output = {
         "affinity_groups": groups,
+        "cross_weights": cross,
         "n_params": len(params),
     }
     Path(output_path).write_text(
