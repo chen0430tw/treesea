@@ -311,36 +311,52 @@ class IQPU:
         dt = cfg.dt
 
         torch_dtype = torch.complex64 if self._dtype == np.complex64 else torch.complex128
-        torch_dev = "cuda" if cfg.device == "cuda" else "cpu"
+        # fused 模式下 cfg.device 可能被 runner 改成 "cpu" 以避免 cupy 冲突
+        # 但 torch 仍应使用 GPU，通过 torch_device 参数或自动检测
+        torch_dev = "cuda" if torch.cuda.is_available() else "cpu"
+        cpu_dtype = np.complex64 if self._dtype == np.complex64 else np.complex128
+        cast = lambda a: a.astype(cpu_dtype) if a.dtype != cpu_dtype else a
 
-        # 初始密度矩阵
+        # 初始密度矩阵（统一 dtype）
         if init_rho is not None:
-            rho_np = init_rho
+            rho_np = cast(init_rho)
         else:
-            rho_np = build_initial_state(cfg, self.dimQ, self.dimM)
+            rho_np = cast(build_initial_state(cfg, self.dimQ, self.dimM))
 
-        # Hamiltonians (CPU numpy)
+        # Hamiltonians (CPU numpy, 统一用 target dtype 节省内存)
         ops_cpu = self._ops_cpu_ref
-        H_base_np = self._H_base_cpu_ref
-        H_pulse_np = H_base_np + 0.5 * float(omega_x) * ops_cpu.sxJ[0]
-        H_boost_np = build_H_boost_trim(
-            cfg, ops_cpu, H_base_np, eps_boost, boost_phase_trim
+
+        # 构建轻量 CPU ops 副本（避免 complex128 内存爆炸）
+        ops_cpu_light = OperatorBank(
+            DIM=ops_cpu.DIM,
+            szJ=[cast(o) for o in ops_cpu.szJ],
+            sxJ=[cast(o) for o in ops_cpu.sxJ],
+            smJ=[cast(o) for o in ops_cpu.smJ],
+            aJ= [cast(o) for o in ops_cpu.aJ],
+            adJ=[cast(o) for o in ops_cpu.adJ],
+            nJ= [cast(o) for o in ops_cpu.nJ],
         )
 
-        # Collapse caches (CPU numpy, 用 ops_cpu)
+        H_base_np = cast(self._H_base_cpu_ref)
+        H_pulse_np = H_base_np + 0.5 * float(omega_x) * ops_cpu_light.sxJ[0]
+        H_boost_np = cast(build_H_boost_trim(
+            cfg, ops_cpu, self._H_base_cpu_ref, eps_boost, boost_phase_trim
+        ))
+
+        # Collapse caches (CPU numpy, 用轻量 ops)
         c_pcm_cpu = build_collapse_cache(
             Nq=self.Nq, Nm=self.Nm, kappa=cfg.kappa, T1=cfg.T1, Tphi=cfg.Tphi,
-            smJ=ops_cpu.smJ, szJ=ops_cpu.szJ, aJ=ops_cpu.aJ,
+            smJ=ops_cpu_light.smJ, szJ=ops_cpu_light.szJ, aJ=ops_cpu_light.aJ,
             gamma_sync=gamma_pcm, gamma_reset_q0=0.0, gamma_phi0=0.0,
         )
         c_qim_cpu = build_collapse_cache(
             Nq=self.Nq, Nm=self.Nm, kappa=cfg.kappa, T1=cfg.T1, Tphi=cfg.Tphi,
-            smJ=ops_cpu.smJ, szJ=ops_cpu.szJ, aJ=ops_cpu.aJ,
+            smJ=ops_cpu_light.smJ, szJ=ops_cpu_light.szJ, aJ=ops_cpu_light.aJ,
             gamma_sync=gamma_qim, gamma_reset_q0=0.0, gamma_phi0=0.0,
         )
         c_boost_cpu = build_collapse_cache(
             Nq=self.Nq, Nm=self.Nm, kappa=cfg.kappa, T1=cfg.T1, Tphi=cfg.Tphi,
-            smJ=ops_cpu.smJ, szJ=ops_cpu.szJ, aJ=ops_cpu.aJ,
+            smJ=ops_cpu_light.smJ, szJ=ops_cpu_light.szJ, aJ=ops_cpu_light.aJ,
             gamma_sync=gamma_boost, gamma_reset_q0=gamma_reset, gamma_phi0=gamma_phi0,
         )
 

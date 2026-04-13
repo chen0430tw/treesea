@@ -31,20 +31,25 @@ class QCURunner:
     """
 
     def __init__(self, cfg: IQPUConfig, fused: bool = True) -> None:
-        self.iqpu = IQPU(cfg)
-        self._ingress = RequestIngress()
-        self._cluster_sched = ClusterScheduler()
-        self._term_policy = TerminationPolicy()
-
         # 自动检测 torch fused solver 可用性
         self._use_fused = False
+        self._fused_device = "cpu"
         if fused and cfg.device == "cuda":
             try:
                 import torch
                 if torch.cuda.is_available():
                     self._use_fused = True
+                    self._fused_device = "cuda"
+                    # fused 模式：IQPU 用 CPU 构建算符，torch 管 GPU
+                    # 避免 cupy 和 torch 的 CUDA context 冲突
+                    cfg.device = "cpu"
             except ImportError:
                 pass
+
+        self.iqpu = IQPU(cfg)
+        self._ingress = RequestIngress()
+        self._cluster_sched = ClusterScheduler()
+        self._term_policy = TerminationPolicy()
 
     def run(self, request: CollapseRequest) -> SeaOutputBundle:
         """执行 CollapseRequest 并返回 SeaOutputBundle。

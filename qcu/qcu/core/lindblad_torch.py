@@ -161,7 +161,8 @@ def _lindblad_rhs_fused(
     dρ/dt = -i[H, ρ] + Σ_k (c_k ρ c_k† - ½ c_k†c_k ρ - ½ ρ c_k†c_k)
     """
     # 相干项: -i[H, ρ]
-    out = -1j * (H @ rho - rho @ H)
+    commutator = H @ rho - rho @ H
+    out = torch.mul(commutator, -1j)
 
     K = c_batch.shape[0]
     if K > 0:
