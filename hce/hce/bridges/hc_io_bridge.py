@@ -80,6 +80,8 @@ class HonkaiCoreIOBridge:
         sea_output: dict,
         energy_params: Optional[Dict[str, float]] = None,
         threshold_params: Optional[Dict[str, float]] = None,
+        seed_environment: Optional[Dict[str, float]] = None,
+        seed_subject: Optional[Dict[str, float]] = None,
     ) -> dict:
         """全自动构建 HC 场景：从 TD+QCU 原始输出自动提取所有分数。
 
@@ -129,6 +131,14 @@ class HonkaiCoreIOBridge:
         )
 
         td_features = extract_td_features(tree_output)
+
+        # 注入 seed 的原始环境/主体参数，确保不同问题有不同的注意力分布
+        if seed_environment:
+            for k, v in seed_environment.items():
+                td_features[f"seed_{k}"] = float(v)
+        if seed_subject:
+            for k, v in seed_subject.items():
+                td_features[f"seed_{k}"] = float(v)
 
         # 提取候选参数用于注意力计算
         cand_payloads = []

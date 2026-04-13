@@ -72,6 +72,45 @@ def extract_td_features(tree_output: dict) -> Dict[str, float]:
     features["utm_flood"] = 1.0 if utm_state == "FLOOD" else 0.0
     features["utm_drought"] = 1.0 if utm_state == "DROUGHT" else 0.0
 
+    # === 从 seed 的 environment/subject 直接注入 ===
+    # TD 的 field_snapshot 来自内部模拟，不反映 seed 的问题特性
+    # 所以把 seed 的原始环境参数也作为特征，确保不同问题有不同的注意力分布
+    seed_ctx = oracle.get("seed_context", {})
+    # seed 信息可能在不同位置，尝试多种路径
+    if not seed_ctx:
+        # 从 llm_explanation 或直接从 seed 字段提取
+        llm = oracle.get("llm_explanation", {})
+        seed_ctx = llm.get("json_payload", {})
+
+    # 尝试从 tree_output 顶层获取 seed 信息
+    # TreeDiagramRunner 把 seed 传入，但 oracle_details 可能不保留原始 seed
+    # 需要从 dominant_pressures 推断
+    pressures = oracle.get("dominant_pressures", [])
+    n_pressures = len(pressures)
+    features["n_pressures"] = min(n_pressures / 10.0, 1.0)
+
+    # 从 core_contradiction 推断紧迫性
+    contradiction = oracle.get("core_contradiction", "")
+    # 包含 "resist" / "drag" / "noise" → 高阻力环境
+    features["env_resistance"] = 0.0
+    for word in ["resist", "drag", "noise", "fail", "crisis", "pressure", "conflict"]:
+        if word in contradiction.lower():
+            features["env_resistance"] += 0.15
+    features["env_resistance"] = min(features["env_resistance"], 1.0)
+
+    # 从 goal_axis 推断策略倾向
+    goal = oracle.get("inferred_goal_axis", "")
+    features["goal_precision"] = 1.0 if "precision" in goal.lower() else 0.0
+    features["goal_dominance"] = 1.0 if "dominance" in goal.lower() else 0.0
+    features["goal_stability"] = 1.0 if "stabil" in goal.lower() else 0.0
+    features["goal_speed"] = 1.0 if "speed" in goal.lower() or "fast" in goal.lower() else 0.0
+
+    # branch_histogram: 分支生态
+    branch_hist = oracle.get("branch_histogram", {})
+    total_branches = sum(branch_hist.values()) if branch_hist else 1
+    features["branch_active_ratio"] = branch_hist.get("active", 0) / max(total_branches, 1)
+    features["branch_withered_ratio"] = branch_hist.get("withered", 0) / max(total_branches, 1)
+
     return features
 
 
@@ -155,6 +194,34 @@ def compute_attention_scores(
         ("utm_flood", "aggressiveness", 0.4, "align"),           # 洪水态 → 可以激进
         ("utm_drought", "conservatism", 0.8, "align"),           # 旱灾态 → 必须保守
         ("ipl_gain_centroid", "intensity", 0.5, "align"),        # 增益中心高 → 高强度可行
+        # seed 环境特征
+        ("env_resistance", "conservatism", 1.0, "align"),         # 高阻力 → 保守存活
+        ("env_resistance", "aggressiveness", 0.8, "oppose"),      # 高阻力 → 激进死
+        ("env_resistance", "patience", 0.9, "align"),             # 高阻力 → 需要耐心
+        ("n_pressures", "intensity", 0.6, "align"),               # 压力多 → 需要强度
+        ("goal_speed", "aggressiveness", 0.8, "align"),           # 目标快 → 激进好
+        ("goal_speed", "patience", 0.5, "oppose"),                # 目标快 → 耐心差
+        ("goal_stability", "conservatism", 0.8, "align"),         # 目标稳 → 保守好
+        ("goal_dominance", "aggressiveness", 0.7, "align"),       # 目标主导 → 激进好
+        ("goal_precision", "balance", 0.6, "align"),              # 目标精确 → 平衡好
+        ("branch_active_ratio", "aggressiveness", 0.5, "align"),  # 活跃分支多 → 可以激进
+        ("branch_withered_ratio", "conservatism", 0.7, "align"),  # 枯萎多 → 保守存活
+        # seed 原始参数（以 seed_ 前缀注入）
+        # 权重 2.0-3.0：seed 特征是问题的本质，必须强于 TD 固有特征
+        ("seed_turbulence", "conservatism", 3.0, "align"),        # 高湍流 → 保守
+        ("seed_turbulence", "aggressiveness", 2.5, "oppose"),     # 高湍流 → 激进死
+        ("seed_stability", "aggressiveness", 2.5, "align"),       # 高稳定 → 可以激进
+        ("seed_stability", "conservatism", 2.0, "oppose"),        # 高稳定 → 不需要保守
+        ("seed_pressure", "intensity", 2.0, "align"),             # 高压力 → 需要强度
+        ("seed_pressure", "patience", 2.0, "oppose"),             # 高压力 → 没时间慢慢来
+        ("seed_noise", "conservatism", 2.5, "align"),             # 高噪声 → 保守安全
+        ("seed_noise", "risk_appetite", 2.0, "oppose"),           # 高噪声 → 别冒险
+        ("seed_urgency", "aggressiveness", 3.0, "align"),         # 紧急 → 激进
+        ("seed_urgency", "patience", 2.5, "oppose"),              # 紧急 → 没耐心
+        ("seed_complexity", "balance", 2.0, "align"),             # 复杂 → 需要平衡
+        ("seed_risk_tolerance", "risk_appetite", 2.5, "align"),   # 容忍风险 → 可以冒险
+        ("seed_risk_tolerance", "conservatism", 2.0, "oppose"),   # 容忍风险 → 不需要保守
+        ("seed_experience", "aggressiveness", 2.0, "align"),      # 经验丰富 → 可以激进
     }
 
     raw_scores = []
