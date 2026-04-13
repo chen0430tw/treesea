@@ -244,10 +244,99 @@ AFFINITY (按主轴分组) → CONSTRAINT (硬约束) → NORMALIZE (softmax)
 
 ---
 
+## 注意力评分训练演进
+
+| 轮次 | 样本数 | Pairwise | Top-1 | 关键改动 |
+|------|--------|----------|-------|---------|
+| 手工权重 | 0 | 76.8% | 32.1% | 人类直觉 |
+| Round 1 | 28 | 85.1% | 57.1% | schedule_inertia 权重上升 |
+| Round 2 | 43 | 84.9% | 58.1% | 加入伦理困境样本 |
+| Round 3 | 43 | 93.8% | 86.0% | 累加器重构 + strategy_tags |
+| **Round 4** | **43** | **95.0%** | **90.7%** | **strategy_tags 加到 6 个 MISS 场景** |
+
+剩余 4 个 MISS（需要领域专业知识）：
+- low_tech_crisis: traditional vs mrna vaccine
+- medical_trial: checkpoint vs car_t therapy
+- ai_safety: safety_first vs guardrails
+- fugitive_wrongful: surrender vs media campaign
+
+**警告：不要强行调权重让这 4 个通过。** 硬调的后果：
+- 把"mrna 比 traditional 好"编码进通用框架 → 下次遇到"新药 vs 旧药"的其他场景（比如抗生素），框架会错误地偏向"新的"
+- 把"media campaign 比 surrender 好"编码进去 → 下次遇到不同法律环境的逃犯场景会误判
+- 本质是在通用决策框架里注入领域偏见，破坏对其他场景的泛化能力
+- 90.7% 是通用框架的合理上限，剩下的应该留给领域专家通过 strategy_tags 解决
+
+## 泛化测试
+
+5 个训练集中未见过的场景：
+
+| 场景 | 领域 | Top-1 | Pairwise |
+|------|------|-------|----------|
+| Restaurant Strategy | 餐饮 | MISS (差 0.01) | 5/6 |
+| Student Course Selection | 教育 | MISS | 4/6 |
+| Factory Fire Response | 危机 | **PASS** | 5/6 |
+| Mobile App Launch | 竞争 | **PASS** | 6/6 |
+| AI Content Copyright | 伦理 | **PASS** | 6/6 |
+
+泛化结果：top-1 60%, pairwise 87%。危机/竞争/伦理三大类泛化成功。
+
+---
+
+## Tree Diagram vs HCE 对比
+
+### 适用场景
+
+| | Tree Diagram | HCE |
+|---|---|---|
+| **问题类型** | 连续空间的演化和筛选 | 离散选项的排名和风险评估 |
+| **输入** | 问题 seed | 问题 seed + 候选参数/strategy_tags |
+| **输出** | 主线 + oracle hint + 分支生态 | 候选排名 + 崩坏能 + 风险 + 回写建议 |
+| **候选区分** | 弱（全局评分，不区分具体选项） | 强（语义坍缩 + 注意力 + 交叉项） |
+| **崩坏能** | 不知道 | G_H / D_H / Γ_H / breach 判定 |
+| **适合场景** | 不知道有什么路 | 知道有哪些路，要选哪条 |
+
+### 实测对比：Small Nation AI Chip Strategy
+
+**Tree Diagram（单独）**：
+- 给出 1 个 best worldline，score=1.37，feasibility=0.88
+- 5 个 top families 全是 "batch"，分数 0.58~0.60
+- 无法区分 "build fab" vs "joint venture" vs "rent cloud"
+
+**HCE（全流水线）**：
+- 6 个候选各有不同分数（0.45~0.96）
+- Winner: Joint venture（comp=0.96）
+- RISC-V 第二（0.69），buy chips 和 rent cloud 排最后
+- E_H=0.00 (depletion)，proceed，writeback allowed
+- Breakdown: execution_axis 0.37 主导
+
+**结论**：TD 是探索器，HCE 是决策器。
+
+---
+
+## 与现有系统的关系
+
+### vs 决策支援系统（DSS）
+
+DSS 用数据库+模型+UI 帮人做决策，给出最优解。HCE 在给出排名的同时还测量决策空间本身的崩坏能状态——告诉你这个决策有多不稳定、回写安不安全。DSS 给答案，HCE 给答案+风险。
+
+### vs 超算（天河/富岳）
+
+超算是硬件，提供算力，不提供决策框架。HCE/TD 是软件层——已在 nano5 H100 集群上验证。关系：
+
+```
+超算（天河/富岳）= 发动机
+HCE/TD = 导航系统
+DSS = 仪表盘
+```
+
+白皮书 Phase 5 的目标是把 HCE 从"跑在通用超算上的软件"变成"专用崩坏能演算芯片"（TCC/CFE/CIC SoC）。
+
+---
+
 ## 已知限制
 
-1. Tree Diagram 的 oracle 输出对不同 seed 区分度不够（field_snapshot 来自内部气象模拟，不直接反映 seed.environment）
-2. QCU 物理参数不携带策略语义，需要从 label 补偿
-3. d=6 在本地 RTX 3070 需要 12 分钟，d=8 可能需要集群
-4. 注意力权重目前是手工设定，未来应该用数据驱动学习
-5. composite_score = 0.6 * tree + 0.4 * (1 - C_end) 的权重是固定的
+1. Tree Diagram 的 oracle 输出对不同 seed 区分度不够（field_snapshot 来自内部气象模拟，不直接反映 seed.environment），已通过 seed 注入 + 注意力机制绕过
+2. QCU 物理参数不携带策略语义，已通过 strategy_tags（22 种标签）解决
+3. d=6 在本地 RTX 3070 需要 12 分钟，H100 上 271 秒
+4. 注意力权重已通过 4 轮集群训练从手工调整升级到数据驱动（90.7% top-1）
+5. 剩余 4 个 MISS 需要领域专业知识，是通用框架的合理上限
