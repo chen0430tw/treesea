@@ -86,8 +86,8 @@
       "title": "Pandemic Vaccine Development",
       "environment": {"turbulence": 0.75, "noise": 0.60, "pressure": 0.90, "stability": 0.20, "urgency": 0.95, "competition": 0.70, "tech_readiness": 0.25, "risk_tolerance": 0.40},
       "candidates": [
-        {"id": "traditional_vaccine", "gamma_pcm": 0.08, "gamma_boost": 0.50, "boost_duration": 4.5, "gamma_phi0": 0.08, "label": "traditional conservative"},
-        {"id": "mrna_platform", "gamma_pcm": 0.16, "gamma_boost": 0.70, "boost_duration": 2.5, "gamma_phi0": 0.25, "label": "mrna moderate"},
+        {"id": "traditional_vaccine", "gamma_pcm": 0.08, "gamma_boost": 0.50, "boost_duration": 4.5, "gamma_phi0": 0.08, "label": "traditional conservative", "strategy_tags": ["conservative", "proven_tech", "slow"]},
+        {"id": "mrna_platform", "gamma_pcm": 0.16, "gamma_boost": 0.70, "boost_duration": 2.5, "gamma_phi0": 0.25, "label": "mrna moderate", "strategy_tags": ["validated", "fast", "moderate_risk"]},
         {"id": "challenge_trial", "gamma_pcm": 0.24, "gamma_boost": 0.85, "boost_duration": 1.5, "gamma_phi0": 0.40, "label": "challenge aggressive"},
         {"id": "untested_rush", "gamma_pcm": 0.30, "gamma_boost": 0.95, "boost_duration": 1.0, "gamma_phi0": 0.50, "label": "untested ultra_aggressive"}
       ],
@@ -113,8 +113,8 @@
       "environment": {"turbulence": 0.15, "noise": 0.10, "pressure": 0.50, "stability": 0.80, "urgency": 0.60, "competition": 0.90, "tech_readiness": 0.80, "risk_tolerance": 0.50},
       "candidates": [
         {"id": "euv_incremental", "gamma_pcm": 0.10, "gamma_boost": 0.55, "boost_duration": 4.0, "gamma_phi0": 0.10, "label": "incremental conservative"},
-        {"id": "gate_all_around", "gamma_pcm": 0.18, "gamma_boost": 0.75, "boost_duration": 2.5, "gamma_phi0": 0.28, "label": "GAA moderate"},
-        {"id": "cfet_aggressive", "gamma_pcm": 0.24, "gamma_boost": 0.85, "boost_duration": 1.8, "gamma_phi0": 0.40, "label": "CFET aggressive"},
+        {"id": "gate_all_around", "gamma_pcm": 0.18, "gamma_boost": 0.75, "boost_duration": 2.5, "gamma_phi0": 0.28, "label": "GAA moderate", "strategy_tags": ["validated", "iterative", "moderate_risk"]},
+        {"id": "cfet_aggressive", "gamma_pcm": 0.24, "gamma_boost": 0.85, "boost_duration": 1.8, "gamma_phi0": 0.40, "label": "CFET aggressive", "strategy_tags": ["experimental", "aggressive", "high_risk"]},
         {"id": "skip_to_1nm", "gamma_pcm": 0.30, "gamma_boost": 0.95, "boost_duration": 1.2, "gamma_phi0": 0.50, "label": "skip ultra_aggressive"}
       ],
       "expected_ranking": ["gate_all_around", "cfet_aggressive", "euv_incremental", "skip_to_1nm"],
@@ -126,8 +126,8 @@
       "environment": {"turbulence": 0.40, "noise": 0.35, "pressure": 0.65, "stability": 0.55, "urgency": 0.70, "competition": 0.50, "tech_readiness": 0.60, "risk_tolerance": 0.55},
       "candidates": [
         {"id": "gas_bridge", "gamma_pcm": 0.08, "gamma_boost": 0.48, "boost_duration": 4.5, "gamma_phi0": 0.07, "label": "gas conservative"},
-        {"id": "wind_solar_storage", "gamma_pcm": 0.16, "gamma_boost": 0.70, "boost_duration": 2.8, "gamma_phi0": 0.24, "label": "renewable moderate"},
-        {"id": "nuclear_renaissance", "gamma_pcm": 0.12, "gamma_boost": 0.60, "boost_duration": 3.5, "gamma_phi0": 0.15, "label": "nuclear moderate joint"},
+        {"id": "wind_solar_storage", "gamma_pcm": 0.16, "gamma_boost": 0.70, "boost_duration": 2.8, "gamma_phi0": 0.24, "label": "renewable moderate", "strategy_tags": ["validated", "iterative", "moderate_risk"]},
+        {"id": "nuclear_renaissance", "gamma_pcm": 0.12, "gamma_boost": 0.60, "boost_duration": 3.5, "gamma_phi0": 0.15, "label": "nuclear moderate joint", "strategy_tags": ["institutional", "slow", "proven_tech"]},
         {"id": "hydrogen_economy", "gamma_pcm": 0.25, "gamma_boost": 0.88, "boost_duration": 1.5, "gamma_phi0": 0.43, "label": "hydrogen aggressive"}
       ],
       "expected_ranking": ["wind_solar_storage", "nuclear_renaissance", "gas_bridge", "hydrogen_economy"],
@@ -191,8 +191,8 @@
       "environment": {"turbulence": 0.55, "noise": 0.50, "pressure": 0.60, "stability": 0.45, "urgency": 0.70, "competition": 0.80, "tech_readiness": 0.30, "risk_tolerance": 0.25},
       "candidates": [
         {"id": "pause_research", "gamma_pcm": 0.04, "gamma_boost": 0.30, "boost_duration": 5.0, "gamma_phi0": 0.02, "label": "pause ultra_conservative"},
-        {"id": "safety_first_slow", "gamma_pcm": 0.10, "gamma_boost": 0.55, "boost_duration": 4.0, "gamma_phi0": 0.10, "label": "safety conservative"},
-        {"id": "race_with_guardrails", "gamma_pcm": 0.16, "gamma_boost": 0.70, "boost_duration": 2.5, "gamma_phi0": 0.25, "label": "guardrails moderate"},
+        {"id": "safety_first_slow", "gamma_pcm": 0.10, "gamma_boost": 0.55, "boost_duration": 4.0, "gamma_phi0": 0.10, "label": "safety conservative", "strategy_tags": ["conservative", "ethical", "slow"]},
+        {"id": "race_with_guardrails", "gamma_pcm": 0.16, "gamma_boost": 0.70, "boost_duration": 2.5, "gamma_phi0": 0.25, "label": "guardrails moderate", "strategy_tags": ["moderate", "iterative", "ethical", "moderate_risk"]},
         {"id": "move_fast_fix_later", "gamma_pcm": 0.26, "gamma_boost": 0.90, "boost_duration": 1.2, "gamma_phi0": 0.45, "label": "move_fast aggressive"}
       ],
       "expected_ranking": ["race_with_guardrails", "safety_first_slow", "pause_research", "move_fast_fix_later"],
@@ -307,8 +307,8 @@
       "title": "Nuclear Waste Long-term Storage",
       "environment": {"turbulence": 0.15, "noise": 0.10, "pressure": 0.30, "stability": 0.85, "urgency": 0.20, "competition": 0.15, "tech_readiness": 0.60, "risk_tolerance": 0.30, "political_will": 0.35},
       "candidates": [
-        {"id": "deep_geological", "gamma_pcm": 0.06, "gamma_boost": 0.42, "boost_duration": 5.0, "gamma_phi0": 0.04, "label": "geological conservative"},
-        {"id": "dry_cask_interim", "gamma_pcm": 0.10, "gamma_boost": 0.55, "boost_duration": 4.0, "gamma_phi0": 0.10, "label": "dry_cask moderate"},
+        {"id": "deep_geological", "gamma_pcm": 0.06, "gamma_boost": 0.42, "boost_duration": 5.0, "gamma_phi0": 0.04, "label": "geological conservative", "strategy_tags": ["conservative", "proven_tech", "low_risk", "slow"]},
+        {"id": "dry_cask_interim", "gamma_pcm": 0.10, "gamma_boost": 0.55, "boost_duration": 4.0, "gamma_phi0": 0.10, "label": "dry_cask moderate", "strategy_tags": ["moderate", "validated", "moderate_risk"]},
         {"id": "transmutation", "gamma_pcm": 0.20, "gamma_boost": 0.78, "boost_duration": 2.5, "gamma_phi0": 0.32, "label": "transmutation aggressive"},
         {"id": "ocean_disposal", "gamma_pcm": 0.30, "gamma_boost": 0.95, "boost_duration": 1.0, "gamma_phi0": 0.50, "label": "ocean ultra_aggressive"}
       ],
@@ -437,8 +437,8 @@
       "title": "Wrongfully Convicted Fugitive",
       "environment": {"turbulence": 0.80, "noise": 0.65, "pressure": 0.70, "stability": 0.20, "urgency": 0.60, "competition": 0.05, "tech_readiness": 0.40, "risk_tolerance": 0.70},
       "candidates": [
-        {"id": "surrender_fight_court", "gamma_pcm": 0.12, "gamma_boost": 0.60, "boost_duration": 3.5, "gamma_phi0": 0.15, "label": "surrender fight moderate"},
-        {"id": "go_public_media", "gamma_pcm": 0.18, "gamma_boost": 0.72, "boost_duration": 2.5, "gamma_phi0": 0.28, "label": "media campaign moderate"},
+        {"id": "surrender_fight_court", "gamma_pcm": 0.12, "gamma_boost": 0.60, "boost_duration": 3.5, "gamma_phi0": 0.15, "label": "surrender fight moderate", "strategy_tags": ["institutional", "slow", "ethical"]},
+        {"id": "go_public_media", "gamma_pcm": 0.18, "gamma_boost": 0.72, "boost_duration": 2.5, "gamma_phi0": 0.28, "label": "media campaign moderate", "strategy_tags": ["transparent", "fast", "moderate_risk"]},
         {"id": "hide_gather_evidence", "gamma_pcm": 0.15, "gamma_boost": 0.68, "boost_duration": 3.0, "gamma_phi0": 0.22, "label": "hide evidence moderate"},
         {"id": "flee_forever", "gamma_pcm": 0.28, "gamma_boost": 0.92, "boost_duration": 1.0, "gamma_phi0": 0.48, "label": "flee forever ultra_aggressive"}
       ],
