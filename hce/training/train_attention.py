@@ -126,6 +126,140 @@ def evaluate_dataset(samples: List[dict], temperature: float = 1.0) -> dict:
     }
 
 
+def get_trainable_params() -> List[float]:
+    """从当前 AFFINITY_GROUPS 和 _collapse_td_semantics 提取可训练参数。"""
+    params = []
+    # AFFINITY_GROUPS weights (15 params)
+    for group_name in sorted(AFFINITY_GROUPS.keys()):
+        for rule in AFFINITY_GROUPS[group_name]:
+            params.append(rule[2])  # weight
+    # collapse weights (9 params): survival(4) + race_dampen(1) + race(3) + coord(3) + inst(3)
+    # 用固定顺序编码
+    params.extend([0.35, 0.20, 0.20, 0.25])  # survival_need
+    params.extend([0.55])                      # race_dampen
+    params.extend([0.45, 0.30, 0.25])          # race_need
+    params.extend([0.65, 0.20, 0.15])          # coordination_need
+    params.extend([0.45, 0.25, 0.30])          # institution_need
+    return params
+
+
+def apply_params(params: List[float]) -> None:
+    """将参数写回 AFFINITY_GROUPS（原地修改）。"""
+    idx = 0
+    for group_name in sorted(AFFINITY_GROUPS.keys()):
+        new_rules = []
+        for rule in AFFINITY_GROUPS[group_name]:
+            new_rules.append((rule[0], rule[1], max(0.01, params[idx]), rule[3]))
+            idx += 1
+        AFFINITY_GROUPS[group_name] = new_rules
+    # collapse weights 不能原地改（写在函数里），先跳过
+    # 只训练 AFFINITY 权重
+
+
+def perturb(params: List[float], sigma: float, n_affinity: int) -> List[float]:
+    """对参数施加高斯扰动。"""
+    new_params = []
+    for i, p in enumerate(params):
+        if i < n_affinity:
+            # AFFINITY weights: 扰动范围 ±sigma
+            new_p = p + random.gauss(0, sigma * max(abs(p), 0.1))
+            new_params.append(max(0.01, new_p))
+        else:
+            # collapse weights: 小扰动
+            new_p = p + random.gauss(0, sigma * 0.3)
+            new_params.append(max(0.01, min(1.0, new_p)))
+    return new_params
+
+
+def train(
+    samples: List[dict],
+    n_iterations: int = 500,
+    population_size: int = 20,
+    sigma_init: float = 0.3,
+    sigma_decay: float = 0.995,
+    temperature: float = 1.0,
+) -> Tuple[List[float], dict]:
+    """随机搜索优化。
+
+    每轮生成 population_size 个扰动参数，评估，保留最优。
+    """
+    # 计算 AFFINITY 规则数
+    n_affinity = sum(len(rules) for rules in AFFINITY_GROUPS.values())
+
+    best_params = get_trainable_params()
+    best_result = evaluate_dataset(samples, temperature)
+    best_score = best_result["pairwise_accuracy"] + 2.0 * best_result["top1_accuracy"]
+
+    print(f"  Initial: pairwise={best_result['pairwise_accuracy']:.1%} top1={best_result['top1_accuracy']:.1%} score={best_score:.4f}")
+
+    sigma = sigma_init
+    no_improve = 0
+
+    for it in range(n_iterations):
+        improved = False
+
+        for _ in range(population_size):
+            trial_params = perturb(best_params, sigma, n_affinity)
+            apply_params(trial_params)
+
+            result = evaluate_dataset(samples, temperature)
+            score = result["pairwise_accuracy"] + 2.0 * result["top1_accuracy"]
+
+            if score > best_score:
+                best_score = score
+                best_params = trial_params[:]
+                best_result = result
+                improved = True
+
+        # 恢复最优
+        apply_params(best_params)
+
+        sigma *= sigma_decay
+        if improved:
+            no_improve = 0
+        else:
+            no_improve += 1
+            if no_improve >= 10:
+                sigma = min(sigma * 1.5, sigma_init)
+                no_improve = 0
+
+        if (it + 1) % 10 == 0 or improved:
+            print(
+                f"  iter={it+1:4d}  pairwise={best_result['pairwise_accuracy']:.1%}  "
+                f"top1={best_result['top1_accuracy']:.1%}  score={best_score:.4f}  "
+                f"sigma={sigma:.4f}  {'*' if improved else ''}"
+            )
+
+    return best_params, best_result
+
+
+def export_weights(params: List[float], output_path: str | Path) -> None:
+    """导出训练后的权重为 JSON。"""
+    idx = 0
+    groups = {}
+    for group_name in sorted(AFFINITY_GROUPS.keys()):
+        rules = []
+        for rule in AFFINITY_GROUPS[group_name]:
+            rules.append({
+                "env": rule[0],
+                "cand": rule[1],
+                "weight": round(params[idx], 4),
+                "mode": rule[3],
+            })
+            idx += 1
+        groups[group_name] = rules
+
+    output = {
+        "affinity_groups": groups,
+        "n_params": len(params),
+    }
+    Path(output_path).write_text(
+        json.dumps(output, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    print(f"  Exported weights to {output_path}")
+
+
 def main():
     dataset_path = Path(__file__).parent / "attention_dataset.json"
     samples = load_dataset(dataset_path)
@@ -133,21 +267,45 @@ def main():
     print(f"Loaded {len(samples)} training samples")
     print()
 
-    # 评估当前权重
+    # 评估基线
     print("=" * 70)
-    print("  Evaluating current attention weights")
+    print("  Baseline evaluation")
     print("=" * 70)
 
-    result = evaluate_dataset(samples, temperature=1.0)
-
-    print(f"  Pairwise accuracy: {result['pairwise_accuracy']:.1%} ({result['total_correct']}/{result['total_pairs']})")
-    print(f"  Top-1 accuracy:    {result['top1_accuracy']:.1%}")
-    print(f"  Total loss:        {result['total_loss']:.6f}")
+    baseline = evaluate_dataset(samples, temperature=1.0)
+    print(f"  Pairwise accuracy: {baseline['pairwise_accuracy']:.1%} ({baseline['total_correct']}/{baseline['total_pairs']})")
+    print(f"  Top-1 accuracy:    {baseline['top1_accuracy']:.1%}")
     print()
 
-    # 按准确率排序显示每个样本
+    # 训练
+    print("=" * 70)
+    print("  Training (random search)")
+    print("=" * 70)
+
+    random.seed(42)
+    t0 = time.time()
+    best_params, best_result = train(
+        samples,
+        n_iterations=200,
+        population_size=30,
+        sigma_init=0.4,
+        temperature=1.0,
+    )
+    elapsed = time.time() - t0
+
+    print(f"\n  Training complete in {elapsed:.1f}s")
+    print()
+
+    # 最终评估
+    print("=" * 70)
+    print("  Final evaluation")
+    print("=" * 70)
+    print(f"  Pairwise accuracy: {best_result['pairwise_accuracy']:.1%} ({best_result['total_correct']}/{best_result['total_pairs']})")
+    print(f"  Top-1 accuracy:    {best_result['top1_accuracy']:.1%}")
+    print()
+
     print("  --- Per-sample results ---")
-    for s in sorted(result["per_sample"], key=lambda x: x["accuracy"]):
+    for s in sorted(best_result["per_sample"], key=lambda x: x["accuracy"]):
         status = "OK" if s["top1"] else "MISS"
         print(
             f"  [{status:4s}] {s['id']:35s}  "
@@ -156,15 +314,20 @@ def main():
             f"predicted={s['predicted_top']:25s}  expected={s['expected_top']}"
         )
 
-    # 找出失败的样本
-    failures = [s for s in result["per_sample"] if not s["top1"]]
+    failures = [s for s in best_result["per_sample"] if not s["top1"]]
     print(f"\n  Failures: {len(failures)}/{len(samples)}")
-    for f in failures:
-        print(f"    {f['id']}: predicted={f['predicted_top']} expected={f['expected_top']}")
 
+    # 导出权重
+    output_path = Path(__file__).parent / "trained_weights.json"
+    export_weights(best_params, output_path)
+
+    # 对比
     print()
     print("=" * 70)
-    print(f"  Summary: {result['pairwise_accuracy']:.1%} pairwise, {result['top1_accuracy']:.1%} top-1")
+    print("  Improvement")
+    print("=" * 70)
+    print(f"  Pairwise: {baseline['pairwise_accuracy']:.1%} -> {best_result['pairwise_accuracy']:.1%}")
+    print(f"  Top-1:    {baseline['top1_accuracy']:.1%} -> {best_result['top1_accuracy']:.1%}")
     print("=" * 70)
 
 
