@@ -64,19 +64,22 @@ def build_operator_bank(cfg: IQPUConfig) -> OperatorBank:
     dimM = d ** Nm
     DIM = dimQ * dimM
 
-    I2 = np.eye(2, dtype=np.complex128)
-    Id = np.eye(d, dtype=np.complex128)
+    # 按 profile 选 dtype：fast_search 用 complex64 省内存
+    dt = np.complex64 if cfg.dtype == "complex64" else np.complex128
 
-    sz1 = np.array([[1, 0], [0, -1]], dtype=np.complex128)
-    sx1 = np.array([[0, 1], [1, 0]], dtype=np.complex128)
-    sm1 = np.array([[0, 1], [0, 0]], dtype=np.complex128)  # |g⟩⟨e|
+    I2 = np.eye(2, dtype=dt)
+    Id = np.eye(d, dtype=dt)
 
-    a1 = destroy(d)
+    sz1 = np.array([[1, 0], [0, -1]], dtype=dt)
+    sx1 = np.array([[0, 1], [1, 0]], dtype=dt)
+    sm1 = np.array([[0, 1], [0, 0]], dtype=dt)  # |g⟩⟨e|
+
+    a1 = destroy(d).astype(dt)
     adag1 = dagger(a1)
     n1 = adag1 @ a1
 
-    IQ = np.eye(dimQ, dtype=np.complex128)
-    IM = np.eye(dimM, dtype=np.complex128)
+    IQ = np.eye(dimQ, dtype=dt)
+    IM = np.eye(dimM, dtype=dt)
 
     def embed_qubit(op2, j):
         Q = None
