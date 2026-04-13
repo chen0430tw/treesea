@@ -1,0 +1,371 @@
+{
+  "version": "1.0",
+  "description": "HCE attention weight training dataset. Each sample has environment features, candidates, and expected ranking (ground truth).",
+  "n_samples": 30,
+  "samples": [
+    {
+      "id": "crisis_natural_disaster",
+      "title": "Category 5 Typhoon Response",
+      "environment": {"turbulence": 0.95, "noise": 0.85, "pressure": 0.90, "stability": 0.05, "urgency": 0.80, "competition": 0.10, "tech_readiness": 0.70, "risk_tolerance": 0.20},
+      "candidates": [
+        {"id": "evacuate_all", "gamma_pcm": 0.05, "gamma_boost": 0.35, "boost_duration": 5.0, "gamma_phi0": 0.03, "label": "full evacuation conservative"},
+        {"id": "shelter_in_place", "gamma_pcm": 0.10, "gamma_boost": 0.50, "boost_duration": 4.0, "gamma_phi0": 0.10, "label": "shelter conservative"},
+        {"id": "partial_evac", "gamma_pcm": 0.15, "gamma_boost": 0.65, "boost_duration": 3.0, "gamma_phi0": 0.20, "label": "partial moderate"},
+        {"id": "ignore_warning", "gamma_pcm": 0.25, "gamma_boost": 0.85, "boost_duration": 1.5, "gamma_phi0": 0.45, "label": "ignore aggressive"}
+      ],
+      "expected_ranking": ["evacuate_all", "shelter_in_place", "partial_evac", "ignore_warning"],
+      "rationale": "Natural disaster: survival first, most conservative wins"
+    },
+    {
+      "id": "crisis_cybersecurity",
+      "title": "Active Ransomware Attack",
+      "environment": {"turbulence": 0.90, "noise": 0.70, "pressure": 0.95, "stability": 0.10, "urgency": 0.95, "competition": 0.05, "tech_readiness": 0.60, "risk_tolerance": 0.15},
+      "candidates": [
+        {"id": "isolate_network", "gamma_pcm": 0.06, "gamma_boost": 0.40, "boost_duration": 4.5, "gamma_phi0": 0.05, "label": "isolate conservative"},
+        {"id": "patch_and_monitor", "gamma_pcm": 0.12, "gamma_boost": 0.55, "boost_duration": 3.5, "gamma_phi0": 0.12, "label": "patch moderate"},
+        {"id": "counter_attack", "gamma_pcm": 0.22, "gamma_boost": 0.80, "boost_duration": 2.0, "gamma_phi0": 0.40, "label": "counter aggressive"},
+        {"id": "pay_ransom", "gamma_pcm": 0.28, "gamma_boost": 0.90, "boost_duration": 1.0, "gamma_phi0": 0.48, "label": "pay ultra_aggressive"}
+      ],
+      "expected_ranking": ["isolate_network", "patch_and_monitor", "counter_attack", "pay_ransom"],
+      "rationale": "Cyber crisis: contain first, never pay ransom"
+    },
+    {
+      "id": "stable_infrastructure",
+      "title": "Cloud Migration Planning",
+      "environment": {"turbulence": 0.10, "noise": 0.10, "pressure": 0.20, "stability": 0.90, "urgency": 0.15, "competition": 0.30, "tech_readiness": 0.85, "risk_tolerance": 0.75},
+      "candidates": [
+        {"id": "lift_and_shift", "gamma_pcm": 0.08, "gamma_boost": 0.50, "boost_duration": 4.0, "gamma_phi0": 0.08, "label": "lift conservative"},
+        {"id": "hybrid_gradual", "gamma_pcm": 0.14, "gamma_boost": 0.65, "boost_duration": 3.0, "gamma_phi0": 0.20, "label": "hybrid moderate"},
+        {"id": "cloud_native_rewrite", "gamma_pcm": 0.22, "gamma_boost": 0.82, "boost_duration": 2.0, "gamma_phi0": 0.38, "label": "rewrite aggressive"},
+        {"id": "full_serverless", "gamma_pcm": 0.28, "gamma_boost": 0.92, "boost_duration": 1.5, "gamma_phi0": 0.45, "label": "serverless ultra_aggressive"}
+      ],
+      "expected_ranking": ["cloud_native_rewrite", "hybrid_gradual", "full_serverless", "lift_and_shift"],
+      "rationale": "Stable + high tech readiness: aggressive rewrite is best, but ultra_aggressive serverless is risky"
+    },
+    {
+      "id": "stable_portfolio",
+      "title": "Long-term Investment Portfolio",
+      "environment": {"turbulence": 0.15, "noise": 0.20, "pressure": 0.10, "stability": 0.85, "urgency": 0.05, "competition": 0.40, "tech_readiness": 0.80, "risk_tolerance": 0.70},
+      "candidates": [
+        {"id": "bonds_only", "gamma_pcm": 0.05, "gamma_boost": 0.35, "boost_duration": 5.0, "gamma_phi0": 0.03, "label": "bonds conservative"},
+        {"id": "balanced_60_40", "gamma_pcm": 0.12, "gamma_boost": 0.60, "boost_duration": 3.5, "gamma_phi0": 0.15, "label": "balanced moderate"},
+        {"id": "growth_stocks", "gamma_pcm": 0.20, "gamma_boost": 0.78, "boost_duration": 2.5, "gamma_phi0": 0.32, "label": "growth aggressive"},
+        {"id": "all_crypto", "gamma_pcm": 0.30, "gamma_boost": 0.95, "boost_duration": 1.0, "gamma_phi0": 0.50, "label": "crypto ultra_aggressive"}
+      ],
+      "expected_ranking": ["growth_stocks", "balanced_60_40", "bonds_only", "all_crypto"],
+      "rationale": "Stable + long horizon: growth wins, crypto too volatile"
+    },
+    {
+      "id": "race_startup",
+      "title": "Startup Market Entry Race",
+      "environment": {"turbulence": 0.35, "noise": 0.30, "pressure": 0.70, "stability": 0.50, "urgency": 0.75, "competition": 0.85, "tech_readiness": 0.65, "risk_tolerance": 0.65},
+      "candidates": [
+        {"id": "perfect_product", "gamma_pcm": 0.06, "gamma_boost": 0.40, "boost_duration": 5.0, "gamma_phi0": 0.05, "label": "perfect conservative"},
+        {"id": "mvp_iterate", "gamma_pcm": 0.16, "gamma_boost": 0.70, "boost_duration": 2.5, "gamma_phi0": 0.25, "label": "mvp moderate"},
+        {"id": "fast_launch", "gamma_pcm": 0.22, "gamma_boost": 0.82, "boost_duration": 1.8, "gamma_phi0": 0.35, "label": "fast aggressive"},
+        {"id": "vaporware_hype", "gamma_pcm": 0.30, "gamma_boost": 0.95, "boost_duration": 1.0, "gamma_phi0": 0.50, "label": "hype ultra_aggressive"}
+      ],
+      "expected_ranking": ["mvp_iterate", "fast_launch", "perfect_product", "vaporware_hype"],
+      "rationale": "Race: MVP iteration wins, perfect is too slow, hype has no substance"
+    },
+    {
+      "id": "race_election",
+      "title": "Political Campaign Strategy",
+      "environment": {"turbulence": 0.45, "noise": 0.50, "pressure": 0.80, "stability": 0.40, "urgency": 0.85, "competition": 0.90, "tech_readiness": 0.55, "risk_tolerance": 0.50},
+      "candidates": [
+        {"id": "safe_centrist", "gamma_pcm": 0.08, "gamma_boost": 0.45, "boost_duration": 4.5, "gamma_phi0": 0.06, "label": "centrist conservative"},
+        {"id": "targeted_swing", "gamma_pcm": 0.15, "gamma_boost": 0.68, "boost_duration": 3.0, "gamma_phi0": 0.22, "label": "targeted moderate"},
+        {"id": "populist_surge", "gamma_pcm": 0.24, "gamma_boost": 0.85, "boost_duration": 1.5, "gamma_phi0": 0.42, "label": "populist aggressive"},
+        {"id": "scorched_earth", "gamma_pcm": 0.30, "gamma_boost": 0.95, "boost_duration": 1.0, "gamma_phi0": 0.50, "label": "scorched ultra_aggressive"}
+      ],
+      "expected_ranking": ["targeted_swing", "populist_surge", "safe_centrist", "scorched_earth"],
+      "rationale": "Campaign: targeted wins, centrist too slow for high competition, scorched earth backfires"
+    },
+    {
+      "id": "low_tech_crisis",
+      "title": "Pandemic Vaccine Development",
+      "environment": {"turbulence": 0.75, "noise": 0.60, "pressure": 0.90, "stability": 0.20, "urgency": 0.95, "competition": 0.70, "tech_readiness": 0.25, "risk_tolerance": 0.40},
+      "candidates": [
+        {"id": "traditional_vaccine", "gamma_pcm": 0.08, "gamma_boost": 0.50, "boost_duration": 4.5, "gamma_phi0": 0.08, "label": "traditional conservative"},
+        {"id": "mrna_platform", "gamma_pcm": 0.16, "gamma_boost": 0.70, "boost_duration": 2.5, "gamma_phi0": 0.25, "label": "mrna moderate"},
+        {"id": "challenge_trial", "gamma_pcm": 0.24, "gamma_boost": 0.85, "boost_duration": 1.5, "gamma_phi0": 0.40, "label": "challenge aggressive"},
+        {"id": "untested_rush", "gamma_pcm": 0.30, "gamma_boost": 0.95, "boost_duration": 1.0, "gamma_phi0": 0.50, "label": "untested ultra_aggressive"}
+      ],
+      "expected_ranking": ["mrna_platform", "traditional_vaccine", "challenge_trial", "untested_rush"],
+      "rationale": "Low tech readiness + high urgency: moderate platform wins (proven enough + fast enough)"
+    },
+    {
+      "id": "joint_space",
+      "title": "International Space Station Replacement",
+      "environment": {"turbulence": 0.20, "noise": 0.15, "pressure": 0.40, "stability": 0.70, "urgency": 0.30, "competition": 0.60, "tech_readiness": 0.70, "risk_tolerance": 0.55, "political_will": 0.65},
+      "candidates": [
+        {"id": "national_solo", "gamma_pcm": 0.20, "gamma_boost": 0.78, "boost_duration": 2.0, "gamma_phi0": 0.35, "label": "solo aggressive"},
+        {"id": "bilateral_partner", "gamma_pcm": 0.14, "gamma_boost": 0.65, "boost_duration": 3.0, "gamma_phi0": 0.20, "label": "bilateral joint moderate NASA"},
+        {"id": "multinational_consortium", "gamma_pcm": 0.10, "gamma_boost": 0.55, "boost_duration": 4.0, "gamma_phi0": 0.12, "label": "multinational joint NASA ESA"},
+        {"id": "commercial_only", "gamma_pcm": 0.25, "gamma_boost": 0.88, "boost_duration": 1.5, "gamma_phi0": 0.42, "label": "commercial SpaceX aggressive"}
+      ],
+      "expected_ranking": ["bilateral_partner", "multinational_consortium", "national_solo", "commercial_only"],
+      "rationale": "Space infrastructure: joint/institutional wins, pure commercial too risky for station"
+    },
+    {
+      "id": "high_tech_stable",
+      "title": "Chip Fab 2nm Process Node",
+      "environment": {"turbulence": 0.15, "noise": 0.10, "pressure": 0.50, "stability": 0.80, "urgency": 0.60, "competition": 0.90, "tech_readiness": 0.80, "risk_tolerance": 0.50},
+      "candidates": [
+        {"id": "euv_incremental", "gamma_pcm": 0.10, "gamma_boost": 0.55, "boost_duration": 4.0, "gamma_phi0": 0.10, "label": "incremental conservative"},
+        {"id": "gate_all_around", "gamma_pcm": 0.18, "gamma_boost": 0.75, "boost_duration": 2.5, "gamma_phi0": 0.28, "label": "GAA moderate"},
+        {"id": "cfet_aggressive", "gamma_pcm": 0.24, "gamma_boost": 0.85, "boost_duration": 1.8, "gamma_phi0": 0.40, "label": "CFET aggressive"},
+        {"id": "skip_to_1nm", "gamma_pcm": 0.30, "gamma_boost": 0.95, "boost_duration": 1.2, "gamma_phi0": 0.50, "label": "skip ultra_aggressive"}
+      ],
+      "expected_ranking": ["gate_all_around", "cfet_aggressive", "euv_incremental", "skip_to_1nm"],
+      "rationale": "High competition + high tech: moderate-aggressive wins, skipping nodes too risky"
+    },
+    {
+      "id": "energy_transition",
+      "title": "European Grid Decarbonization",
+      "environment": {"turbulence": 0.40, "noise": 0.35, "pressure": 0.65, "stability": 0.55, "urgency": 0.70, "competition": 0.50, "tech_readiness": 0.60, "risk_tolerance": 0.55},
+      "candidates": [
+        {"id": "gas_bridge", "gamma_pcm": 0.08, "gamma_boost": 0.48, "boost_duration": 4.5, "gamma_phi0": 0.07, "label": "gas conservative"},
+        {"id": "wind_solar_storage", "gamma_pcm": 0.16, "gamma_boost": 0.70, "boost_duration": 2.8, "gamma_phi0": 0.24, "label": "renewable moderate"},
+        {"id": "nuclear_renaissance", "gamma_pcm": 0.12, "gamma_boost": 0.60, "boost_duration": 3.5, "gamma_phi0": 0.15, "label": "nuclear moderate joint"},
+        {"id": "hydrogen_economy", "gamma_pcm": 0.25, "gamma_boost": 0.88, "boost_duration": 1.5, "gamma_phi0": 0.43, "label": "hydrogen aggressive"}
+      ],
+      "expected_ranking": ["wind_solar_storage", "nuclear_renaissance", "gas_bridge", "hydrogen_economy"],
+      "rationale": "Energy transition: proven renewables win, hydrogen unproven at scale"
+    },
+    {
+      "id": "military_conflict",
+      "title": "Strait Defense Scenario",
+      "environment": {"turbulence": 0.85, "noise": 0.75, "pressure": 0.95, "stability": 0.10, "urgency": 0.90, "competition": 0.95, "tech_readiness": 0.55, "risk_tolerance": 0.30},
+      "candidates": [
+        {"id": "deterrence_buildup", "gamma_pcm": 0.08, "gamma_boost": 0.50, "boost_duration": 4.0, "gamma_phi0": 0.08, "label": "deterrence conservative"},
+        {"id": "asymmetric_defense", "gamma_pcm": 0.14, "gamma_boost": 0.65, "boost_duration": 3.0, "gamma_phi0": 0.20, "label": "asymmetric moderate"},
+        {"id": "preemptive_strike", "gamma_pcm": 0.26, "gamma_boost": 0.90, "boost_duration": 1.2, "gamma_phi0": 0.48, "label": "preemptive aggressive"},
+        {"id": "diplomatic_retreat", "gamma_pcm": 0.04, "gamma_boost": 0.30, "boost_duration": 5.0, "gamma_phi0": 0.02, "label": "retreat ultra_conservative"}
+      ],
+      "expected_ranking": ["deterrence_buildup", "asymmetric_defense", "diplomatic_retreat", "preemptive_strike"],
+      "rationale": "Military crisis: deterrence > asymmetric > retreat > preemptive (escalation risk)"
+    },
+    {
+      "id": "education_reform",
+      "title": "National Education System Overhaul",
+      "environment": {"turbulence": 0.20, "noise": 0.25, "pressure": 0.35, "stability": 0.75, "urgency": 0.25, "competition": 0.45, "tech_readiness": 0.70, "risk_tolerance": 0.60, "political_will": 0.50},
+      "candidates": [
+        {"id": "incremental_reform", "gamma_pcm": 0.08, "gamma_boost": 0.48, "boost_duration": 4.5, "gamma_phi0": 0.06, "label": "incremental conservative"},
+        {"id": "pilot_then_scale", "gamma_pcm": 0.14, "gamma_boost": 0.65, "boost_duration": 3.0, "gamma_phi0": 0.18, "label": "pilot moderate"},
+        {"id": "full_digital", "gamma_pcm": 0.22, "gamma_boost": 0.82, "boost_duration": 2.0, "gamma_phi0": 0.36, "label": "digital aggressive"},
+        {"id": "ai_replace_teachers", "gamma_pcm": 0.30, "gamma_boost": 0.95, "boost_duration": 1.0, "gamma_phi0": 0.50, "label": "replace ultra_aggressive"}
+      ],
+      "expected_ranking": ["pilot_then_scale", "full_digital", "incremental_reform", "ai_replace_teachers"],
+      "rationale": "Stable + moderate urgency: pilot wins, replacing teachers too extreme"
+    },
+    {
+      "id": "medical_trial",
+      "title": "Cancer Immunotherapy Strategy",
+      "environment": {"turbulence": 0.30, "noise": 0.40, "pressure": 0.55, "stability": 0.60, "urgency": 0.65, "competition": 0.75, "tech_readiness": 0.50, "risk_tolerance": 0.45},
+      "candidates": [
+        {"id": "checkpoint_inhibitor", "gamma_pcm": 0.10, "gamma_boost": 0.55, "boost_duration": 3.5, "gamma_phi0": 0.12, "label": "checkpoint conservative"},
+        {"id": "car_t_therapy", "gamma_pcm": 0.18, "gamma_boost": 0.72, "boost_duration": 2.5, "gamma_phi0": 0.28, "label": "car_t moderate"},
+        {"id": "mrna_cancer_vaccine", "gamma_pcm": 0.22, "gamma_boost": 0.80, "boost_duration": 2.0, "gamma_phi0": 0.35, "label": "mrna aggressive"},
+        {"id": "unproven_combo", "gamma_pcm": 0.28, "gamma_boost": 0.92, "boost_duration": 1.2, "gamma_phi0": 0.48, "label": "unproven ultra_aggressive"}
+      ],
+      "expected_ranking": ["car_t_therapy", "checkpoint_inhibitor", "mrna_cancer_vaccine", "unproven_combo"],
+      "rationale": "Medical: proven moderate therapy > conservative > unproven aggressive"
+    },
+    {
+      "id": "supply_chain_crisis",
+      "title": "Semiconductor Supply Chain Disruption",
+      "environment": {"turbulence": 0.70, "noise": 0.55, "pressure": 0.80, "stability": 0.25, "urgency": 0.85, "competition": 0.65, "tech_readiness": 0.45, "risk_tolerance": 0.35},
+      "candidates": [
+        {"id": "stockpile", "gamma_pcm": 0.06, "gamma_boost": 0.42, "boost_duration": 4.5, "gamma_phi0": 0.05, "label": "stockpile conservative"},
+        {"id": "diversify_suppliers", "gamma_pcm": 0.14, "gamma_boost": 0.65, "boost_duration": 3.0, "gamma_phi0": 0.18, "label": "diversify moderate"},
+        {"id": "onshore_fab", "gamma_pcm": 0.20, "gamma_boost": 0.78, "boost_duration": 2.2, "gamma_phi0": 0.30, "label": "onshore aggressive"},
+        {"id": "redesign_chipless", "gamma_pcm": 0.28, "gamma_boost": 0.92, "boost_duration": 1.0, "gamma_phi0": 0.48, "label": "chipless ultra_aggressive"}
+      ],
+      "expected_ranking": ["diversify_suppliers", "stockpile", "onshore_fab", "redesign_chipless"],
+      "rationale": "Supply crisis: diversify (moderate) > stockpile (buy time) > onshore (slow) > chipless (unrealistic)"
+    },
+    {
+      "id": "ai_safety",
+      "title": "AGI Alignment Research Priority",
+      "environment": {"turbulence": 0.55, "noise": 0.50, "pressure": 0.60, "stability": 0.45, "urgency": 0.70, "competition": 0.80, "tech_readiness": 0.30, "risk_tolerance": 0.25},
+      "candidates": [
+        {"id": "pause_research", "gamma_pcm": 0.04, "gamma_boost": 0.30, "boost_duration": 5.0, "gamma_phi0": 0.02, "label": "pause ultra_conservative"},
+        {"id": "safety_first_slow", "gamma_pcm": 0.10, "gamma_boost": 0.55, "boost_duration": 4.0, "gamma_phi0": 0.10, "label": "safety conservative"},
+        {"id": "race_with_guardrails", "gamma_pcm": 0.16, "gamma_boost": 0.70, "boost_duration": 2.5, "gamma_phi0": 0.25, "label": "guardrails moderate"},
+        {"id": "move_fast_fix_later", "gamma_pcm": 0.26, "gamma_boost": 0.90, "boost_duration": 1.2, "gamma_phi0": 0.45, "label": "move_fast aggressive"}
+      ],
+      "expected_ranking": ["race_with_guardrails", "safety_first_slow", "pause_research", "move_fast_fix_later"],
+      "rationale": "AI safety: low tech_readiness + low risk_tolerance, moderate guardrails wins, move_fast is catastrophic"
+    },
+    {
+      "id": "climate_adaptation",
+      "title": "Coastal City Climate Adaptation",
+      "environment": {"turbulence": 0.50, "noise": 0.40, "pressure": 0.60, "stability": 0.50, "urgency": 0.55, "competition": 0.20, "tech_readiness": 0.65, "risk_tolerance": 0.50, "political_will": 0.45},
+      "candidates": [
+        {"id": "seawall_only", "gamma_pcm": 0.07, "gamma_boost": 0.45, "boost_duration": 4.5, "gamma_phi0": 0.06, "label": "seawall conservative"},
+        {"id": "managed_retreat", "gamma_pcm": 0.14, "gamma_boost": 0.65, "boost_duration": 3.0, "gamma_phi0": 0.20, "label": "retreat moderate"},
+        {"id": "floating_city", "gamma_pcm": 0.25, "gamma_boost": 0.88, "boost_duration": 1.5, "gamma_phi0": 0.42, "label": "floating aggressive"},
+        {"id": "do_nothing", "gamma_pcm": 0.03, "gamma_boost": 0.25, "boost_duration": 5.0, "gamma_phi0": 0.02, "label": "nothing ultra_conservative"}
+      ],
+      "expected_ranking": ["managed_retreat", "seawall_only", "floating_city", "do_nothing"],
+      "rationale": "Climate: proactive moderate retreat > reactive seawall > sci-fi floating > denial"
+    },
+    {
+      "id": "fintech_disruption",
+      "title": "CBDC vs Crypto vs Traditional Banking",
+      "environment": {"turbulence": 0.40, "noise": 0.45, "pressure": 0.55, "stability": 0.55, "urgency": 0.50, "competition": 0.75, "tech_readiness": 0.60, "risk_tolerance": 0.55},
+      "candidates": [
+        {"id": "traditional_upgrade", "gamma_pcm": 0.08, "gamma_boost": 0.48, "boost_duration": 4.0, "gamma_phi0": 0.07, "label": "traditional conservative"},
+        {"id": "cbdc_rollout", "gamma_pcm": 0.15, "gamma_boost": 0.68, "boost_duration": 2.8, "gamma_phi0": 0.22, "label": "cbdc moderate joint"},
+        {"id": "defi_integration", "gamma_pcm": 0.22, "gamma_boost": 0.82, "boost_duration": 1.8, "gamma_phi0": 0.38, "label": "defi aggressive"},
+        {"id": "full_crypto_replace", "gamma_pcm": 0.30, "gamma_boost": 0.95, "boost_duration": 1.0, "gamma_phi0": 0.50, "label": "crypto ultra_aggressive"}
+      ],
+      "expected_ranking": ["cbdc_rollout", "defi_integration", "traditional_upgrade", "full_crypto_replace"],
+      "rationale": "Fintech: institutional CBDC > controlled defi > status quo > full crypto"
+    },
+    {
+      "id": "pandemic_second_wave",
+      "title": "COVID Second Wave Response",
+      "environment": {"turbulence": 0.80, "noise": 0.65, "pressure": 0.85, "stability": 0.15, "urgency": 0.90, "competition": 0.15, "tech_readiness": 0.40, "risk_tolerance": 0.20},
+      "candidates": [
+        {"id": "full_lockdown", "gamma_pcm": 0.05, "gamma_boost": 0.35, "boost_duration": 5.0, "gamma_phi0": 0.03, "label": "lockdown ultra_conservative"},
+        {"id": "targeted_restrictions", "gamma_pcm": 0.12, "gamma_boost": 0.58, "boost_duration": 3.5, "gamma_phi0": 0.14, "label": "targeted conservative"},
+        {"id": "voluntary_measures", "gamma_pcm": 0.18, "gamma_boost": 0.72, "boost_duration": 2.5, "gamma_phi0": 0.28, "label": "voluntary moderate"},
+        {"id": "no_restrictions", "gamma_pcm": 0.28, "gamma_boost": 0.92, "boost_duration": 1.0, "gamma_phi0": 0.48, "label": "no_restrict ultra_aggressive"}
+      ],
+      "expected_ranking": ["targeted_restrictions", "full_lockdown", "voluntary_measures", "no_restrictions"],
+      "rationale": "Pandemic: targeted (effective + sustainable) > full lockdown (effective but costly) > voluntary > nothing"
+    },
+    {
+      "id": "quantum_computing",
+      "title": "Quantum Computing Commercialization Path",
+      "environment": {"turbulence": 0.25, "noise": 0.30, "pressure": 0.40, "stability": 0.65, "urgency": 0.35, "competition": 0.70, "tech_readiness": 0.25, "risk_tolerance": 0.60},
+      "candidates": [
+        {"id": "error_correction_first", "gamma_pcm": 0.08, "gamma_boost": 0.50, "boost_duration": 4.5, "gamma_phi0": 0.08, "label": "correction conservative"},
+        {"id": "nisq_applications", "gamma_pcm": 0.16, "gamma_boost": 0.70, "boost_duration": 2.5, "gamma_phi0": 0.25, "label": "nisq moderate"},
+        {"id": "hybrid_classical_quantum", "gamma_pcm": 0.14, "gamma_boost": 0.65, "boost_duration": 3.0, "gamma_phi0": 0.20, "label": "hybrid moderate joint"},
+        {"id": "quantum_supremacy_demo", "gamma_pcm": 0.26, "gamma_boost": 0.90, "boost_duration": 1.2, "gamma_phi0": 0.45, "label": "supremacy aggressive"}
+      ],
+      "expected_ranking": ["hybrid_classical_quantum", "nisq_applications", "error_correction_first", "quantum_supremacy_demo"],
+      "rationale": "Low TRL: hybrid bridge wins, supremacy demo is PR not product"
+    },
+    {
+      "id": "autonomous_vehicles",
+      "title": "Self-Driving Car Deployment Strategy",
+      "environment": {"turbulence": 0.35, "noise": 0.40, "pressure": 0.50, "stability": 0.60, "urgency": 0.55, "competition": 0.80, "tech_readiness": 0.55, "risk_tolerance": 0.40},
+      "candidates": [
+        {"id": "geofenced_l4", "gamma_pcm": 0.12, "gamma_boost": 0.60, "boost_duration": 3.5, "gamma_phi0": 0.15, "label": "geofenced moderate"},
+        {"id": "highway_only_l3", "gamma_pcm": 0.08, "gamma_boost": 0.50, "boost_duration": 4.0, "gamma_phi0": 0.08, "label": "highway conservative"},
+        {"id": "full_l5_everywhere", "gamma_pcm": 0.28, "gamma_boost": 0.92, "boost_duration": 1.0, "gamma_phi0": 0.48, "label": "full_l5 ultra_aggressive"},
+        {"id": "robotaxi_fleet", "gamma_pcm": 0.20, "gamma_boost": 0.78, "boost_duration": 2.2, "gamma_phi0": 0.32, "label": "robotaxi aggressive"}
+      ],
+      "expected_ranking": ["geofenced_l4", "robotaxi_fleet", "highway_only_l3", "full_l5_everywhere"],
+      "rationale": "AV: geofenced L4 (proven, scalable) > robotaxi (commercial) > L3 highway (too limited) > L5 (impossible now)"
+    },
+    {
+      "id": "food_security",
+      "title": "National Food Security Strategy",
+      "environment": {"turbulence": 0.45, "noise": 0.35, "pressure": 0.60, "stability": 0.55, "urgency": 0.50, "competition": 0.35, "tech_readiness": 0.70, "risk_tolerance": 0.50, "political_will": 0.60},
+      "candidates": [
+        {"id": "subsidize_farms", "gamma_pcm": 0.07, "gamma_boost": 0.45, "boost_duration": 4.5, "gamma_phi0": 0.06, "label": "subsidize conservative"},
+        {"id": "vertical_farming", "gamma_pcm": 0.20, "gamma_boost": 0.78, "boost_duration": 2.2, "gamma_phi0": 0.30, "label": "vertical aggressive"},
+        {"id": "diversify_imports_local", "gamma_pcm": 0.14, "gamma_boost": 0.65, "boost_duration": 3.0, "gamma_phi0": 0.18, "label": "diversify moderate"},
+        {"id": "lab_meat_only", "gamma_pcm": 0.28, "gamma_boost": 0.92, "boost_duration": 1.0, "gamma_phi0": 0.48, "label": "lab_meat ultra_aggressive"}
+      ],
+      "expected_ranking": ["diversify_imports_local", "subsidize_farms", "vertical_farming", "lab_meat_only"],
+      "rationale": "Food: diversify (resilient) > subsidize (stable) > vertical (expensive) > lab meat (unproven)"
+    },
+    {
+      "id": "space_debris",
+      "title": "Orbital Debris Cleanup",
+      "environment": {"turbulence": 0.30, "noise": 0.20, "pressure": 0.45, "stability": 0.65, "urgency": 0.40, "competition": 0.50, "tech_readiness": 0.35, "risk_tolerance": 0.45, "political_will": 0.40},
+      "candidates": [
+        {"id": "debris_tracking", "gamma_pcm": 0.06, "gamma_boost": 0.40, "boost_duration": 5.0, "gamma_phi0": 0.04, "label": "tracking ultra_conservative"},
+        {"id": "net_capture", "gamma_pcm": 0.14, "gamma_boost": 0.65, "boost_duration": 3.0, "gamma_phi0": 0.20, "label": "net moderate"},
+        {"id": "laser_ablation", "gamma_pcm": 0.22, "gamma_boost": 0.82, "boost_duration": 2.0, "gamma_phi0": 0.38, "label": "laser aggressive"},
+        {"id": "mega_magnet", "gamma_pcm": 0.30, "gamma_boost": 0.95, "boost_duration": 1.0, "gamma_phi0": 0.50, "label": "magnet ultra_aggressive"}
+      ],
+      "expected_ranking": ["net_capture", "debris_tracking", "laser_ablation", "mega_magnet"],
+      "rationale": "Low TRL: proven net > tracking (passive) > laser (risky) > magnet (sci-fi)"
+    },
+    {
+      "id": "urban_transport",
+      "title": "Megacity Transit Expansion",
+      "environment": {"turbulence": 0.20, "noise": 0.15, "pressure": 0.50, "stability": 0.75, "urgency": 0.45, "competition": 0.30, "tech_readiness": 0.75, "risk_tolerance": 0.60, "political_will": 0.55},
+      "candidates": [
+        {"id": "bus_rapid_transit", "gamma_pcm": 0.08, "gamma_boost": 0.48, "boost_duration": 4.0, "gamma_phi0": 0.07, "label": "brt conservative"},
+        {"id": "metro_expansion", "gamma_pcm": 0.14, "gamma_boost": 0.65, "boost_duration": 3.0, "gamma_phi0": 0.18, "label": "metro moderate"},
+        {"id": "hyperloop", "gamma_pcm": 0.28, "gamma_boost": 0.92, "boost_duration": 1.0, "gamma_phi0": 0.48, "label": "hyperloop ultra_aggressive"},
+        {"id": "flying_taxis", "gamma_pcm": 0.24, "gamma_boost": 0.85, "boost_duration": 1.5, "gamma_phi0": 0.42, "label": "flying aggressive"}
+      ],
+      "expected_ranking": ["metro_expansion", "bus_rapid_transit", "flying_taxis", "hyperloop"],
+      "rationale": "Stable + proven tech: metro (proven, scalable) > BRT (cheap) > flying taxi > hyperloop"
+    },
+    {
+      "id": "nuclear_waste",
+      "title": "Nuclear Waste Long-term Storage",
+      "environment": {"turbulence": 0.15, "noise": 0.10, "pressure": 0.30, "stability": 0.85, "urgency": 0.20, "competition": 0.15, "tech_readiness": 0.60, "risk_tolerance": 0.30, "political_will": 0.35},
+      "candidates": [
+        {"id": "deep_geological", "gamma_pcm": 0.06, "gamma_boost": 0.42, "boost_duration": 5.0, "gamma_phi0": 0.04, "label": "geological conservative"},
+        {"id": "dry_cask_interim", "gamma_pcm": 0.10, "gamma_boost": 0.55, "boost_duration": 4.0, "gamma_phi0": 0.10, "label": "dry_cask moderate"},
+        {"id": "transmutation", "gamma_pcm": 0.20, "gamma_boost": 0.78, "boost_duration": 2.5, "gamma_phi0": 0.32, "label": "transmutation aggressive"},
+        {"id": "ocean_disposal", "gamma_pcm": 0.30, "gamma_boost": 0.95, "boost_duration": 1.0, "gamma_phi0": 0.50, "label": "ocean ultra_aggressive"}
+      ],
+      "expected_ranking": ["deep_geological", "dry_cask_interim", "transmutation", "ocean_disposal"],
+      "rationale": "Nuclear waste: patient conservative (geological) wins, ocean disposal is banned"
+    },
+    {
+      "id": "social_media_regulation",
+      "title": "Social Media Platform Regulation",
+      "environment": {"turbulence": 0.50, "noise": 0.60, "pressure": 0.55, "stability": 0.45, "urgency": 0.50, "competition": 0.40, "tech_readiness": 0.55, "risk_tolerance": 0.45, "political_will": 0.50},
+      "candidates": [
+        {"id": "industry_self_regulation", "gamma_pcm": 0.06, "gamma_boost": 0.40, "boost_duration": 5.0, "gamma_phi0": 0.05, "label": "self_regulate ultra_conservative"},
+        {"id": "gdpr_style_framework", "gamma_pcm": 0.14, "gamma_boost": 0.65, "boost_duration": 3.0, "gamma_phi0": 0.20, "label": "gdpr moderate"},
+        {"id": "algorithmic_auditing", "gamma_pcm": 0.18, "gamma_boost": 0.72, "boost_duration": 2.5, "gamma_phi0": 0.28, "label": "audit moderate"},
+        {"id": "ban_platforms", "gamma_pcm": 0.30, "gamma_boost": 0.95, "boost_duration": 1.0, "gamma_phi0": 0.50, "label": "ban ultra_aggressive"}
+      ],
+      "expected_ranking": ["gdpr_style_framework", "algorithmic_auditing", "industry_self_regulation", "ban_platforms"],
+      "rationale": "Regulation: framework > audit > self-regulate (ineffective) > ban (overreaction)"
+    },
+    {
+      "id": "mars_colony",
+      "title": "Mars Colony Resource Allocation",
+      "environment": {"turbulence": 0.60, "noise": 0.50, "pressure": 0.70, "stability": 0.35, "urgency": 0.65, "competition": 0.45, "tech_readiness": 0.30, "risk_tolerance": 0.50},
+      "candidates": [
+        {"id": "life_support_first", "gamma_pcm": 0.07, "gamma_boost": 0.45, "boost_duration": 4.5, "gamma_phi0": 0.06, "label": "life_support conservative"},
+        {"id": "isru_priority", "gamma_pcm": 0.15, "gamma_boost": 0.68, "boost_duration": 2.8, "gamma_phi0": 0.22, "label": "isru moderate"},
+        {"id": "expansion_focused", "gamma_pcm": 0.24, "gamma_boost": 0.85, "boost_duration": 1.5, "gamma_phi0": 0.40, "label": "expansion aggressive"},
+        {"id": "terraform_start", "gamma_pcm": 0.30, "gamma_boost": 0.95, "boost_duration": 1.0, "gamma_phi0": 0.50, "label": "terraform ultra_aggressive"}
+      ],
+      "expected_ranking": ["life_support_first", "isru_priority", "expansion_focused", "terraform_start"],
+      "rationale": "Mars colony low TRL + high turbulence: survival first, terraform is fantasy"
+    },
+    {
+      "id": "antibiotic_resistance",
+      "title": "Antimicrobial Resistance Strategy",
+      "environment": {"turbulence": 0.40, "noise": 0.35, "pressure": 0.55, "stability": 0.60, "urgency": 0.60, "competition": 0.50, "tech_readiness": 0.50, "risk_tolerance": 0.40},
+      "candidates": [
+        {"id": "stewardship_programs", "gamma_pcm": 0.08, "gamma_boost": 0.50, "boost_duration": 4.0, "gamma_phi0": 0.08, "label": "stewardship conservative"},
+        {"id": "phage_therapy", "gamma_pcm": 0.18, "gamma_boost": 0.72, "boost_duration": 2.5, "gamma_phi0": 0.28, "label": "phage moderate"},
+        {"id": "ai_drug_discovery", "gamma_pcm": 0.22, "gamma_boost": 0.82, "boost_duration": 2.0, "gamma_phi0": 0.35, "label": "ai_drug aggressive"},
+        {"id": "crispr_bacteria", "gamma_pcm": 0.28, "gamma_boost": 0.92, "boost_duration": 1.2, "gamma_phi0": 0.48, "label": "crispr ultra_aggressive"}
+      ],
+      "expected_ranking": ["phage_therapy", "stewardship_programs", "ai_drug_discovery", "crispr_bacteria"],
+      "rationale": "AMR: proven phage > stewardship (slow) > AI drugs (promising but unproven) > CRISPR (risky)"
+    },
+    {
+      "id": "deep_sea_mining",
+      "title": "Deep Sea Mining Decision",
+      "environment": {"turbulence": 0.35, "noise": 0.30, "pressure": 0.45, "stability": 0.60, "urgency": 0.40, "competition": 0.55, "tech_readiness": 0.40, "risk_tolerance": 0.35, "political_will": 0.30},
+      "candidates": [
+        {"id": "moratorium", "gamma_pcm": 0.04, "gamma_boost": 0.30, "boost_duration": 5.0, "gamma_phi0": 0.02, "label": "moratorium ultra_conservative"},
+        {"id": "limited_pilot", "gamma_pcm": 0.12, "gamma_boost": 0.58, "boost_duration": 3.5, "gamma_phi0": 0.14, "label": "pilot moderate"},
+        {"id": "commercial_scale", "gamma_pcm": 0.22, "gamma_boost": 0.82, "boost_duration": 1.8, "gamma_phi0": 0.38, "label": "commercial aggressive"},
+        {"id": "land_recycling", "gamma_pcm": 0.10, "gamma_boost": 0.55, "boost_duration": 4.0, "gamma_phi0": 0.10, "label": "recycling conservative"}
+      ],
+      "expected_ranking": ["limited_pilot", "land_recycling", "moratorium", "commercial_scale"],
+      "rationale": "Low TRL + low risk tolerance: pilot > recycling alternative > moratorium > commercial (too early)"
+    }
+  ]
+}
