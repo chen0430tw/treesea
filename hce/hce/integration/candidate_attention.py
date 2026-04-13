@@ -184,34 +184,35 @@ def _collapse_candidate_semantics(
 # 每条规则: (env_feature, cand_feature, weight, mode)
 # mode: "align" = 同向好, "oppose" = 反向好
 # 按高频主轴分组，避免重复出现的语义散落成平铺长表。
-# Trained weights (nano5, 200 iter, 30 pop, 28 samples)
+# Trained weights (nano5, 200 iter, 30 pop, 43 samples incl. ethical dilemmas)
 # Baseline: 76.8% pairwise, 32.1% top-1
-# Trained:  85.1% pairwise, 57.1% top-1
+# Round 1 (28 samples): 85.1% pairwise, 57.1% top-1
+# Round 2 (43 samples): 84.9% pairwise, 58.1% top-1
 AFFINITY_GROUPS = {
     "survival_axis": [
-        ("seed_survival_need", "survivability", 0.0889, "align"),
-        ("seed_survival_need", "recklessness", 0.7832, "oppose"),
-        ("field_coherence", "survivability", 0.6094, "align"),
-        ("utm_drought", "survivability", 0.1144, "align"),
+        ("seed_survival_need", "survivability", 0.0596, "align"),
+        ("seed_survival_need", "recklessness", 0.8955, "oppose"),
+        ("field_coherence", "survivability", 0.9882, "align"),
+        ("utm_drought", "survivability", 0.0649, "align"),
     ],
     "execution_axis": [
-        ("seed_race_need", "execution_speed", 0.8741, "align"),
-        ("seed_urgency", "schedule_inertia", 2.1799, "oppose"),
-        ("seed_competition", "schedule_inertia", 1.7316, "oppose"),
-        ("seed_commercial_motivation", "commercial_drive", 0.3805, "align"),
-        ("seed_international_competition", "state_drive", 0.3154, "align"),
-        ("seed_readiness_gap", "state_drive", 0.9636, "oppose"),
+        ("seed_race_need", "execution_speed", 0.9828, "align"),
+        ("seed_urgency", "schedule_inertia", 3.9226, "oppose"),
+        ("seed_competition", "schedule_inertia", 0.1462, "oppose"),
+        ("seed_commercial_motivation", "commercial_drive", 0.3311, "align"),
+        ("seed_international_competition", "state_drive", 0.6554, "align"),
+        ("seed_readiness_gap", "state_drive", 1.4619, "oppose"),
     ],
     "coordination_axis": [
-        ("seed_coordination_need", "coordination", 0.8757, "align"),
+        ("seed_coordination_need", "coordination", 0.5379, "align"),
     ],
     "institution_axis": [
-        ("seed_institution_need", "institutional_capacity", 0.4373, "align"),
-        ("best_feasibility", "institutional_capacity", 0.1034, "align"),
+        ("seed_institution_need", "institutional_capacity", 0.4897, "align"),
+        ("best_feasibility", "institutional_capacity", 0.0232, "align"),
     ],
     "risk_axis": [
-        ("seed_risk_tolerance", "risk_appetite", 0.0488, "align"),
-        ("vein_risk_mean", "risk_appetite", 0.1332, "oppose"),
+        ("seed_risk_tolerance", "risk_appetite", 0.0393, "align"),
+        ("vein_risk_mean", "risk_appetite", 0.1015, "oppose"),
     ],
 }
 
