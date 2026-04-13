@@ -73,6 +73,124 @@ class HonkaiCoreIOBridge:
 
         return scenario
 
+    def build_scenario_auto(
+        self,
+        request_id: str,
+        tree_output: dict,
+        sea_output: dict,
+        energy_params: Optional[Dict[str, float]] = None,
+        threshold_params: Optional[Dict[str, float]] = None,
+    ) -> dict:
+        """全自动构建 HC 场景：从 TD+QCU 原始输出自动提取所有分数。
+
+        不需要手动赋值 tree_score 和 herrscher_risk。
+
+        自动提取逻辑：
+        - tree_score: 从 TD oracle 的 top_families/vein_backbone 取 balanced_score/feasibility
+        - collapse_score: 从 QCU entries 取 C_end
+        - stability: 从 TD vein_backbone 取 stability，或 1-C_end
+        - herrscher_risk: 从 TD vein_backbone 取 risk，或从候选的极端程度推算
+        - noise: 从 QCU entries 取 dtheta_end
+        """
+        oracle = tree_output.get("oracle_details", {})
+        hydro = tree_output.get("hydro_control", {})
+
+        # === 从 TD 提取分数 ===
+        # 来源 1: top_families (有 final_balanced_score, balanced_score)
+        top_families = oracle.get("top_families", [])
+        # 来源 2: vein_backbone (有 feasibility, stability, risk)
+        vein = hydro.get("vein_backbone", {})
+        vein_nodes = vein.get("nodes", [])
+        # 来源 3: vein_stats (全局统计)
+        vein_stats = hydro.get("vein_stats", {})
+        # 来源 4: best_worldline
+        best_wl = tree_output.get("best_worldline", oracle.get("best_worldline", {}))
+
+        # 全局基线值（用于归一化和 fallback）
+        mean_risk = hydro.get("mean_risk", 0.3)
+        mean_score = hydro.get("mean_balanced_score", 0.5)
+        mean_stability = vein.get("mean_stability", 0.6)
+
+        # === 从 QCU 提取 ===
+        entries = sea_output.get("entries", [])
+        collapse_results = sea_output.get("collapse_results", [])
+        sea_items = collapse_results or entries
+
+        # C_end 统计（用于归一化 herrscher_risk）
+        c_ends = [e.get("C_end", e.get("collapse_score", 0.5)) for e in sea_items]
+        c_mean = sum(c_ends) / len(c_ends) if c_ends else 0.5
+        c_std = (sum((c - c_mean) ** 2 for c in c_ends) / max(len(c_ends), 1)) ** 0.5
+
+        # === 构建候选 ===
+        n_td = len(top_families)
+        n_vein = len(vein_nodes)
+        n_sea = len(sea_items)
+        n_candidates = max(n_sea, 1)
+
+        candidates = []
+        for i, sea_entry in enumerate(sea_items):
+            cid = sea_entry.get("run_id", sea_entry.get("candidate_id", f"cand_{i}"))
+            short_cid = cid.split("/")[-1] if "/" in cid else cid
+            c_end = sea_entry.get("C_end", sea_entry.get("collapse_score", 0.5))
+
+            # tree_score: 从 TD 按顺序匹配，如果候选数不一致则插值
+            if i < n_td:
+                tf = top_families[i]
+                tree_score = tf.get("final_balanced_score", tf.get("balanced_score", 0.5))
+            elif n_td > 0:
+                # 用最后一个 TD 候选的分数衰减
+                last_score = top_families[-1].get("final_balanced_score", 0.5)
+                tree_score = last_score * (0.9 ** (i - n_td + 1))
+            else:
+                # 无 TD 数据，用 best_worldline
+                tree_score = best_wl.get("final_balanced_score", best_wl.get("balanced_score", 0.5))
+
+            # 归一化 tree_score 到 [0, 1]（TD 的 balanced_score 可能 >1）
+            tree_score = max(0.0, min(1.0, tree_score))
+
+            # stability: 从 vein_backbone 取，或用 1 - C_end
+            if i < n_vein:
+                stability = vein_nodes[i].get("stability", 1.0 - c_end)
+            else:
+                stability = 1.0 - c_end
+
+            # herrscher_risk: 从 vein_backbone 取 risk，结合 C_end 异常度
+            if i < n_vein:
+                base_risk = vein_nodes[i].get("risk", mean_risk)
+            else:
+                base_risk = mean_risk
+
+            # C_end 越偏离均值 → 越不稳定 → herrscher_risk 越高
+            c_deviation = abs(c_end - c_mean) / max(c_std, 1e-8) if c_std > 1e-8 else 0.0
+            herrscher_risk = min(1.0, base_risk + 0.1 * min(c_deviation, 3.0))
+
+            # noise
+            noise = abs(sea_entry.get("dtheta_end", 0.1))
+
+            candidates.append({
+                "candidate_id": short_cid,
+                "payload": {
+                    "tree_score": tree_score,
+                    "collapse_score": c_end,
+                    "stability": stability,
+                    "noise": noise,
+                    "herrscherization_risk": herrscher_risk,
+                },
+            })
+
+        scenario = {
+            "scenario_id": f"hce_auto_{request_id}",
+            "request_id": request_id,
+            "candidates": candidates,
+        }
+
+        if energy_params:
+            scenario["energy_params"] = energy_params
+        if threshold_params:
+            scenario["threshold_params"] = threshold_params
+
+        return scenario
+
     def extract_recommendation(self, hc_report: dict) -> dict:
         """从 HCReportBundle dict 提取建议摘要。
 

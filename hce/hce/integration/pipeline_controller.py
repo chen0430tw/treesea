@@ -105,13 +105,22 @@ class PipelineController:
                 self._record_stage("honkai_core", hc_output)
                 hc_ref = hc_output.get("hc_run_id", "hc_provided")
             elif tree_output and sea_output:
-                # 自动构建 HC 场景并运行
-                scenario = self.hc_bridge.build_hc_scenario(
+                # 全自动：从 TD+QCU 输出自动提取分数，构建场景并运行 HC
+                from ..bridges.hc_io_bridge import HonkaiCoreIOBridge
+                auto_bridge = HonkaiCoreIOBridge()
+                scenario = auto_bridge.build_scenario_auto(
                     request_id=request.request_id,
                     tree_output=tree_output,
                     sea_output=sea_output,
                 )
-                self._record_stage("honkai_core_scenario_built", scenario)
+                from honkai_core.io.scenario_loader import ScenarioConfig
+                from honkai_core.runtime.runner import HonkaiCoreRunner
+                hc_config = ScenarioConfig.from_dict(scenario)
+                hc_runner = HonkaiCoreRunner(hc_config)
+                hc_bundle = hc_runner.run()
+                hc_output = hc_bundle.to_dict()
+                self._record_stage("honkai_core_auto", hc_output)
+                hc_ref = hc_output.get("hc_run_id", "hc_auto")
 
         # Merge
         merged = self.merger.merge(
