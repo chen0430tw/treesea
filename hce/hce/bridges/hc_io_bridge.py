@@ -163,7 +163,7 @@ class HonkaiCoreIOBridge:
 
         # 计算注意力分数 → tree_score
         attention_scores = compute_attention_scores(
-            td_features, cand_payloads, temperature=0.5
+            td_features, cand_payloads, temperature=1.0
         )
 
         # === 构建候选 ===

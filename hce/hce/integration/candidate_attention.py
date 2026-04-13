@@ -137,6 +137,15 @@ def extract_candidate_features(candidate_params: dict) -> Dict[str, float]:
     features["risk_appetite"] = min(gamma_phi0 / 0.5, 1.0)            # 高 phi0 = 冒险
     features["intensity"] = (gamma_pcm + gamma_boost) / 2.0           # 综合强度
     features["balance"] = 1.0 - abs(gamma_pcm - gamma_phi0)           # pcm 和 phi0 的平衡度
+    # 综合成熟度：低 pcm + 中等 boost + 长 duration = 成熟的方案
+    features["maturity"] = (
+        (1.0 - min(gamma_pcm / 0.3, 1.0)) * 0.3      # 低同步损耗
+        + min(boost_duration / 5.0, 1.0) * 0.4         # 有耐心
+        + (1.0 - min(gamma_phi0 / 0.5, 1.0)) * 0.3    # 低噪声
+    )
+    # 极端度：越接近中间越低
+    mid_boost = abs(gamma_boost - 0.65) / 0.35  # 0.65 为中位
+    features["extremeness"] = min(mid_boost, 1.0)
 
     return features
 
@@ -222,6 +231,35 @@ def compute_attention_scores(
         ("seed_risk_tolerance", "risk_appetite", 2.5, "align"),   # 容忍风险 → 可以冒险
         ("seed_risk_tolerance", "conservatism", 2.0, "oppose"),   # 容忍风险 → 不需要保守
         ("seed_experience", "aggressiveness", 2.0, "align"),      # 经验丰富 → 可以激进
+        # 技术成熟度：低 TRL → 激进必死，高 TRL → 激进可行
+        ("seed_technology_readiness", "aggressiveness", 3.0, "align"),  # 技术成熟 → 激进OK
+        ("seed_technology_readiness", "conservatism", 2.0, "oppose"),   # 技术成熟 → 不需保守
+        ("seed_tech_readiness", "aggressiveness", 3.0, "align"),       # 别名
+        ("seed_tech_readiness", "conservatism", 2.0, "oppose"),
+        # 反向：技术不成熟时用 1-value 编码，这里用 oppose 实现
+        # 当 seed_technology_readiness=0.35 (低):
+        #   aggressiveness align → 0.35 * aggressive = 低分 (好)
+        #   conservatism oppose → 0.35 * (1-conserv) = 对保守有利
+        # 政治意愿
+        ("seed_political_will", "patience", 2.5, "align"),       # 高政治意愿 → 长期项目可行
+        ("seed_political_will_usa", "patience", 2.0, "align"),
+        ("seed_political_will_china", "aggressiveness", 2.0, "align"),  # 中国政治意愿高 → 可以激进推
+        # 商业动机
+        ("seed_commercial_motivation", "aggressiveness", 2.0, "align"),
+        ("seed_commercial_motivation", "risk_appetite", 1.5, "align"),
+        # 公众兴趣
+        ("seed_public_interest", "patience", 1.5, "align"),       # 公众支持 → 长期项目可行
+        # 国际竞争（高竞争 → 需要速度，但也需要技术准备）
+        ("seed_international_competition", "intensity", 2.0, "align"),
+        # 执行力
+        ("seed_spacex_execution_track_record", "aggressiveness", 2.5, "align"),  # 执行力强 → 激进可行
+        ("seed_nasa_schedule_slip_history", "patience", 2.0, "align"),           # NASA 延期历史 → 需要耐心
+        ("seed_nasa_schedule_slip_history", "aggressiveness", 1.5, "oppose"),    # NASA 延期 → 激进不靠谱
+        # 成熟度和极端度
+        ("seed_technology_readiness", "maturity", 2.5, "align"),    # 低 TRL + 高成熟方案 = 不匹配但安全
+        ("seed_competition", "extremeness", 1.5, "oppose"),         # 竞争中极端策略不好
+        ("seed_competition", "balance", 2.0, "align"),              # 竞争中平衡策略好
+        ("seed_competition", "maturity", 1.5, "align"),             # 竞争中成熟方案好
     }
 
     raw_scores = []
