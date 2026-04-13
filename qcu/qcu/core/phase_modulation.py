@@ -130,19 +130,21 @@ def build_H_base(cfg: IQPUConfig, ops: OperatorBank) -> np.ndarray:
     ndarray, shape (DIM, DIM)
     """
     DIM = ops.DIM
-    H = np.zeros((DIM, DIM), dtype=np.complex128)
+    dt = np.complex64 if cfg.dtype == "complex64" else np.complex128
+    ft = np.float32 if dt == np.complex64 else np.float64
+    H = np.zeros((DIM, DIM), dtype=dt)
 
     for k in range(cfg.Nm):
-        H += cfg.wc[k] * ops.nJ[k]
+        H += ft(cfg.wc[k]) * ops.nJ[k]
     for j in range(cfg.Nq):
-        H += 0.5 * cfg.wq[j] * ops.szJ[j]
+        H += ft(0.5 * cfg.wq[j]) * ops.szJ[j]
     for j in range(cfg.Nq):
         for k in range(cfg.Nm):
-            H += cfg.chi[j, k] * (ops.szJ[j] @ ops.nJ[k])
+            H += ft(cfg.chi[j, k]) * (ops.szJ[j] @ ops.nJ[k])
 
     for k in range(cfg.Nm):
-        eps = complex(cfg.eps_drive[k])
-        H += 1j * (eps * ops.adJ[k] - np.conjugate(eps) * ops.aJ[k])
+        eps = dt(complex(cfg.eps_drive[k]))
+        H += dt(1j) * (eps * ops.adJ[k] - np.conjugate(eps) * ops.aJ[k])
 
     return H
 
