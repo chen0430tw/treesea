@@ -20,7 +20,7 @@ import time
 
 import numpy as np
 
-from .state_repr import IQPUConfig, IQPURunResult, build_initial_state, get_xp
+from .state_repr import IQPUConfig, IQPURunResult, build_initial_state, get_xp, basis, coherent_state, dagger
 from .phase_modulation import OperatorBank, build_operator_bank, build_H_base, build_H_boost_trim
 from .collapse_operator import build_collapse_cache, CollapseCache
 from .lindblad_solver import alloc_rk4_buffers, rk4_step
@@ -317,11 +317,28 @@ class IQPU:
         cpu_dtype = np.complex64 if self._dtype == np.complex64 else np.complex128
         cast = lambda a: a.astype(cpu_dtype) if a.dtype != cpu_dtype else a
 
-        # 初始密度矩阵（统一 dtype）
+        # 初始密度矩阵（统一 dtype，用 complex64 构建避免内存爆炸）
         if init_rho is not None:
             rho_np = cast(init_rho)
         else:
-            rho_np = cast(build_initial_state(cfg, self.dimQ, self.dimM))
+            # build_initial_state 内部用 complex128，大 DIM 时会 OOM
+            # 改用 complex64 向量构建密度矩阵
+            import math as _math
+            q = None
+            for s in cfg.qubits_init:
+                if s == "g":
+                    v = basis(2, 0).astype(cpu_dtype)
+                elif s == "e":
+                    v = basis(2, 1).astype(cpu_dtype)
+                else:
+                    v = ((basis(2, 0) + basis(2, 1)) / _math.sqrt(2.0)).astype(cpu_dtype)
+                q = v if q is None else np.kron(q, v)
+            m = None
+            for alpha in cfg.alpha0:
+                v = coherent_state(cfg.d, alpha).astype(cpu_dtype)
+                m = v if m is None else np.kron(m, v)
+            psi = np.kron(q, m)
+            rho_np = psi @ dagger(psi)
 
         # Hamiltonians (CPU numpy, 统一用 target dtype 节省内存)
         ops_cpu = self._ops_cpu_ref
