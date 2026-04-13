@@ -30,11 +30,21 @@ class QCURunner:
         虚拟量子芯片配置（所有候选共用同一芯片实例）
     """
 
-    def __init__(self, cfg: IQPUConfig) -> None:
+    def __init__(self, cfg: IQPUConfig, fused: bool = True) -> None:
         self.iqpu = IQPU(cfg)
         self._ingress = RequestIngress()
         self._cluster_sched = ClusterScheduler()
         self._term_policy = TerminationPolicy()
+
+        # 自动检测 torch fused solver 可用性
+        self._use_fused = False
+        if fused and cfg.device == "cuda":
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    self._use_fused = True
+            except ImportError:
+                pass
 
     def run(self, request: CollapseRequest) -> SeaOutputBundle:
         """执行 CollapseRequest 并返回 SeaOutputBundle。
@@ -70,7 +80,8 @@ class QCURunner:
                 run_id = f"{request.request_id}/{cluster_plan.cluster_id}/{candidate.candidate_id}"
                 label = params.get("label", run_id)
 
-                result = self.iqpu.run_qcl_v6(
+                _run = self.iqpu.run_qcl_v6_fused if self._use_fused else self.iqpu.run_qcl_v6
+                result = _run(
                     label=label,
                     t1=float(params.get("t1", 3.0)),
                     t2=float(params.get("t2", 5.0)),

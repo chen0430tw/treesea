@@ -1,0 +1,18 @@
+{
+  "included": [
+    "archive/uploads/HCE_complete_integrated_with_agent_ssh.zip",
+    "archive/uploads/MOROZ_API.md",
+    "archive/uploads/MOROZ_技术白皮书.md",
+    "archive/uploads/MOROZ代码.txt",
+    "archive/uploads/QCU_调度工程完整版压缩包.zip",
+    "docs/api/MOROZ_API.md",
+    "docs/architecture/Claude_工作指南与协作规范.md",
+    "docs/architecture/MOROZ_目录结构说明_Claude阅读版.md",
+    "docs/narrative/MOROZ_传说叙事抽象文档.md",
+    "docs/narrative/MOROZ_神秘感与传说叙事整合文档.md",
+    "docs/narrative/MOROZ_神秘感品牌叙事计划书_合法公开版.md",
+    "docs/whitepaper/MOROZ_技术白皮书_扩展版.md",
+    "moroz",
+    "qcu"
+  ]
+}
