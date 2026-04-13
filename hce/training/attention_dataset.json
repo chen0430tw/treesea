@@ -366,6 +366,201 @@
       ],
       "expected_ranking": ["limited_pilot", "land_recycling", "moratorium", "commercial_scale"],
       "rationale": "Low TRL + low risk tolerance: pilot > recycling alternative > moratorium > commercial (too early)"
+    },
+    {
+      "id": "trolley_classic",
+      "title": "Classic Trolley Problem",
+      "environment": {"turbulence": 0.95, "noise": 0.20, "pressure": 0.99, "stability": 0.05, "urgency": 0.99, "competition": 0.0, "tech_readiness": 0.90, "risk_tolerance": 0.30},
+      "candidates": [
+        {"id": "pull_lever", "gamma_pcm": 0.15, "gamma_boost": 0.68, "boost_duration": 1.0, "gamma_phi0": 0.25, "label": "pull lever sacrifice one moderate"},
+        {"id": "do_nothing", "gamma_pcm": 0.05, "gamma_boost": 0.35, "boost_duration": 5.0, "gamma_phi0": 0.03, "label": "do nothing conservative"},
+        {"id": "jump_on_track", "gamma_pcm": 0.30, "gamma_boost": 0.95, "boost_duration": 1.0, "gamma_phi0": 0.50, "label": "self sacrifice ultra_aggressive"},
+        {"id": "derail_trolley", "gamma_pcm": 0.25, "gamma_boost": 0.88, "boost_duration": 1.0, "gamma_phi0": 0.45, "label": "derail aggressive"}
+      ],
+      "expected_ranking": ["pull_lever", "do_nothing", "derail_trolley", "jump_on_track"],
+      "rationale": "Trolley: utilitarian pull lever (save 5) > inaction (moral purity) > derail (uncertain) > self-sacrifice (irrational)"
+    },
+    {
+      "id": "trolley_fat_man",
+      "title": "Fat Man Trolley Variant",
+      "environment": {"turbulence": 0.95, "noise": 0.30, "pressure": 0.99, "stability": 0.05, "urgency": 0.99, "competition": 0.0, "tech_readiness": 0.80, "risk_tolerance": 0.15},
+      "candidates": [
+        {"id": "push_fat_man", "gamma_pcm": 0.25, "gamma_boost": 0.85, "boost_duration": 1.0, "gamma_phi0": 0.45, "label": "push person aggressive"},
+        {"id": "dont_push", "gamma_pcm": 0.06, "gamma_boost": 0.40, "boost_duration": 5.0, "gamma_phi0": 0.04, "label": "dont push conservative"},
+        {"id": "shout_warning", "gamma_pcm": 0.12, "gamma_boost": 0.58, "boost_duration": 2.0, "gamma_phi0": 0.15, "label": "shout moderate"},
+        {"id": "throw_object", "gamma_pcm": 0.18, "gamma_boost": 0.72, "boost_duration": 1.5, "gamma_phi0": 0.28, "label": "throw moderate"}
+      ],
+      "expected_ranking": ["shout_warning", "dont_push", "throw_object", "push_fat_man"],
+      "rationale": "Fat man: non-violent intervention > inaction > risky intervention > murder. Lower risk_tolerance shifts away from utilitarian calc"
+    },
+    {
+      "id": "trolley_autonomous_car",
+      "title": "Autonomous Vehicle Trolley Problem",
+      "environment": {"turbulence": 0.80, "noise": 0.40, "pressure": 0.95, "stability": 0.10, "urgency": 0.95, "competition": 0.30, "tech_readiness": 0.50, "risk_tolerance": 0.25},
+      "candidates": [
+        {"id": "swerve_wall", "gamma_pcm": 0.15, "gamma_boost": 0.65, "boost_duration": 1.0, "gamma_phi0": 0.22, "label": "swerve wall moderate"},
+        {"id": "brake_hard", "gamma_pcm": 0.08, "gamma_boost": 0.50, "boost_duration": 2.0, "gamma_phi0": 0.08, "label": "brake conservative"},
+        {"id": "continue_straight", "gamma_pcm": 0.05, "gamma_boost": 0.35, "boost_duration": 5.0, "gamma_phi0": 0.03, "label": "straight ultra_conservative"},
+        {"id": "swerve_pedestrians", "gamma_pcm": 0.28, "gamma_boost": 0.92, "boost_duration": 1.0, "gamma_phi0": 0.48, "label": "swerve people ultra_aggressive"}
+      ],
+      "expected_ranking": ["brake_hard", "swerve_wall", "continue_straight", "swerve_pedestrians"],
+      "rationale": "AV: minimize harm without choosing victims. Brake > swerve wall (self-harm) > inaction > swerve into people"
+    },
+    {
+      "id": "fugitive_short_sentence",
+      "title": "Fugitive with 1-Year Sentence: Hide or Surrender",
+      "environment": {"turbulence": 0.60, "noise": 0.50, "pressure": 0.55, "stability": 0.40, "urgency": 0.30, "competition": 0.10, "tech_readiness": 0.70, "risk_tolerance": 0.35},
+      "candidates": [
+        {"id": "surrender_serve", "gamma_pcm": 0.06, "gamma_boost": 0.40, "boost_duration": 5.0, "gamma_phi0": 0.04, "label": "surrender serve conservative"},
+        {"id": "surrender_appeal", "gamma_pcm": 0.10, "gamma_boost": 0.55, "boost_duration": 4.0, "gamma_phi0": 0.10, "label": "surrender appeal conservative"},
+        {"id": "hide_domestic", "gamma_pcm": 0.20, "gamma_boost": 0.78, "boost_duration": 2.0, "gamma_phi0": 0.35, "label": "hide domestic aggressive"},
+        {"id": "flee_abroad", "gamma_pcm": 0.28, "gamma_boost": 0.92, "boost_duration": 1.0, "gamma_phi0": 0.48, "label": "flee abroad ultra_aggressive"}
+      ],
+      "expected_ranking": ["surrender_appeal", "surrender_serve", "hide_domestic", "flee_abroad"],
+      "rationale": "1 year sentence: surrender+appeal (best outcome) > serve quietly > hide (adds charges) > flee (life ruined)"
+    },
+    {
+      "id": "fugitive_long_sentence",
+      "title": "Fugitive with 20-Year Sentence: Hide or Surrender",
+      "environment": {"turbulence": 0.70, "noise": 0.60, "pressure": 0.75, "stability": 0.25, "urgency": 0.50, "competition": 0.10, "tech_readiness": 0.50, "risk_tolerance": 0.65},
+      "candidates": [
+        {"id": "surrender_serve_20", "gamma_pcm": 0.05, "gamma_boost": 0.35, "boost_duration": 5.0, "gamma_phi0": 0.03, "label": "surrender 20yr ultra_conservative"},
+        {"id": "surrender_appeal_20", "gamma_pcm": 0.10, "gamma_boost": 0.55, "boost_duration": 4.0, "gamma_phi0": 0.10, "label": "surrender appeal conservative"},
+        {"id": "hide_rebuild", "gamma_pcm": 0.18, "gamma_boost": 0.72, "boost_duration": 3.0, "gamma_phi0": 0.28, "label": "hide rebuild moderate"},
+        {"id": "flee_abroad_20", "gamma_pcm": 0.25, "gamma_boost": 0.85, "boost_duration": 1.5, "gamma_phi0": 0.42, "label": "flee abroad aggressive"}
+      ],
+      "expected_ranking": ["surrender_appeal_20", "hide_rebuild", "flee_abroad_20", "surrender_serve_20"],
+      "rationale": "20 years: appeal (reduce sentence) > hide (rational risk) > flee (desperate) > serve full (life wasted). Higher risk_tolerance makes hiding rational"
+    },
+    {
+      "id": "fugitive_wrongful",
+      "title": "Wrongfully Convicted Fugitive",
+      "environment": {"turbulence": 0.80, "noise": 0.65, "pressure": 0.70, "stability": 0.20, "urgency": 0.60, "competition": 0.05, "tech_readiness": 0.40, "risk_tolerance": 0.70},
+      "candidates": [
+        {"id": "surrender_fight_court", "gamma_pcm": 0.12, "gamma_boost": 0.60, "boost_duration": 3.5, "gamma_phi0": 0.15, "label": "surrender fight moderate"},
+        {"id": "go_public_media", "gamma_pcm": 0.18, "gamma_boost": 0.72, "boost_duration": 2.5, "gamma_phi0": 0.28, "label": "media campaign moderate"},
+        {"id": "hide_gather_evidence", "gamma_pcm": 0.15, "gamma_boost": 0.68, "boost_duration": 3.0, "gamma_phi0": 0.22, "label": "hide evidence moderate"},
+        {"id": "flee_forever", "gamma_pcm": 0.28, "gamma_boost": 0.92, "boost_duration": 1.0, "gamma_phi0": 0.48, "label": "flee forever ultra_aggressive"}
+      ],
+      "expected_ranking": ["go_public_media", "surrender_fight_court", "hide_gather_evidence", "flee_forever"],
+      "rationale": "Wrongful conviction: media pressure (expose injustice) > legal fight > hide+evidence > flee (gives up innocence claim)"
+    },
+    {
+      "id": "lifeboat_ethics",
+      "title": "Lifeboat Ethics: 10 People, Food for 6",
+      "environment": {"turbulence": 0.90, "noise": 0.30, "pressure": 0.95, "stability": 0.05, "urgency": 0.85, "competition": 0.0, "tech_readiness": 0.60, "risk_tolerance": 0.20},
+      "candidates": [
+        {"id": "ration_equally", "gamma_pcm": 0.10, "gamma_boost": 0.55, "boost_duration": 4.0, "gamma_phi0": 0.10, "label": "ration conservative"},
+        {"id": "lottery_exclude", "gamma_pcm": 0.18, "gamma_boost": 0.72, "boost_duration": 2.5, "gamma_phi0": 0.28, "label": "lottery moderate"},
+        {"id": "strongest_survive", "gamma_pcm": 0.25, "gamma_boost": 0.85, "boost_duration": 1.5, "gamma_phi0": 0.42, "label": "strongest aggressive"},
+        {"id": "captain_decides", "gamma_pcm": 0.14, "gamma_boost": 0.65, "boost_duration": 3.0, "gamma_phi0": 0.20, "label": "captain moderate"}
+      ],
+      "expected_ranking": ["ration_equally", "captain_decides", "lottery_exclude", "strongest_survive"],
+      "rationale": "Lifeboat: equal ration (all survive longer, rescue possible) > authority > fair random > social darwinism"
+    },
+    {
+      "id": "organ_transplant_dilemma",
+      "title": "One Donor Organ, Three Patients",
+      "environment": {"turbulence": 0.75, "noise": 0.30, "pressure": 0.90, "stability": 0.15, "urgency": 0.90, "competition": 0.0, "tech_readiness": 0.75, "risk_tolerance": 0.30},
+      "candidates": [
+        {"id": "waiting_list_order", "gamma_pcm": 0.08, "gamma_boost": 0.48, "boost_duration": 4.5, "gamma_phi0": 0.06, "label": "waiting list conservative"},
+        {"id": "best_match", "gamma_pcm": 0.14, "gamma_boost": 0.65, "boost_duration": 3.0, "gamma_phi0": 0.18, "label": "best match moderate"},
+        {"id": "youngest_first", "gamma_pcm": 0.18, "gamma_boost": 0.72, "boost_duration": 2.5, "gamma_phi0": 0.28, "label": "youngest moderate"},
+        {"id": "highest_bidder", "gamma_pcm": 0.28, "gamma_boost": 0.92, "boost_duration": 1.0, "gamma_phi0": 0.48, "label": "bidder ultra_aggressive"}
+      ],
+      "expected_ranking": ["best_match", "waiting_list_order", "youngest_first", "highest_bidder"],
+      "rationale": "Organ: medical match (maximize survival) > fairness (waiting list) > age preference > money (unethical)"
+    },
+    {
+      "id": "whistleblower_dilemma",
+      "title": "Corporate Fraud Whistleblower Decision",
+      "environment": {"turbulence": 0.65, "noise": 0.55, "pressure": 0.60, "stability": 0.35, "urgency": 0.55, "competition": 0.20, "tech_readiness": 0.65, "risk_tolerance": 0.45},
+      "candidates": [
+        {"id": "internal_report", "gamma_pcm": 0.10, "gamma_boost": 0.55, "boost_duration": 4.0, "gamma_phi0": 0.10, "label": "internal conservative"},
+        {"id": "anonymous_tip_regulator", "gamma_pcm": 0.15, "gamma_boost": 0.68, "boost_duration": 3.0, "gamma_phi0": 0.22, "label": "anonymous moderate"},
+        {"id": "public_media_expose", "gamma_pcm": 0.22, "gamma_boost": 0.82, "boost_duration": 1.5, "gamma_phi0": 0.38, "label": "media aggressive"},
+        {"id": "stay_silent", "gamma_pcm": 0.04, "gamma_boost": 0.30, "boost_duration": 5.0, "gamma_phi0": 0.02, "label": "silent ultra_conservative"}
+      ],
+      "expected_ranking": ["anonymous_tip_regulator", "internal_report", "public_media_expose", "stay_silent"],
+      "rationale": "Whistleblower: anonymous to regulator (protected + effective) > internal (risky but proper) > media (burns bridges) > silent (complicit)"
+    },
+    {
+      "id": "triage_mass_casualty",
+      "title": "Mass Casualty Triage Protocol",
+      "environment": {"turbulence": 0.95, "noise": 0.70, "pressure": 0.99, "stability": 0.05, "urgency": 0.99, "competition": 0.0, "tech_readiness": 0.80, "risk_tolerance": 0.25},
+      "candidates": [
+        {"id": "start_triage", "gamma_pcm": 0.12, "gamma_boost": 0.60, "boost_duration": 2.0, "gamma_phi0": 0.15, "label": "START triage moderate"},
+        {"id": "first_come", "gamma_pcm": 0.06, "gamma_boost": 0.42, "boost_duration": 4.5, "gamma_phi0": 0.05, "label": "first come conservative"},
+        {"id": "treat_worst_first", "gamma_pcm": 0.22, "gamma_boost": 0.80, "boost_duration": 1.5, "gamma_phi0": 0.35, "label": "worst first aggressive"},
+        {"id": "treat_easiest_first", "gamma_pcm": 0.18, "gamma_boost": 0.72, "boost_duration": 2.5, "gamma_phi0": 0.28, "label": "easiest first moderate"}
+      ],
+      "expected_ranking": ["start_triage", "treat_easiest_first", "first_come", "treat_worst_first"],
+      "rationale": "Mass casualty: START protocol (maximize total survivors) > quick wins > arbitrary order > worst-first (wastes resources on unsaveable)"
+    },
+    {
+      "id": "prisoners_dilemma_iterated",
+      "title": "Iterated Prisoner's Dilemma Strategy",
+      "environment": {"turbulence": 0.40, "noise": 0.35, "pressure": 0.50, "stability": 0.55, "urgency": 0.30, "competition": 0.70, "tech_readiness": 0.80, "risk_tolerance": 0.50},
+      "candidates": [
+        {"id": "always_cooperate", "gamma_pcm": 0.05, "gamma_boost": 0.35, "boost_duration": 5.0, "gamma_phi0": 0.03, "label": "cooperate ultra_conservative"},
+        {"id": "tit_for_tat", "gamma_pcm": 0.14, "gamma_boost": 0.65, "boost_duration": 3.0, "gamma_phi0": 0.20, "label": "tit_for_tat moderate"},
+        {"id": "always_defect", "gamma_pcm": 0.28, "gamma_boost": 0.92, "boost_duration": 1.0, "gamma_phi0": 0.48, "label": "defect ultra_aggressive"},
+        {"id": "grim_trigger", "gamma_pcm": 0.18, "gamma_boost": 0.72, "boost_duration": 2.5, "gamma_phi0": 0.28, "label": "grim moderate"}
+      ],
+      "expected_ranking": ["tit_for_tat", "grim_trigger", "always_cooperate", "always_defect"],
+      "rationale": "Iterated PD: tit-for-tat (proven optimal) > grim trigger (too harsh) > always cooperate (exploitable) > always defect (no cooperation)"
+    },
+    {
+      "id": "torture_ticking_bomb",
+      "title": "Ticking Bomb Torture Dilemma",
+      "environment": {"turbulence": 0.95, "noise": 0.40, "pressure": 0.99, "stability": 0.05, "urgency": 0.99, "competition": 0.0, "tech_readiness": 0.60, "risk_tolerance": 0.20},
+      "candidates": [
+        {"id": "legal_interrogation", "gamma_pcm": 0.10, "gamma_boost": 0.55, "boost_duration": 3.0, "gamma_phi0": 0.12, "label": "legal interrogation moderate"},
+        {"id": "enhanced_interrogation", "gamma_pcm": 0.22, "gamma_boost": 0.82, "boost_duration": 1.5, "gamma_phi0": 0.38, "label": "enhanced aggressive"},
+        {"id": "negotiate_deal", "gamma_pcm": 0.14, "gamma_boost": 0.65, "boost_duration": 2.5, "gamma_phi0": 0.20, "label": "negotiate moderate"},
+        {"id": "evacuate_area", "gamma_pcm": 0.08, "gamma_boost": 0.48, "boost_duration": 4.0, "gamma_phi0": 0.07, "label": "evacuate conservative"}
+      ],
+      "expected_ranking": ["evacuate_area", "negotiate_deal", "legal_interrogation", "enhanced_interrogation"],
+      "rationale": "Ticking bomb: evacuate (save lives without moral cost) > negotiate > legal interrogation > torture (unreliable + immoral)"
+    },
+    {
+      "id": "startup_pivot",
+      "title": "Failing Startup: Pivot or Die",
+      "environment": {"turbulence": 0.70, "noise": 0.55, "pressure": 0.85, "stability": 0.20, "urgency": 0.80, "competition": 0.75, "tech_readiness": 0.55, "risk_tolerance": 0.65},
+      "candidates": [
+        {"id": "pivot_adjacent", "gamma_pcm": 0.16, "gamma_boost": 0.70, "boost_duration": 2.5, "gamma_phi0": 0.25, "label": "pivot adjacent moderate"},
+        {"id": "double_down", "gamma_pcm": 0.24, "gamma_boost": 0.85, "boost_duration": 1.5, "gamma_phi0": 0.40, "label": "double down aggressive"},
+        {"id": "acquihire_exit", "gamma_pcm": 0.10, "gamma_boost": 0.55, "boost_duration": 4.0, "gamma_phi0": 0.10, "label": "acquihire conservative"},
+        {"id": "shutdown_graceful", "gamma_pcm": 0.06, "gamma_boost": 0.40, "boost_duration": 5.0, "gamma_phi0": 0.05, "label": "shutdown ultra_conservative"}
+      ],
+      "expected_ranking": ["pivot_adjacent", "acquihire_exit", "double_down", "shutdown_graceful"],
+      "rationale": "Failing startup: pivot (proven strategy) > exit with value > gamble > give up"
+    },
+    {
+      "id": "hiring_diversity",
+      "title": "Hiring Decision: Merit vs Diversity",
+      "environment": {"turbulence": 0.30, "noise": 0.40, "pressure": 0.40, "stability": 0.65, "urgency": 0.25, "competition": 0.55, "tech_readiness": 0.70, "risk_tolerance": 0.50, "political_will": 0.60},
+      "candidates": [
+        {"id": "blind_merit", "gamma_pcm": 0.12, "gamma_boost": 0.60, "boost_duration": 3.5, "gamma_phi0": 0.15, "label": "blind merit moderate"},
+        {"id": "weighted_diversity", "gamma_pcm": 0.16, "gamma_boost": 0.70, "boost_duration": 2.8, "gamma_phi0": 0.24, "label": "weighted moderate"},
+        {"id": "strict_quota", "gamma_pcm": 0.22, "gamma_boost": 0.82, "boost_duration": 1.5, "gamma_phi0": 0.38, "label": "quota aggressive"},
+        {"id": "nepotism", "gamma_pcm": 0.28, "gamma_boost": 0.92, "boost_duration": 1.0, "gamma_phi0": 0.48, "label": "nepotism ultra_aggressive"}
+      ],
+      "expected_ranking": ["weighted_diversity", "blind_merit", "strict_quota", "nepotism"],
+      "rationale": "Hiring: balanced approach > pure merit (bias blind) > rigid quota (inflexible) > nepotism (corrupt)"
+    },
+    {
+      "id": "end_of_life_care",
+      "title": "Terminal Patient: Aggressive Treatment vs Palliative",
+      "environment": {"turbulence": 0.70, "noise": 0.40, "pressure": 0.65, "stability": 0.30, "urgency": 0.70, "competition": 0.0, "tech_readiness": 0.45, "risk_tolerance": 0.30},
+      "candidates": [
+        {"id": "palliative_comfort", "gamma_pcm": 0.08, "gamma_boost": 0.48, "boost_duration": 4.5, "gamma_phi0": 0.06, "label": "palliative conservative"},
+        {"id": "standard_treatment", "gamma_pcm": 0.14, "gamma_boost": 0.65, "boost_duration": 3.0, "gamma_phi0": 0.18, "label": "standard moderate"},
+        {"id": "experimental_drug", "gamma_pcm": 0.22, "gamma_boost": 0.82, "boost_duration": 1.5, "gamma_phi0": 0.38, "label": "experimental aggressive"},
+        {"id": "aggressive_chemo", "gamma_pcm": 0.28, "gamma_boost": 0.92, "boost_duration": 1.0, "gamma_phi0": 0.48, "label": "aggressive chemo ultra_aggressive"}
+      ],
+      "expected_ranking": ["palliative_comfort", "standard_treatment", "experimental_drug", "aggressive_chemo"],
+      "rationale": "Terminal + low tech readiness + low risk tolerance: comfort > standard > experimental > aggressive (suffering without benefit)"
     }
   ]
 }
