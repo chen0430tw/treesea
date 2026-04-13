@@ -393,9 +393,9 @@ class IQPU:
         # 转回 numpy 做最终读出
         rho_final = rho_final_torch.cpu().numpy()
 
-        # 用 numpy ops 做最终读出
+        # 用轻量 ops 做最终读出（避免 complex128 内存爆炸）
         final_sz, final_n, final_rel_phase, C_end, dtheta_end = \
-            compute_final_observables(rho_final, ops_cpu, cfg.phi_ref)
+            compute_final_observables(rho_final, ops_cpu_light, cfg.phi_ref)
 
         return IQPURunResult(
             label=label,
