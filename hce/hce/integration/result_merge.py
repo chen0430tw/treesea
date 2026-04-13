@@ -98,12 +98,26 @@ class ResultMerger:
                         "composite_score": cr.get("collapse_score", cr.get("C_end", 0.0)),
                     }
 
-        # 从 HC 补充风险
+        # 从 HC 补充风险和 tree_score
         if hc_output:
             for re in hc_output.get("risk_entries", []):
-                cid = re.get("candidate_id", "unknown")
-                if cid in candidates:
-                    candidates[cid]["risk_level"] = re.get("risk_level", "safe")
+                hc_cid = re.get("candidate_id", "unknown")
+                # HC candidate_id 是短名，QCU 的是 run_id 长路径
+                # 尝试精确匹配，再尝试尾部匹配
+                matched = None
+                if hc_cid in candidates:
+                    matched = hc_cid
+                else:
+                    for full_cid in candidates:
+                        if full_cid.endswith("/" + hc_cid):
+                            matched = full_cid
+                            break
+                if matched:
+                    candidates[matched]["risk_level"] = re.get("risk_level", "safe")
+                    # 从 detail 补充 tree_score
+                    detail = re.get("detail", {})
+                    if detail.get("tree_score") is not None and candidates[matched].get("tree_score") is None:
+                        candidates[matched]["tree_score"] = detail["tree_score"]
 
         # 计算 composite_score
         for c in candidates.values():
@@ -111,8 +125,16 @@ class ResultMerger:
             sea_s = c.get("collapse_score") or 0.0
             c["composite_score"] = 0.6 * tree_s + 0.4 * (1.0 - sea_s)
 
+        # 过滤掉仅由 Tree Diagram fallback 产生且无 QCU 数据的占位候选
+        real_candidates = [
+            c for c in candidates.values()
+            if c.get("collapse_score") is not None or c.get("tree_score", 0) > 0
+        ]
+        if not real_candidates:
+            real_candidates = list(candidates.values())
+
         # 排序
-        ranking = sorted(candidates.values(), key=lambda x: x["composite_score"], reverse=True)
+        ranking = sorted(real_candidates, key=lambda x: x["composite_score"], reverse=True)
         return ranking
 
     def _select_best(self, ranking: List[Dict[str, Any]]) -> dict:

@@ -111,6 +111,7 @@ class HonkaiCoreRunner:
                 threshold_margin=assessment.margin_collapse,
                 herrscherization_risk=c.get("herrscherization_risk", 0.0),
                 rewrite_risk=0.0,  # 填充后更新
+                detail={"tree_score": c.get("tree_score", 0.0)},
             ))
 
         # 取最严格的阈值评估作为全局评估
