@@ -68,11 +68,34 @@ def evaluate_ranking(
     return loss, correct, total
 
 
+def evaluate_top1_margin(
+    scores: List[float],
+    candidate_ids: List[str],
+    expected_ranking: List[str],
+) -> Tuple[float, float, bool]:
+    """评估 top-1 的领先 margin。
+
+    返回: (margin, margin_loss, top1_correct)
+    """
+    if not expected_ranking:
+        return 0.0, 0.0, False
+
+    id_to_score = dict(zip(candidate_ids, scores))
+    top_id = expected_ranking[0]
+    top_score = id_to_score.get(top_id, float("-inf"))
+    runner_up = max((score for cid, score in id_to_score.items() if cid != top_id), default=top_score)
+    margin = top_score - runner_up
+    margin_loss = max(0.0, 0.05 - margin)
+    return margin, margin_loss, margin >= 0.0
+
+
 def evaluate_dataset(samples: List[dict], temperature: float = 1.0) -> dict:
     """在整个数据集上评估当前权重。"""
     total_loss = 0.0
     total_correct = 0
     total_pairs = 0
+    total_margin = 0.0
+    total_margin_loss = 0.0
     per_sample = []
 
     for sample in samples:
@@ -95,13 +118,14 @@ def evaluate_dataset(samples: List[dict], temperature: float = 1.0) -> dict:
         scores = compute_attention_scores(td_features, cand_payloads, temperature)
 
         loss, correct, pairs = evaluate_ranking(scores, cand_ids, expected)
+        margin, margin_loss, top1_correct = evaluate_top1_margin(scores, cand_ids, expected)
         total_loss += loss
         total_correct += correct
         total_pairs += pairs
+        total_margin += margin
+        total_margin_loss += margin_loss
 
-        # 判断 top-1 是否正确
         best_idx = scores.index(max(scores))
-        top1_correct = cand_ids[best_idx] == expected[0]
 
         per_sample.append({
             "id": sample["id"],
@@ -110,38 +134,64 @@ def evaluate_dataset(samples: List[dict], temperature: float = 1.0) -> dict:
             "total": pairs,
             "accuracy": correct / max(pairs, 1),
             "top1": top1_correct,
+            "top1_margin": margin,
+            "top1_margin_loss": margin_loss,
             "predicted_top": cand_ids[best_idx],
             "expected_top": expected[0],
         })
 
     accuracy = total_correct / max(total_pairs, 1)
     top1_acc = sum(1 for s in per_sample if s["top1"]) / max(len(per_sample), 1)
+    avg_margin = total_margin / max(len(per_sample), 1)
+    avg_margin_loss = total_margin_loss / max(len(per_sample), 1)
 
     return {
         "total_loss": total_loss,
+        "total_margin_loss": total_margin_loss,
         "total_correct": total_correct,
         "total_pairs": total_pairs,
         "pairwise_accuracy": accuracy,
         "top1_accuracy": top1_acc,
+        "avg_top1_margin": avg_margin,
+        "avg_top1_margin_loss": avg_margin_loss,
         "per_sample": per_sample,
     }
 
 
+def objective_score(result: dict) -> float:
+    """训练目标：优先 top-1，其次 pairwise 和领先 margin。"""
+    return (
+        result["pairwise_accuracy"]
+        + 2.5 * result["top1_accuracy"]
+        + 0.5 * result["avg_top1_margin"]
+        - 0.5 * result["avg_top1_margin_loss"]
+    )
+
+
 def get_trainable_params() -> List[float]:
-    """从 AFFINITY_GROUPS + CROSS_WEIGHTS 提取可训练参数。"""
+    """从 AFFINITY_GROUPS + CROSS_WEIGHTS 提取可训练参数。
+
+    顺序：按 group name 排序 → 每组内按规则顺序 → CROSS_WEIGHTS 按 key 排序。
+    apply_params 必须用完全相同的遍历顺序。
+    """
     params = []
-    # AFFINITY_GROUPS weights (15 params)
+    n_affinity = 0
     for group_name in sorted(AFFINITY_GROUPS.keys()):
         for rule in AFFINITY_GROUPS[group_name]:
             params.append(rule[2])
-    # CROSS_WEIGHTS (5 params)
+            n_affinity += 1
+    n_cross = 0
     for key in sorted(CROSS_WEIGHTS.keys()):
         params.append(CROSS_WEIGHTS[key])
+        n_cross += 1
     return params
 
 
 def apply_params(params: List[float]) -> None:
-    """将参数写回 AFFINITY_GROUPS + CROSS_WEIGHTS。"""
+    """将参数写回 AFFINITY_GROUPS + CROSS_WEIGHTS。
+
+    遍历顺序与 get_trainable_params 严格一致。
+    """
     idx = 0
     for group_name in sorted(AFFINITY_GROUPS.keys()):
         new_rules = []
@@ -149,7 +199,6 @@ def apply_params(params: List[float]) -> None:
             new_rules.append((rule[0], rule[1], max(0.01, params[idx]), rule[3]))
             idx += 1
         AFFINITY_GROUPS[group_name] = new_rules
-    # CROSS_WEIGHTS
     for key in sorted(CROSS_WEIGHTS.keys()):
         CROSS_WEIGHTS[key] = max(0.01, params[idx])
         idx += 1
@@ -178,9 +227,14 @@ def train(
     """
     best_params = get_trainable_params()
     best_result = evaluate_dataset(samples, temperature)
-    best_score = best_result["pairwise_accuracy"] + 2.0 * best_result["top1_accuracy"]
+    best_score = objective_score(best_result)
 
-    print(f"  Initial: pairwise={best_result['pairwise_accuracy']:.1%} top1={best_result['top1_accuracy']:.1%} score={best_score:.4f}")
+    print(
+        f"  Initial: pairwise={best_result['pairwise_accuracy']:.1%} "
+        f"top1={best_result['top1_accuracy']:.1%} "
+        f"margin={best_result['avg_top1_margin']:.4f} "
+        f"score={best_score:.4f}"
+    )
 
     sigma = sigma_init
     no_improve = 0
@@ -193,7 +247,7 @@ def train(
             apply_params(trial_params)
 
             result = evaluate_dataset(samples, temperature)
-            score = result["pairwise_accuracy"] + 2.0 * result["top1_accuracy"]
+            score = objective_score(result)
 
             if score > best_score:
                 best_score = score
@@ -216,11 +270,53 @@ def train(
         if (it + 1) % 10 == 0 or improved:
             print(
                 f"  iter={it+1:4d}  pairwise={best_result['pairwise_accuracy']:.1%}  "
-                f"top1={best_result['top1_accuracy']:.1%}  score={best_score:.4f}  "
+                f"top1={best_result['top1_accuracy']:.1%}  "
+                f"margin={best_result['avg_top1_margin']:.4f}  "
+                f"score={best_score:.4f}  "
                 f"sigma={sigma:.4f}  {'*' if improved else ''}"
             )
 
     return best_params, best_result
+
+
+def train_with_restarts(
+    samples: List[dict],
+    n_restarts: int = 5,
+    n_iterations: int = 200,
+    population_size: int = 30,
+    sigma_init: float = 0.4,
+    temperature: float = 1.0,
+) -> Tuple[List[float], dict]:
+    """多次随机重启，降低单个 seed 卡局部最优的概率。"""
+    base_params = get_trainable_params()[:]
+    global_best_params: List[float] | None = None
+    global_best_result: dict | None = None
+    global_best_score = float("-inf")
+
+    for restart in range(n_restarts):
+        seed = 42 + restart
+        random.seed(seed)
+        apply_params(base_params)
+        print()
+        print(f"  Restart {restart + 1}/{n_restarts}  seed={seed}")
+        params, result = train(
+            samples,
+            n_iterations=n_iterations,
+            population_size=population_size,
+            sigma_init=sigma_init,
+            temperature=temperature,
+        )
+        score = objective_score(result)
+        if score > global_best_score:
+            global_best_score = score
+            global_best_params = params[:]
+            global_best_result = result
+            print(f"  New global best from restart {restart + 1}: score={score:.4f}")
+
+    assert global_best_params is not None
+    assert global_best_result is not None
+    apply_params(global_best_params)
+    return global_best_params, global_best_result
 
 
 def export_weights(params: List[float], output_path: str | Path) -> None:
@@ -279,10 +375,10 @@ def main():
     print("  Training (random search)")
     print("=" * 70)
 
-    random.seed(42)
     t0 = time.time()
-    best_params, best_result = train(
+    best_params, best_result = train_with_restarts(
         samples,
+        n_restarts=5,
         n_iterations=200,
         population_size=30,
         sigma_init=0.4,
@@ -299,6 +395,7 @@ def main():
     print("=" * 70)
     print(f"  Pairwise accuracy: {best_result['pairwise_accuracy']:.1%} ({best_result['total_correct']}/{best_result['total_pairs']})")
     print(f"  Top-1 accuracy:    {best_result['top1_accuracy']:.1%}")
+    print(f"  Avg top-1 margin:  {best_result['avg_top1_margin']:.4f}")
     print()
 
     print("  --- Per-sample results ---")
@@ -308,6 +405,7 @@ def main():
             f"  [{status:4s}] {s['id']:35s}  "
             f"pairs={s['correct']}/{s['total']}  "
             f"acc={s['accuracy']:.0%}  "
+            f"margin={s['top1_margin']:.4f}  "
             f"predicted={s['predicted_top']:25s}  expected={s['expected_top']}"
         )
 
@@ -325,6 +423,7 @@ def main():
     print("=" * 70)
     print(f"  Pairwise: {baseline['pairwise_accuracy']:.1%} -> {best_result['pairwise_accuracy']:.1%}")
     print(f"  Top-1:    {baseline['top1_accuracy']:.1%} -> {best_result['top1_accuracy']:.1%}")
+    print(f"  Margin:   {baseline['avg_top1_margin']:.4f} -> {best_result['avg_top1_margin']:.4f}")
     print("=" * 70)
 
 

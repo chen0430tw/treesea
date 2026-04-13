@@ -414,41 +414,43 @@ def _collapse_candidate_semantics(
 # Baseline: 76.8% pairwise, 32.1% top-1
 # Round 1 (28 samples): 85.1% pairwise, 57.1% top-1
 # Round 2 (43 samples): 84.9% pairwise, 58.1% top-1
+# Trained weights (nano5, round 4, 43 samples + strategy_tags)
+# Pairwise: 95.0%, Top-1: 90.7% (39/43)
 AFFINITY_GROUPS = {
     "survival_axis": [
-        ("seed_survival_need", "survivability", 2.7106, "align"),
-        ("seed_survival_need", "recklessness", 0.0945, "oppose"),
+        ("seed_survival_need", "survivability", 4.9477, "align"),
+        ("seed_survival_need", "recklessness", 0.0848, "oppose"),
         ("seed_survival_need", "optionality", 0.0100, "align"),
-        ("seed_survival_need", "ethical_legibility", 2.7979, "align"),
-        ("seed_survival_need", "harm_cost", 0.1803, "oppose"),
-        ("field_coherence", "survivability", 1.4020, "align"),
-        ("utm_drought", "survivability", 0.2006, "align"),
+        ("seed_survival_need", "ethical_legibility", 5.3515, "align"),
+        ("seed_survival_need", "harm_cost", 0.2811, "oppose"),
+        ("field_coherence", "survivability", 2.0198, "align"),
+        ("utm_drought", "survivability", 0.0900, "align"),
     ],
     "execution_axis": [
-        ("seed_race_need", "execution_speed", 0.0248, "align"),
-        ("seed_race_need", "decisiveness", 2.1501, "align"),
-        ("seed_race_need", "optionality", 1.2740, "align"),
-        ("seed_urgency", "schedule_inertia", 0.4382, "oppose"),
-        ("seed_competition", "schedule_inertia", 0.1319, "oppose"),
-        ("seed_commercial_motivation", "commercial_drive", 0.1959, "align"),
-        ("seed_international_competition", "state_drive", 0.1476, "align"),
-        ("seed_readiness_gap", "state_drive", 0.2238, "oppose"),
-        ("seed_readiness_gap", "exploration", 0.4353, "oppose"),
+        ("seed_race_need", "execution_speed", 0.0624, "align"),
+        ("seed_race_need", "decisiveness", 3.8812, "align"),
+        ("seed_race_need", "optionality", 1.6545, "align"),
+        ("seed_urgency", "schedule_inertia", 0.6321, "oppose"),
+        ("seed_competition", "schedule_inertia", 0.0656, "oppose"),
+        ("seed_commercial_motivation", "commercial_drive", 0.2339, "align"),
+        ("seed_international_competition", "state_drive", 0.3026, "align"),
+        ("seed_readiness_gap", "state_drive", 0.0770, "oppose"),
+        ("seed_readiness_gap", "exploration", 0.9532, "oppose"),
     ],
     "coordination_axis": [
-        ("seed_coordination_need", "coordination", 0.0100, "align"),
-        ("seed_coordination_need", "ethical_legibility", 0.0428, "align"),
+        ("seed_coordination_need", "coordination", 0.0578, "align"),
+        ("seed_coordination_need", "ethical_legibility", 0.0410, "align"),
     ],
     "institution_axis": [
-        ("seed_institution_need", "institutional_capacity", 0.2210, "align"),
-        ("seed_institution_need", "evidence_maturity", 7.3499, "align"),
-        ("seed_institution_need", "ethical_legibility", 0.0415, "align"),
-        ("best_feasibility", "institutional_capacity", 0.0605, "align"),
+        ("seed_institution_need", "institutional_capacity", 0.1912, "align"),
+        ("seed_institution_need", "evidence_maturity", 11.6631, "align"),
+        ("seed_institution_need", "ethical_legibility", 0.1321, "align"),
+        ("best_feasibility", "institutional_capacity", 0.0906, "align"),
     ],
     "risk_axis": [
-        ("seed_risk_tolerance", "risk_appetite", 0.0512, "align"),
-        ("seed_risk_tolerance", "exploration", 1.5478, "align"),
-        ("vein_risk_mean", "risk_appetite", 0.0360, "oppose"),
+        ("seed_risk_tolerance", "risk_appetite", 0.0100, "align"),
+        ("seed_risk_tolerance", "exploration", 2.4447, "align"),
+        ("vein_risk_mean", "risk_appetite", 0.0154, "oppose"),
     ],
 }
 
@@ -569,18 +571,18 @@ def _compute_affinity(
 
 # 可训练的交叉权重
 CROSS_WEIGHTS = {
-    "crisis_moderate_bonus": 0.0277,
-    "reckless_in_race_penalty": 0.0100,
-    "joint_urgency_bonus": 0.1607,
-    "no_race_conserv_bonus": 0.2105,
-    "inaction_penalty": 0.1092,
-    "optionality_bonus": 1.3102,
-    "ethical_legibility_bonus": 0.0100,
-    "novelty_readiness_penalty": 0.0972,
-    "decisive_containment_bonus": 0.0800,
-    "platform_guardrail_bonus": 0.1200,
-    "visibility_legitimacy_bonus": 0.1000,
-    "deployability_bonus": 0.1000,
+    "crisis_moderate_bonus": 0.0181,
+    "reckless_in_race_penalty": 0.0393,
+    "joint_urgency_bonus": 0.0703,
+    "no_race_conserv_bonus": 0.6574,
+    "inaction_penalty": 0.2869,
+    "optionality_bonus": 0.8730,
+    "ethical_legibility_bonus": 0.1316,
+    "novelty_readiness_penalty": 0.1034,
+    "decisive_containment_bonus": 0.1375,
+    "platform_guardrail_bonus": 0.0970,
+    "visibility_legitimacy_bonus": 0.1230,
+    "deployability_bonus": 0.0865,
 }
 
 
