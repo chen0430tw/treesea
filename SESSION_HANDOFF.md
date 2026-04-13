@@ -1,6 +1,6 @@
 # treesea Session Handoff
 
-> 2026-04-13，更新
+> 2026-04-13，最终更新
 
 ---
 
@@ -10,70 +10,70 @@
 
 ## 七系统当前状态
 
-| 系统 | 目录 | 文件数 | 状态 |
-|------|------|--------|------|
-| **Tree Diagram** | `tree_diagram/` | 95 .py | ✅ 开发完成，集群测试过 |
-| **QCU** | `qcu/` | 77 .py | ✅ 开发完成，新增 torch fused solver (49x 加速) |
-| **OPU** | `opu/` | 11 .py | ✅ 从 APT-Transformer 迁入 |
-| **MOROZ** | `moroz/` | 60 .py | ✅ core + HCE + scheduler + QCU core |
-| **Honkai Core** | `honkai_core/` | 18 .py | ✅ **本次完成**，全部实现 |
-| **HCE** | `hce/` | 29 .py | ✅ **本次完成**，全部实现 |
+| 系统 | 目录 | 状态 |
+|------|------|------|
+| **Tree Diagram** | `tree_diagram/` | ✅ 开发完成 |
+| **QCU** | `qcu/` | ✅ torch fused solver (49x 加速) |
+| **OPU** | `opu/` | ✅ 从 APT-Transformer 迁入 |
+| **MOROZ** | `moroz/` | ✅ core + HCE + scheduler |
+| **Honkai Core** | `honkai_core/` | ✅ 本次完成 |
+| **HCE** | `hce/` | ✅ 本次完成 |
 
 ## 本次会话完成的事（2026-04-13）
 
-### Honkai Core — 从 placeholder 到完整实现（18 文件）
+### 1. Honkai Core 完整实现（18 文件）
 
-**io/**
-- `risk_schema.py` — 7 个 dataclass：RiskEntry, RiskSurface, EnergyEstimate, ThresholdAssessment, RewriteAssessment, Recommendation, HCReportBundle
-- `threshold_schema.py` — ThresholdScanPoint + ThresholdScanResult
-- `scenario_loader.py` — ScenarioConfig + CandidateSpec + YAML/JSON 加载
-- `energy_report_writer.py` — Bundle/JSONL/文本摘要落盘
+- io/: HCReportBundle, RiskEntry, EnergyEstimate, ThresholdAssessment, ThresholdScanResult, ScenarioConfig
+- models/: energy_model (G_H/D_H/Gamma_H), threshold_model, coupling_model, rewrite_model
+- runtime/: HonkaiCoreRunner 4 步流水线
+- cli/: run_local, submit, inspect
 
-**models/**
-- `energy_model.py` — 崩坏能估计 (G_H, D_H, Γ_H, ρ_H, 增益/稳态/衰竭判定)
-- `threshold_model.py` — 阈值分析 (成熟度 M(U_i), 越限判定, 参数扫描)
-- `coupling_model.py` — 树海耦合 (耦合强度, 能量传递, 共振, 稳定性)
-- `rewrite_model.py` — 改写评估 (风险加权, 稳定化代价, 行动建议)
+### 2. HCE 完整实现（29 文件）
 
-**runtime + cli/**
-- `runner.py` — HonkaiCoreRunner: 4 步流水线 → HCReportBundle
-- CLI: run_local / submit / inspect 三入口
+- io/: RequestBundle, FinalReportBundle, PipelineConfig (6 模式)
+- bridges/: TD/QCU/HC I/O 桥接 + 弱回写
+- integration/: PipelineController, ResultMerger, candidate_attention
+- runtime/: HCERunner, CheckpointManager, FaultToleranceHandler, Launcher
+- cli/: run_local, submit, inspect + TUI 入口
+- tui/: 5 面板
 
-### HCE — 从 placeholder 到完整实现（29 文件）
+### 3. QCU torch fused Lindblad solver
 
-**io/** — RequestBundle, FinalReportBundle, PipelineConfig (6 种运行模式)
-**bridges/** — TD/QCU/HC 三系统 I/O 桥接 + 弱回写 feedback
-**integration/** — TD→QCU, QCU→HC 阶段桥接, PipelineController, ResultMerger
-**runtime/** — HCERunner, CheckpointManager, FaultToleranceHandler, Launcher
-**cli/** — run_local / submit / inspect + TUI 入口
-**tui/** — 5 面板: 主菜单 / 状态总览 / 任务提交 / 队列状态 / 结果浏览
+- lindblad_torch.py: torch.bmm batched matmul
+- 49x 加速 (d=4: 1329s → 27s)
+- cupy/torch CUDA context 冲突已修
+- complex64 全链路适配（登录节点兼容）
 
-### QCU — torch fused Lindblad solver（新增）
+### 4. 注意力评分系统 (candidate_attention.py)
 
-- `qcu/core/lindblad_torch.py` — FusedLindbladSolver
-  - collapse operators 堆成 batch tensor，用 torch.bmm 替代 Python for 循环
-  - 参考 FlashMLA 设计：减少 Python↔GPU 搬运次数
-- `qcu/core/iqpu_runtime.py` — 新增 `run_qcl_v6_fused()` 方法
-- `qcu/runtime/runner.py` — 自动检测 torch+CUDA → 启用 fused solver
+**v1 → v2 重写（Codex 协助优化）：**
+- 三阶段架构：AFFINITY → CONSTRAINT → NORMALIZE
+- 语义坍缩：TD 特征 → 4 主轴 (survival/race/coordination/institution)
+- 候选身份语义：从 label 提取 joint/nasa/spacex 等标签
+- 可解释 breakdown 输出
+- Tensorearch 审计：0 findings
 
-**性能对比 (d=4, Nq=3, Nm=3, 12 candidates, RTX 3070):**
+### 5. 实际场景测试
 
-| 版本 | QCU 耗时 | 加速比 |
-|------|---------|--------|
-| cupy 原版 (full_physics) | 1329s | 1x |
-| cupy fast_search | 426s | 3.1x |
-| **torch fused** | **27s** | **49x** |
+| 场景 | 结果 | 耗时 |
+|------|------|------|
+| 崩坏能三态观测 | 稳态/增益/临界 正确区分 | <1s |
+| 大智若愚对偶性 | symmetry=1.0 对偶成立 | 28s |
+| 御坂网络同步危机 | Faction C 最佳桥接 | 29s (d=4) |
+| 台湾能源转型 | balanced_diverse #1 | 24s |
+| 火星登陆预测 | SpaceX+NASA joint 2033 #1 | 22s |
+| TMSR vs SMR 核能 | SMR 批量化 #1, Hybrid #3 | 24s |
+| AGI 时间线 | China state-backed 2035 #1 | 36s |
 
-d=6 torch fused: 728s（可跑，CPU 原版根本跑不完）
+### 6. 集群验证
 
-### 整机流水线验证
+- nano5 H100: Honkai Core 通过, HCE 整机 d=4 通过 (21s), d=6 通过 (276s)
+- complex64 全链路适配解决登录节点内存限制
 
-- Tree Diagram → QCU → Honkai Core → HCE Merge 全链路跑通
-- 场景: Misaka Network Synchronization Crisis (20000 Sisters, 3 Factions)
-- d=4: 29s 完成, d=6: 730s 完成
-- 崩坏能观测: 3 场景（稳态/增益/临界）+ 耦合强度阈值扫描
+### 7. Tensorearch diagnose 功能优化
 
-### 集群同步状态
-
-- nano5 上 tree_diagram/ 与本地完全一致
-- honkai_core/ 和 hce/ 的新代码尚未同步到集群
+- _logic_labels 保守化（module 级不做全文搜索）
+- shell strengths 去重
+- derived_parameter_fallback 改成邻近检测
+- shell/python entropy_clusters 结构统一
+- _score_mutations 扩大变量名集合

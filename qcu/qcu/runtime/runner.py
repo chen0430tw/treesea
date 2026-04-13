@@ -112,6 +112,11 @@ class QCURunner:
                     final_n=result.final_n,
                     final_rel_phase=result.final_rel_phase,
                     elapsed_sec=result.elapsed_sec,
+                    metadata={
+                        **params,
+                        "candidate_id": candidate.candidate_id,
+                        "cluster_id": cluster_plan.cluster_id,
+                    },
                 ))
 
         total_elapsed = time.time() - t_total_start

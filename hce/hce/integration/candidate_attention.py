@@ -58,11 +58,26 @@ def extract_td_features(tree_output: dict) -> Dict[str, float]:
     total_branches = sum(branch_hist.values()) if branch_hist else 1
     features["branch_active_ratio"] = branch_hist.get("active", 0) / max(total_branches, 1)
 
+    # 从 Tree 语义摘要中恢复环境阻力
+    contradiction = oracle.get("core_contradiction", "")
+    resistance = 0.0
+    for word in ("resist", "drag", "noise", "fail", "crisis", "pressure", "conflict"):
+        if word in contradiction.lower():
+            resistance += 0.15
+    features["env_resistance"] = min(resistance, 1.0)
+
     return features
 
 
 def extract_candidate_features(candidate_params: dict) -> Dict[str, float]:
-    """从 QCU 候选参数提取 6 维特征向量。"""
+    """从 QCU 候选参数提取特征向量。"""
+    raw = _extract_candidate_raw_features(candidate_params)
+    semantic = _extract_candidate_identity_features(candidate_params)
+    return _collapse_candidate_semantics(raw, semantic)
+
+
+def _extract_candidate_raw_features(candidate_params: dict) -> Dict[str, float]:
+    """提取候选的原始物理/数值特征。"""
     gamma_pcm = candidate_params.get("gamma_pcm", 0.15)
     gamma_boost = candidate_params.get("gamma_boost", 0.7)
     boost_duration = candidate_params.get("boost_duration", 2.5)
@@ -78,9 +93,87 @@ def extract_candidate_features(candidate_params: dict) -> Dict[str, float]:
         "aggressiveness": aggressiveness,
         "patience": patience,
         "risk_appetite": risk_appetite,
-        # 派生特征
         "balance": 1.0 - abs(conservatism - aggressiveness),
         "recklessness": aggressiveness * (1.0 - 0.5 * conservatism - 0.3 * patience),
+    }
+
+
+def _extract_candidate_identity_features(candidate_params: dict) -> Dict[str, float]:
+    """从 label/candidate_id 提取候选身份语义。"""
+    label = str(candidate_params.get("label", "")).lower()
+    candidate_id = str(candidate_params.get("candidate_id", "")).lower()
+    text = f"{label} {candidate_id}"
+
+    token_map = _build_candidate_token_map(text)
+    institutional_support = _compute_institutional_support(token_map)
+
+    return {
+        "alliance_synergy": float(token_map["joint"]),
+        "institutional_support": institutional_support,
+        "commercial_drive": float(token_map["spacex"]),
+        "state_drive": float(token_map["china"]),
+        "schedule_inertia": float(token_map["slip"]),
+    }
+
+
+def _match_any(text: str, tokens: tuple[str, ...]) -> bool:
+    return any(token in text for token in tokens)
+
+
+def _build_candidate_token_map(text: str) -> Dict[str, bool]:
+    token_specs = {
+        "spacex": ("spacex",),
+        "nasa": ("nasa", "artemis"),
+        "china": ("china", "tianwen"),
+        "slip": ("slip", "delay", "2045"),
+    }
+    token_map = {name: _match_any(text, tokens) for name, tokens in token_specs.items()}
+    token_map["joint"] = _has_joint_marker(text)
+    token_map["joint"] = token_map["joint"] or (token_map["spacex"] and token_map["nasa"])
+    return token_map
+
+
+def _compute_institutional_support(token_map: Dict[str, bool]) -> float:
+    return min(
+        1.0,
+        0.7 * float(token_map["nasa"])
+        + 0.6 * float(token_map["china"])
+        + 0.2 * float(token_map["spacex"]),
+    )
+
+
+def _has_joint_marker(text: str) -> bool:
+    return ("+" in text) or ("joint" in text)
+
+
+def _collapse_candidate_semantics(
+    raw_features: Dict[str, float],
+    semantic_features: Dict[str, float],
+) -> Dict[str, float]:
+    """将候选原始特征和身份语义坍缩为少量候选潜变量。"""
+    conservatism = raw_features["conservatism"]
+    patience = raw_features["patience"]
+    risk_appetite = raw_features["risk_appetite"]
+    aggressiveness = raw_features["aggressiveness"]
+
+    alliance_synergy = semantic_features["alliance_synergy"]
+    institutional_support = semantic_features["institutional_support"]
+    commercial_drive = semantic_features["commercial_drive"]
+    state_drive = semantic_features["state_drive"]
+    schedule_inertia = semantic_features["schedule_inertia"]
+
+    survivability = min(1.0, 0.55 * conservatism + 0.25 * patience + 0.20 * (1.0 - risk_appetite))
+    execution_speed = min(1.0, 0.65 * aggressiveness + 0.20 * commercial_drive + 0.15 * (1.0 - schedule_inertia))
+    coordination = min(1.0, 0.70 * alliance_synergy + 0.30 * institutional_support)
+    institutional_capacity = institutional_support
+
+    return {
+        **raw_features,
+        **semantic_features,
+        "survivability": survivability,
+        "execution_speed": execution_speed,
+        "coordination": coordination,
+        "institutional_capacity": institutional_capacity,
     }
 
 
@@ -90,93 +183,190 @@ def extract_candidate_features(candidate_params: dict) -> Dict[str, float]:
 
 # 每条规则: (env_feature, cand_feature, weight, mode)
 # mode: "align" = 同向好, "oppose" = 反向好
-# 每个语义关注点只出现一次。
-AFFINITY_RULES = [
-    # --- 环境湍流/危机 → 保守好，激进差 ---
-    ("seed_turbulence", "conservatism", 3.0, "align"),
-    ("seed_turbulence", "recklessness", 2.5, "oppose"),
-    ("seed_noise", "conservatism", 2.0, "align"),
-    ("seed_noise", "risk_appetite", 1.5, "oppose"),
+# 按高频主轴分组，避免重复出现的语义散落成平铺长表。
+AFFINITY_GROUPS = {
+    "survival_axis": [
+        ("seed_survival_need", "survivability", 3.2, "align"),
+        ("seed_survival_need", "recklessness", 2.4, "oppose"),
+        ("field_coherence", "survivability", 0.4, "align"),
+        ("utm_drought", "survivability", 0.4, "align"),
+    ],
+    "execution_axis": [
+        ("seed_race_need", "execution_speed", 2.8, "align"),
+        ("seed_urgency", "schedule_inertia", 1.7, "oppose"),
+        ("seed_competition", "schedule_inertia", 1.3, "oppose"),
+        ("seed_commercial_motivation", "commercial_drive", 1.2, "align"),
+        ("seed_international_competition", "state_drive", 0.4, "align"),
+        ("seed_readiness_gap", "state_drive", 1.0, "oppose"),
+    ],
+    "coordination_axis": [
+        ("seed_coordination_need", "coordination", 2.6, "align"),
+    ],
+    "institution_axis": [
+        ("seed_institution_need", "institutional_capacity", 1.8, "align"),
+        ("best_feasibility", "institutional_capacity", 0.3, "align"),
+    ],
+    "risk_axis": [
+        ("seed_risk_tolerance", "risk_appetite", 1.4, "align"),
+        ("vein_risk_mean", "risk_appetite", 0.4, "oppose"),
+    ],
+}
 
-    # --- 紧迫/竞争 → 速度好，但受 survival_dampening 调制 ---
-    ("seed_urgency", "aggressiveness", 2.5, "align"),
-    ("seed_competition", "aggressiveness", 1.5, "align"),
-    ("seed_pressure", "aggressiveness", 1.5, "align"),
 
-    # --- 稳定环境 → 激进可行 ---
-    ("seed_stability", "aggressiveness", 2.5, "align"),
-    ("seed_stability", "conservatism", 1.5, "oppose"),
+def _collapse_td_semantics(td_features: Dict[str, float]) -> Dict[str, float]:
+    """将离散 seed 特征坍缩为少量可解释的环境主轴。"""
+    collapsed = dict(td_features)
 
-    # --- 技术成熟度 → 决定激进是否可行 ---
-    ("seed_technology_readiness", "aggressiveness", 3.0, "align"),
-    ("seed_tech_readiness", "aggressiveness", 3.0, "align"),
+    turbulence = td_features.get("seed_turbulence", td_features.get("phase_turbulence", 0.0))
+    noise = td_features.get("seed_noise", 0.0)
+    resistance = td_features.get("env_resistance", 0.0)
+    urgency = td_features.get("seed_urgency", td_features.get("goal_speed", 0.0))
+    pressure = td_features.get("seed_pressure", 0.0)
+    competition = max(
+        td_features.get("seed_competition", 0.0),
+        td_features.get("seed_international_competition", 0.0),
+    )
+    readiness_gap = td_features.get("seed_readiness_gap", 0.0)
+    political_will = td_features.get("seed_political_will", 0.0)
+    public_interest = td_features.get("seed_public_interest", 0.0)
+    nasa_slip = td_features.get("seed_nasa_schedule_slip_history", 0.0)
 
-    # --- 风险容忍 ---
-    ("seed_risk_tolerance", "risk_appetite", 2.0, "align"),
+    survival_need = min(1.0, 0.35 * turbulence + 0.20 * noise + 0.20 * resistance + 0.25 * readiness_gap)
+    race_dampen = 1.0 - 0.55 * survival_need
+    race_need = min(1.0, (0.45 * urgency + 0.30 * competition + 0.25 * pressure) * race_dampen)
+    coordination_need = min(1.0, 0.65 * readiness_gap + 0.20 * competition + 0.15 * political_will)
+    institution_need = min(1.0, 0.45 * political_will + 0.25 * public_interest + 0.30 * nasa_slip)
 
-    # --- 执行力 ---
-    ("seed_spacex_execution_track_record", "aggressiveness", 2.0, "align"),
-    ("seed_experience", "aggressiveness", 1.5, "align"),
+    collapsed["seed_survival_need"] = survival_need
+    collapsed["seed_race_need"] = race_need
+    collapsed["seed_coordination_need"] = coordination_need
+    collapsed["seed_institution_need"] = institution_need
+    return collapsed
 
-    # --- 延期历史 → 需要耐心 ---
-    ("seed_nasa_schedule_slip_history", "patience", 2.0, "align"),
 
-    # --- 政治意愿 → 长期可行 ---
-    ("seed_political_will", "patience", 1.5, "align"),
-    ("seed_political_will_china", "aggressiveness", 1.5, "align"),
-    ("seed_commercial_motivation", "aggressiveness", 1.5, "align"),
+def _score_affinity_group(
+    td_features: Dict[str, float],
+    cand_features: Dict[str, float],
+    rules: List[tuple[str, str, float, str]],
+) -> tuple[float, float]:
+    """计算单个语义主轴的加权得分。"""
+    score = 0.0
+    total_weight = 0.0
 
-    # --- 竞争中平衡策略好 ---
-    ("seed_competition", "balance", 2.0, "align"),
+    for env_key, cand_key, weight, mode in rules:
+        env_val = td_features.get(env_key, -1.0)
+        if env_val < 0:
+            continue
 
-    # --- TD 固有特征（权重较低，不主导） ---
-    ("field_coherence", "conservatism", 0.5, "align"),
-    ("governance_drag", "patience", 0.5, "align"),
-    ("vein_risk_mean", "risk_appetite", 0.5, "oppose"),
-    ("best_feasibility", "patience", 0.3, "align"),
-    ("utm_flood", "aggressiveness", 0.3, "align"),
-    ("utm_drought", "conservatism", 0.5, "align"),
-]
+        cand_val = cand_features.get(cand_key, 0.5)
+        contribution = env_val * cand_val if mode == "align" else env_val * (1.0 - cand_val)
+        score += weight * contribution
+        total_weight += weight
+
+    return score, total_weight
+
+
+def _score_survival_axis(td_features: Dict[str, float], cand_features: Dict[str, float]) -> tuple[float, float]:
+    return _score_affinity_group(td_features, cand_features, AFFINITY_GROUPS["survival_axis"])
+
+
+def _score_execution_axis(td_features: Dict[str, float], cand_features: Dict[str, float]) -> tuple[float, float]:
+    return _score_affinity_group(td_features, cand_features, AFFINITY_GROUPS["execution_axis"])
+
+
+def _score_coordination_axis(td_features: Dict[str, float], cand_features: Dict[str, float]) -> tuple[float, float]:
+    return _score_affinity_group(td_features, cand_features, AFFINITY_GROUPS["coordination_axis"])
+
+
+def _score_institution_axis(td_features: Dict[str, float], cand_features: Dict[str, float]) -> tuple[float, float]:
+    return _score_affinity_group(td_features, cand_features, AFFINITY_GROUPS["institution_axis"])
+
+
+def _score_risk_axis(td_features: Dict[str, float], cand_features: Dict[str, float]) -> tuple[float, float]:
+    return _score_affinity_group(td_features, cand_features, AFFINITY_GROUPS["risk_axis"])
+
+
+def _score_affinity_breakdown(
+    td_features: Dict[str, float],
+    cand_features: Dict[str, float],
+) -> Dict[str, float]:
+    """按语义主轴返回归一化后的 affinity breakdown。"""
+    group_scores = {
+        "survival_axis": _score_survival_axis(td_features, cand_features),
+        "execution_axis": _score_execution_axis(td_features, cand_features),
+        "coordination_axis": _score_coordination_axis(td_features, cand_features),
+        "institution_axis": _score_institution_axis(td_features, cand_features),
+        "risk_axis": _score_risk_axis(td_features, cand_features),
+    }
+
+    weighted_sum = 0.0
+    total_weight = 0.0
+    breakdown: Dict[str, float] = {}
+    for axis_name, (axis_score, axis_weight) in group_scores.items():
+        breakdown[axis_name] = axis_score / max(axis_weight, 1e-8) if axis_weight > 0 else 0.0
+        weighted_sum += axis_score
+        total_weight += axis_weight
+
+    breakdown["total"] = weighted_sum / max(total_weight, 1e-8)
+    return breakdown
 
 
 def _compute_affinity(
     td_features: Dict[str, float],
     cand_features: Dict[str, float],
-    survival_dampen: float,
 ) -> float:
-    """Stage 1: 计算单个候选的亲和度分数。
-
-    survival_dampen [0, 1]: 越高表示越危急，urgency 的激进驱动被抑制。
-    """
-    score = 0.0
-    total_weight = 0.0
-
-    for env_key, cand_key, weight, mode in AFFINITY_RULES:
-        env_val = td_features.get(env_key, -1.0)
-        if env_val < 0:
-            continue  # 该特征未定义，跳过（不用 fallback 0.5）
-
-        cand_val = cand_features.get(cand_key, 0.5)
-
-        # survival dampening: 危急时抑制 urgency/competition 对激进的驱动
-        effective_weight = weight
-        if survival_dampen > 0.3 and env_key in ("seed_urgency", "seed_pressure") and mode == "align":
-            effective_weight *= (1.0 - 0.7 * survival_dampen)
-
-        if mode == "align":
-            contribution = env_val * cand_val
-        else:
-            contribution = env_val * (1.0 - cand_val)
-
-        score += effective_weight * contribution
-        total_weight += effective_weight
-
-    return score / max(total_weight, 1e-8)
+    """Stage 1: 计算单个候选的亲和度分数。"""
+    return _score_affinity_breakdown(td_features, cand_features)["total"]
 
 
 # ================================================================
 # Stage 2: CONSTRAINT — 硬约束（每个关注点只处理一次）
 # ================================================================
+
+
+def _get_td_readiness(td_features: Dict[str, float], default: float = -1.0) -> float:
+    """统一读取技术成熟度 seed。"""
+    return max(
+        td_features.get("seed_technology_readiness", default),
+        td_features.get("seed_tech_readiness", default),
+    )
+
+
+def _apply_readiness_penalty(
+    score: float,
+    td_features: Dict[str, float],
+    cand_features: Dict[str, float],
+) -> float:
+    """低成熟度下抑制冒进候选。"""
+    tr = _get_td_readiness(td_features)
+    recklessness = cand_features.get("recklessness", 0.0)
+    if not _needs_readiness_penalty(tr, recklessness):
+        return score
+
+    penalty = _compute_readiness_penalty(tr, recklessness)
+    return score * max(penalty, 0.5)
+
+
+def _apply_extremeness_penalty(score: float, cand_features: Dict[str, float]) -> float:
+    """惩罚过于保守或过于激进的极端方案。"""
+    if _is_extreme_candidate(cand_features):
+        return score * 0.8
+    return score
+
+
+def _needs_readiness_penalty(tr: float, recklessness: float) -> bool:
+    return tr >= 0 and tr < 0.5 and recklessness > 0.3
+
+
+def _compute_readiness_penalty(tr: float, recklessness: float) -> float:
+    tech_gap = (0.5 - tr) / 0.5
+    return 1.0 - tech_gap * (recklessness - 0.3) * 0.4
+
+
+def _is_extreme_candidate(cand_features: Dict[str, float]) -> bool:
+    aggr = cand_features.get("aggressiveness", 0.5)
+    conserv = cand_features.get("conservatism", 0.5)
+    return aggr > 0.9 or conserv > 0.9
 
 def _apply_constraints(
     raw_score: float,
@@ -187,26 +377,8 @@ def _apply_constraints(
 
     每条约束独立、不重叠。约束只能降低分数（cap），不能加分。
     """
-    s = raw_score
-
-    # C1: 技术不成熟 + 冒进 → 轻度惩罚（不 cap，乘性衰减）
-    tr = max(
-        td_features.get("seed_technology_readiness", -1),
-        td_features.get("seed_tech_readiness", -1),
-    )
-    recklessness = cand_features.get("recklessness", 0.0)
-    if tr >= 0 and tr < 0.5 and recklessness > 0.3:
-        tech_gap = (0.5 - tr) / 0.5
-        penalty = 1.0 - tech_gap * (recklessness - 0.3) * 0.4
-        s *= max(penalty, 0.5)
-
-    # C2: 极端策略惩罚（过于保守或过于激进）
-    aggr = cand_features.get("aggressiveness", 0.5)
-    conserv = cand_features.get("conservatism", 0.5)
-    if aggr > 0.9 or conserv > 0.9:
-        s *= 0.8
-
-    return s
+    score = _apply_readiness_penalty(raw_score, td_features, cand_features)
+    return _apply_extremeness_penalty(score, cand_features)
 
 
 # ================================================================
@@ -216,43 +388,131 @@ def _apply_constraints(
 def _softmax_normalize(scores: List[float], temperature: float) -> List[float]:
     """Stage 3: softmax 归一化到 [0.1, 0.95]。"""
     if len(scores) <= 1:
-        return [max(0.1, min(0.95, s)) for s in scores]
+        return [_clamp_score(s) for s in scores]
 
     s_mean = sum(scores) / len(scores)
     s_std = (sum((s - s_mean) ** 2 for s in scores) / len(scores)) ** 0.5
     if s_std < 1e-8:
         return [0.5] * len(scores)
 
-    z_scores = [(s - s_mean) / s_std / temperature for s in scores]
+    z_scores = _compute_z_scores(scores, s_mean, s_std, temperature)
     exp_scores = [math.exp(min(z, 10)) for z in z_scores]
     exp_sum = sum(exp_scores)
     softmax = [e / exp_sum for e in exp_scores]
+    return _stretch_softmax_scores(softmax)
 
-    sm_max = max(softmax)
-    sm_min = min(softmax)
+
+def _compute_z_scores(scores: List[float], mean: float, std: float, temperature: float) -> List[float]:
+    return [(score - mean) / std / temperature for score in scores]
+
+
+def _stretch_softmax_scores(softmax_scores: List[float]) -> List[float]:
+    sm_max = max(softmax_scores)
+    sm_min = min(softmax_scores)
     sm_range = sm_max - sm_min if sm_max > sm_min else 1.0
+    return [_clamp_score(0.1 + 0.85 * (sm - sm_min) / sm_range) for sm in softmax_scores]
 
-    return [
-        max(0.1, min(0.95, 0.1 + 0.85 * (sm - sm_min) / sm_range))
-        for sm in softmax
-    ]
+
+def _clamp_score(score: float) -> float:
+    return max(0.1, min(0.95, score))
 
 
 # ================================================================
 # 公开 API
 # ================================================================
 
-def _compute_survival_priority(td_features: Dict[str, float]) -> float:
-    """估计是否应进入 survival-first 模式。"""
-    turbulence = td_features.get("seed_turbulence", td_features.get("phase_turbulence", 0.0))
-    noise = td_features.get("seed_noise", 0.0)
-    tr = max(
-        td_features.get("seed_technology_readiness", 0.5),
-        td_features.get("seed_tech_readiness", 0.5),
-    )
-    fragility = 1.0 - tr
-    pressure = 0.5 * turbulence + 0.3 * noise + 0.2 * td_features.get("env_resistance", 0.0)
-    return max(0.0, min(1.0, pressure * (0.55 + 0.45 * fragility)))
+
+def _get_candidate_payload(candidate: Dict[str, Any]) -> Dict[str, Any]:
+    """兼容直接 payload 和包装后的候选对象。"""
+    if _is_payload_dict(candidate):
+        return candidate
+    return _unwrap_candidate_payload(candidate)
+
+
+def _is_payload_dict(candidate: Dict[str, Any]) -> bool:
+    return isinstance(candidate, dict) and "gamma_pcm" in candidate
+
+
+def _unwrap_candidate_payload(candidate: Dict[str, Any]) -> Dict[str, Any]:
+    return candidate.get("payload", candidate)
+
+
+def _score_candidate(td_features: Dict[str, float], candidate: Dict[str, Any]) -> float:
+    """执行单个候选的 affinity + constraints。"""
+    return _score_candidate_details(td_features, candidate)["constrained_score"]
+
+
+def _score_candidate_details(
+    td_features: Dict[str, float],
+    candidate: Dict[str, Any],
+) -> Dict[str, Any]:
+    """执行单个候选评分，并返回各主轴 breakdown。"""
+    payload = _get_candidate_payload(candidate)
+    cand_features = extract_candidate_features(payload)
+    affinity_breakdown = _score_affinity_breakdown(td_features, cand_features)
+    raw_score = affinity_breakdown["total"]
+    constrained_score = _apply_constraints(raw_score, td_features, cand_features)
+    return {
+        "candidate_features": cand_features,
+        "affinity_breakdown": affinity_breakdown,
+        "raw_score": raw_score,
+        "constrained_score": constrained_score,
+    }
+
+
+def _prepare_td_features(td_features: Dict[str, float]) -> Dict[str, float]:
+    """统一准备用于候选评分的 TD 特征。"""
+    prepared = _collapse_td_semantics(td_features)
+    return _inject_readiness_gap(prepared)
+
+
+def _inject_readiness_gap(td_features: Dict[str, float]) -> Dict[str, float]:
+    tr = _get_td_readiness(td_features)
+    return td_features if tr < 0 else _with_readiness_gap(td_features, tr)
+
+
+def _with_readiness_gap(td_features: Dict[str, float], readiness: float) -> Dict[str, float]:
+    prepared = dict(td_features)
+    prepared["seed_readiness_gap"] = max(0.0, 1.0 - readiness)
+    return prepared
+
+
+def _normalize_candidate_scores(
+    td_features: Dict[str, float],
+    candidates: List[Dict[str, Any]],
+    temperature: float,
+) -> List[float]:
+    constrained_scores = [_score_candidate(td_features, cand) for cand in candidates]
+    return _softmax_normalize(constrained_scores, temperature)
+
+
+def _build_attention_details(
+    td_features: Dict[str, float],
+    candidates: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    return [_score_candidate_details(td_features, cand) for cand in candidates]
+
+
+def _empty_attention_result() -> Dict[str, Any]:
+    return {"scores": [], "details": []}
+
+
+def _compute_attention_result(
+    td_features: Dict[str, float],
+    candidates: List[Dict[str, Any]],
+    temperature: float,
+) -> Dict[str, Any]:
+    if not candidates:
+        return _empty_attention_result()
+
+    prepared_td = _prepare_td_features(td_features)
+    details = _build_attention_details(prepared_td, candidates)
+    constrained_scores = [detail["constrained_score"] for detail in details]
+    scores = _softmax_normalize(constrained_scores, temperature)
+    return {
+        "scores": scores,
+        "details": details,
+    }
 
 
 def compute_attention_scores(
@@ -262,27 +522,20 @@ def compute_attention_scores(
 ) -> List[float]:
     """三阶段注意力评分。
 
-    Stage 1: AFFINITY — 线性注意力 + survival dampening
+    Stage 1: AFFINITY — 线性注意力
     Stage 2: CONSTRAINT — 硬约束 cap
     Stage 3: NORMALIZE — softmax → [0.1, 0.95]
     """
-    if not candidates:
-        return []
+    return _compute_attention_result(td_features, candidates, temperature)["scores"]
 
-    survival = _compute_survival_priority(td_features)
 
-    # Stage 1 + 2: per-candidate
-    constrained_scores = []
-    for cand in candidates:
-        payload = cand if isinstance(cand, dict) and "gamma_pcm" in cand else cand.get("payload", cand)
-        cf = extract_candidate_features(payload)
-
-        raw = _compute_affinity(td_features, cf, survival)
-        constrained = _apply_constraints(raw, td_features, cf)
-        constrained_scores.append(constrained)
-
-    # Stage 3
-    return _softmax_normalize(constrained_scores, temperature)
+def compute_attention_details(
+    td_features: Dict[str, float],
+    candidates: List[Dict[str, Any]],
+    temperature: float = 1.0,
+) -> Dict[str, Any]:
+    """返回注意力分数和每个候选的主轴贡献 breakdown。"""
+    return _compute_attention_result(td_features, candidates, temperature)
 
 
 def compute_auto_herrscher_risk(

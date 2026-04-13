@@ -126,7 +126,7 @@ class HonkaiCoreIOBridge:
         # === 注意力评分：每个候选获得差异化的 tree_score ===
         from ..integration.candidate_attention import (
             extract_td_features,
-            compute_attention_scores,
+            compute_attention_details,
             compute_auto_herrscher_risk,
         )
 
@@ -162,9 +162,11 @@ class HonkaiCoreIOBridge:
             cand_payloads.append(payload)
 
         # 计算注意力分数 → tree_score
-        attention_scores = compute_attention_scores(
+        attention_result = compute_attention_details(
             td_features, cand_payloads, temperature=1.0
         )
+        attention_scores = attention_result["scores"]
+        attention_details = attention_result["details"]
 
         # === 构建候选 ===
         candidates = []
@@ -174,6 +176,9 @@ class HonkaiCoreIOBridge:
             c_end = sea_entry.get("C_end", sea_entry.get("collapse_score", 0.5))
 
             tree_score = attention_scores[i] if i < len(attention_scores) else 0.5
+            attention_breakdown = {}
+            if i < len(attention_details):
+                attention_breakdown = attention_details[i].get("affinity_breakdown", {})
             stability = 1.0 - c_end
             noise = abs(sea_entry.get("dtheta_end", 0.1))
 
@@ -189,6 +194,7 @@ class HonkaiCoreIOBridge:
                     "stability": stability,
                     "noise": noise,
                     "herrscherization_risk": herrscher_risk,
+                    "attention_breakdown": attention_breakdown,
                 },
             })
 
