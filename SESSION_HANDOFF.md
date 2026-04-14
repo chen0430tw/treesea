@@ -99,10 +99,16 @@ treesea 是一个以崩坏学 / 崩坏能学 / 树海体系为理论框架的多
 5. **衍生品定价**：期权不对称收益
 6. **额外数据源**：宏观变量、新闻情绪、链上数据
 
-### LASA 集成
-1. LASA → CFPAI 接口：可支配+已实现+自由资产 → CFPAI 输入
+### LASA 集成（LASA 是独立项目 D:\LASA，不捆绑在 treesea 里）
+1. LASA → CFPAI API 对接：可支配+已实现+自由资产 → CFPAI 输入
 2. CFPAI 杠杆部位 → LASA 标记为借入+受限+未实现
 3. 循环加杠杆防护
+
+### CFPAI + 大模型
+1. **新闻情绪输入**（白皮书 n_t）：LLM 读财经新闻 → 情绪分数 → 喂给评分公式（可能突破 Sharpe 1.82）
+2. **Agent 自然语言交互**：接 Claude API，用自然语言操作 CFPAI（router.py 已有意图分类基础）
+3. **策略解释生成**：Maxwell Demon 的择时决策 → LLM 生成人话报告
+4. **异常资金检测**：LASA 标记的异常资金流 → LLM 语义分析
 
 ### Tensorearch
 1. PyPI 发布准备（Codex 已开始，pyproject.toml 需改版本号+加 scripts）
