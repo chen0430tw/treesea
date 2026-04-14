@@ -1,0 +1,179 @@
+{
+  "affinity_groups": {
+    "coordination_axis": [
+      {
+        "env": "seed_coordination_need",
+        "cand": "coordination",
+        "weight": 0.0647,
+        "mode": "align"
+      },
+      {
+        "env": "seed_coordination_need",
+        "cand": "ethical_legibility",
+        "weight": 0.0457,
+        "mode": "align"
+      }
+    ],
+    "execution_axis": [
+      {
+        "env": "seed_race_need",
+        "cand": "execution_speed",
+        "weight": 0.0927,
+        "mode": "align"
+      },
+      {
+        "env": "seed_race_need",
+        "cand": "decisiveness",
+        "weight": 4.621,
+        "mode": "align"
+      },
+      {
+        "env": "seed_race_need",
+        "cand": "optionality",
+        "weight": 1.5771,
+        "mode": "align"
+      },
+      {
+        "env": "seed_urgency",
+        "cand": "schedule_inertia",
+        "weight": 0.3186,
+        "mode": "oppose"
+      },
+      {
+        "env": "seed_competition",
+        "cand": "schedule_inertia",
+        "weight": 0.0688,
+        "mode": "oppose"
+      },
+      {
+        "env": "seed_commercial_motivation",
+        "cand": "commercial_drive",
+        "weight": 0.3751,
+        "mode": "align"
+      },
+      {
+        "env": "seed_international_competition",
+        "cand": "state_drive",
+        "weight": 0.366,
+        "mode": "align"
+      },
+      {
+        "env": "seed_readiness_gap",
+        "cand": "state_drive",
+        "weight": 0.0505,
+        "mode": "oppose"
+      },
+      {
+        "env": "seed_readiness_gap",
+        "cand": "exploration",
+        "weight": 0.7262,
+        "mode": "oppose"
+      }
+    ],
+    "institution_axis": [
+      {
+        "env": "seed_institution_need",
+        "cand": "institutional_capacity",
+        "weight": 0.1475,
+        "mode": "align"
+      },
+      {
+        "env": "seed_institution_need",
+        "cand": "evidence_maturity",
+        "weight": 12.6668,
+        "mode": "align"
+      },
+      {
+        "env": "seed_institution_need",
+        "cand": "ethical_legibility",
+        "weight": 0.0628,
+        "mode": "align"
+      },
+      {
+        "env": "best_feasibility",
+        "cand": "institutional_capacity",
+        "weight": 0.0901,
+        "mode": "align"
+      }
+    ],
+    "risk_axis": [
+      {
+        "env": "seed_risk_tolerance",
+        "cand": "risk_appetite",
+        "weight": 0.01,
+        "mode": "align"
+      },
+      {
+        "env": "seed_risk_tolerance",
+        "cand": "exploration",
+        "weight": 2.4825,
+        "mode": "align"
+      },
+      {
+        "env": "vein_risk_mean",
+        "cand": "risk_appetite",
+        "weight": 0.0106,
+        "mode": "oppose"
+      }
+    ],
+    "survival_axis": [
+      {
+        "env": "seed_survival_need",
+        "cand": "survivability",
+        "weight": 6.5594,
+        "mode": "align"
+      },
+      {
+        "env": "seed_survival_need",
+        "cand": "recklessness",
+        "weight": 0.0787,
+        "mode": "oppose"
+      },
+      {
+        "env": "seed_survival_need",
+        "cand": "optionality",
+        "weight": 0.0686,
+        "mode": "align"
+      },
+      {
+        "env": "seed_survival_need",
+        "cand": "ethical_legibility",
+        "weight": 6.395,
+        "mode": "align"
+      },
+      {
+        "env": "seed_survival_need",
+        "cand": "harm_cost",
+        "weight": 0.5341,
+        "mode": "oppose"
+      },
+      {
+        "env": "field_coherence",
+        "cand": "survivability",
+        "weight": 2.084,
+        "mode": "align"
+      },
+      {
+        "env": "utm_drought",
+        "cand": "survivability",
+        "weight": 0.0947,
+        "mode": "align"
+      }
+    ]
+  },
+  "cross_weights": {
+    "crisis_moderate_bonus": 0.0348,
+    "decisive_containment_bonus": 0.139,
+    "deployability_bonus": 0.1199,
+    "ethical_legibility_bonus": 0.2123,
+    "inaction_penalty": 0.0854,
+    "joint_urgency_bonus": 0.0739,
+    "no_race_conserv_bonus": 0.8273,
+    "novelty_readiness_penalty": 0.129,
+    "optionality_bonus": 0.5709,
+    "platform_guardrail_bonus": 0.0674,
+    "reckless_in_race_penalty": 0.047,
+    "visibility_legitimacy_bonus": 0.0837
+  },
+  "n_params": 37
+}
