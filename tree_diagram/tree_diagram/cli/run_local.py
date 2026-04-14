@@ -33,6 +33,8 @@ def main(argv=None):
     parser.add_argument("--profile", default=None,
                         choices=["quick", "default", "cluster", "deep"],
                         help="Compute profile (default: default)")
+    parser.add_argument("--seed",    default=None,
+                        help="Custom ProblemSeed JSON file (overrides default seed)")
     parser.add_argument("--title",   default=None,
                         help="Override problem title in seed")
     parser.add_argument("--top-k",   type=int, default=None,
@@ -76,7 +78,12 @@ def main(argv=None):
         profile_kwargs["device"] = args.device
 
     # --- Seed ---
-    seed = default_seed()
+    if args.seed:
+        from ..core.problem_seed import ProblemSeed
+        seed = ProblemSeed.from_file(args.seed)
+        print(f"[tree-diagram] seed loaded from {args.seed}: {seed.title}")
+    else:
+        seed = default_seed()
     if cfg_seed.get("title"):
         seed.title = cfg_seed["title"]
     if args.title:
