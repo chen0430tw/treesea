@@ -14,3 +14,4 @@ class CFPAIParams:
     max_assets: int = 3
     cash_floor: float = 0.10           # 最低现金保留 10%
     max_single_weight: float = 0.50    # 单一资产上限 50%
+    scoring_mode: str = "maxwell_demon" # "classic" | "updown_vol" | "maxwell_demon"

@@ -19,7 +19,7 @@ def run_multiasset_planning(symbols: list[str] | None = None, start: str | None 
     frames = download_many_stooq(symbols, start=start, end=end)
     aligned = align_on_date(frames)
     feat = build_feature_pipeline(aligned, symbols)
-    scores = score_assets(feat, symbols, params)
+    scores = score_assets(feat, symbols, params, mode=params.scoring_mode)
     candidates = expand_dynamic_candidates(scores, feat, symbols, params)
     paths = build_path_table(candidates, params)
     weights = build_weight_grid(candidates, symbols, params)
