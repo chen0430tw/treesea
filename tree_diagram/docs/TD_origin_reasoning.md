@@ -518,7 +518,69 @@ TD 里目前涉及的所有"方向可能反"的变量：
    - 如果 pre-eval 和 post-eval 判决矛盾（seed 判 stable 但评估完
      变 critical），先看 proxy 是不是歪了
 
-### 11.5 这一节的教训
+### 11.5 修复前后的复现实验
+
+为了避免"只有我记述"的问题，修复当天做了一次 A/B 复现实验——**同一个
+Singularity Probe 脚本，用 pre-fix 代码和 post-fix 代码各跑一次，对比
+输出**。
+
+复现步骤（这份文档未来的读者可以按这个流程再验一次）：
+
+```bash
+# 1. 保存当前 post-fix 输出
+cp runs/tree_diagram/what_is_singularity.json \
+   runs/tree_diagram/what_is_singularity_post_fix.json
+
+# 2. 回滚两个核心文件到 zone classifier 修复前（9b4e7ee 时的版本）
+git checkout 9b4e7ee -- \
+    tree_diagram/tree_diagram/core/ipl_phase_indexer.py \
+    tree_diagram/tree_diagram/pipeline/candidate_pipeline.py
+
+# 3. 跑同一个脚本，bug 重现
+cd tree_diagram && PYTHONPATH=. python td_what_is_singularity.py
+
+# 4. 保存 pre-fix 输出
+cp runs/tree_diagram/what_is_singularity.json \
+   runs/tree_diagram/what_is_singularity_pre_fix.json
+
+# 5. 恢复到当前 main
+git checkout HEAD -- tree_diagram/tree_diagram/core/ipl_phase_indexer.py \
+                     tree_diagram/tree_diagram/pipeline/candidate_pipeline.py
+```
+
+实验结果（2026-04-19，`diff` 输出关键部分）：
+
+```
+Stable-Baseline zone 分布:
+  pre-fix:  stable=10, transition=0, critical=0
+  post-fix: stable=5,  transition=5, critical=0     ← 边界态分化
+
+Singularity-Probe zone:
+  pre-fix:  "zone": "stable"     ← bug：拉满参数也判 stable
+  post-fix: "zone": "critical"   ← 修复后正确识别
+
+Singularity-Probe zone 分布:
+  pre-fix:  stable=10, transition=0, critical=0
+  post-fix: stable=0,  transition=0, critical=10    ← 全部 10 个候选都坍缩到 critical
+```
+
+**所有连续度量字段（score/risk/feas/stab/p_blow/gain_centroid/phase_spread）
+在 pre-fix 和 post-fix 之间一字不差**，仅有浮点末位精度差（`0.1471642...12`
+vs `0.1471642...127`，16 位精度的最末位漂移，可忽略）。
+
+这证明了三件事：
+
+1. **修复只动了离散 zone 分类器**——SDE、评分、ISSC 等核心逻辑没受影响
+2. **bug 只体现在离散分类层**——连续度量一直是对的
+3. **修复前状态完全可复现**——不是"被覆盖丢了数据"，是"test outputs
+   本来就每次重写，复现只需要一条 git checkout"
+
+两份 JSON 保留在 `runs/tree_diagram/`：
+- `what_is_singularity_pre_fix.json` — bug 在时的状态
+- `what_is_singularity_post_fix.json` — 修复后的状态
+- `what_is_singularity.json` — 永远是最新一次运行（current = post-fix）
+
+### 11.6 这一节的教训
 
 - **"为了防误报而收死门控"和"布下未爆弹"是一回事**。
   防误报是对的，但收到永远不触发就是 bug，不是保守。
@@ -527,6 +589,9 @@ TD 里目前涉及的所有"方向可能反"的变量：
 - **Agent 的帮助不是替你思考，是替你检查**。§10 说 TD 测你的判决一致性；
   这一节说 Agent 也该测你代码里的语义一致性。GPT 帮你想出多信号 OR，
   Claude 帮你发现 phase_final 方向反了。两人互补。
+- **测试输出的"丢失"通常只是懒得做复现实验的借口**。JSON 文件被覆盖不
+  是事故，是正常生命周期。真正的可复现性来自 git 历史 + 确定性脚本，
+  不来自保留每个中间 JSON。
 
 ---
 
