@@ -65,13 +65,33 @@ class CandidatePipeline:
         hydro["ipl_seed"] = ipl_seed
 
         # ── IPL Layer (Layer 2): post-eval index over evaluated candidates ───
+        # v2: pass stability + p_blow into meta so the multi-signal zone
+        # classifier (classify_phase_zone v2) can see all risk dimensions.
         td_list = [
             TDOutputs(
                 riskfield=[r.risk],
                 curve=[r.field_fit, r.feasibility],
                 graph=[],
                 samples={},
-                meta={"phase_final": r.balanced_score, "phase_max": r.field_fit},
+                meta={
+                    # GPT v5 fix: phase_final/phase_max must carry "high = danger"
+                    # semantics for downstream zone classifier. balanced_score /
+                    # field_fit are "high = healthy", so invert and take max with
+                    # risk to align monotonicity. balanced_score kept separately.
+                    "balanced_score": r.balanced_score,
+                    "phase_final": max(
+                        float(r.risk),
+                        float(max(0.0, 1.0 - r.balanced_score)),
+                        float(max(0.0, 1.0 - r.stability)),
+                    ),
+                    "phase_max": max(
+                        float(r.risk),
+                        float(max(0.0, 1.0 - r.field_fit)),
+                        float(max(0.0, 1.0 - r.stability)),
+                    ),
+                    "stability":   r.stability,
+                    "p_blow":      r.risk,  # risk is the per-candidate blow-up proxy
+                },
             )
             for r in top_results
         ]
@@ -95,8 +115,17 @@ class CandidatePipeline:
                 disagree_proxy = max(0.0, 1.0 - r.feasibility),
                 ood_proxy      = r.risk,
                 p_blow_max     = r.risk,
-                phase_max      = r.field_fit,
-                phase_final    = r.balanced_score,
+                # GPT v5 fix: same "high = danger" alignment as td_list above.
+                phase_max      = max(
+                    float(r.risk),
+                    float(max(0.0, 1.0 - r.field_fit)),
+                    float(max(0.0, 1.0 - r.stability)),
+                ),
+                phase_final    = max(
+                    float(r.risk),
+                    float(max(0.0, 1.0 - r.balanced_score)),
+                    float(max(0.0, 1.0 - r.stability)),
+                ),
                 repeatability  = r.stability,
             )
             for r in top_results

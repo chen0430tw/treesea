@@ -26,9 +26,25 @@ from .umdst_kernel import TDOutputs, build_ipl
 # ---------------------------------------------------------------------------
 # Phase zone boundaries
 # ---------------------------------------------------------------------------
+# Legacy: single-axis phase_final threshold (kept for backward compatibility).
+# In practice the 0.85 critical bound is almost never triggered because
+# phase_final (= balanced_score) peaks around 0.55 on healthy cases.
 ZONE_STABLE     = (0.0,  0.55)
 ZONE_TRANSITION = (0.55, 0.85)
 ZONE_CRITICAL   = (0.85, 1.20)
+
+# v2 multi-signal thresholds (calibrated against WW4/COVID/AI singularity tests)
+# Critical zone triggers when ANY of these cross (GPT-suggested OR logic):
+CRITICAL_RISK_TH        = 0.70   # risk above this → critical
+CRITICAL_FEAS_TH        = 0.40   # feasibility below this → critical
+CRITICAL_STAB_TH        = 0.35   # stability below this → critical
+CRITICAL_PBLOW_TH       = 0.70   # blow-up probability above this → critical
+
+# Transition zone triggers on looser thresholds:
+TRANSITION_RISK_TH      = 0.55
+TRANSITION_FEAS_TH      = 0.47
+TRANSITION_STAB_TH      = 0.45
+TRANSITION_PBLOW_TH     = 0.55
 
 COARSE_BINS  = 10
 FINE_BINS    = 20
@@ -80,13 +96,66 @@ class IPLIndex:
 # Phase zone classifier
 # ---------------------------------------------------------------------------
 
-def classify_phase_zone(phase_final: float) -> str:
-    """Map a scalar phase value to a named zone."""
-    if phase_final < ZONE_STABLE[1]:
-        return "stable"
-    if phase_final < ZONE_TRANSITION[1]:
+def classify_phase_zone(
+    phase_final: float,
+    risk: Optional[float] = None,
+    feasibility: Optional[float] = None,
+    stability: Optional[float] = None,
+    p_blow: Optional[float] = None,
+) -> str:
+    """Multi-signal phase zone classifier.
+
+    Legacy behaviour (single-axis phase_final) is preserved when optional
+    signals are None. When they are provided, OR-logic triggers escalation
+    to transition/critical based on calibrated per-signal thresholds.
+
+    GPT-calibration rationale (2026-04-19):
+      - Original strict AND gate never triggered critical in practice
+        (WW4/AI/COVID all returned stable).
+      - New: any single core signal crossing its critical threshold
+        escalates to critical, matching WW4-class civilizational reset
+        while still keeping COVID/AI at transition.
+    """
+    # Legacy single-axis fallback
+    if risk is None and feasibility is None and stability is None and p_blow is None:
+        if phase_final < ZONE_STABLE[1]:
+            return "stable"
+        if phase_final < ZONE_TRANSITION[1]:
+            return "transition"
+        return "critical"
+
+    # v2 multi-signal OR gate (critical first)
+    critical_hit = False
+    if risk is not None and risk >= CRITICAL_RISK_TH:
+        critical_hit = True
+    if feasibility is not None and feasibility <= CRITICAL_FEAS_TH:
+        critical_hit = True
+    if stability is not None and stability <= CRITICAL_STAB_TH:
+        critical_hit = True
+    if p_blow is not None and p_blow >= CRITICAL_PBLOW_TH:
+        critical_hit = True
+    # GPT v5 fix: do NOT let legacy phase_final directly escalate zones in
+    # multi-signal mode. phase_final carries inconsistent semantics across
+    # callers (pre-eval vs post-eval). Zone escalation here relies only on
+    # explicit risk signals (risk/feas/stab/p_blow) whose semantics are fixed.
+    if critical_hit:
+        return "critical"
+
+    # Transition next
+    transition_hit = False
+    if risk is not None and risk >= TRANSITION_RISK_TH:
+        transition_hit = True
+    if feasibility is not None and feasibility <= TRANSITION_FEAS_TH:
+        transition_hit = True
+    if stability is not None and stability <= TRANSITION_STAB_TH:
+        transition_hit = True
+    if p_blow is not None and p_blow >= TRANSITION_PBLOW_TH:
+        transition_hit = True
+    # Same phase_final exclusion rationale as above for the transition gate.
+    if transition_hit:
         return "transition"
-    return "critical"
+
+    return "stable"
 
 
 # ---------------------------------------------------------------------------
@@ -135,13 +204,25 @@ def build_ipl_entry(
     phase_final = td.meta.get("phase_final", z_s[2])
     phase_max   = td.meta.get("phase_max",   z_s[2])
 
+    # v2: pick up multi-signal inputs from td.riskfield / td.curve / td.meta
+    risk_val  = td.riskfield[0] if td.riskfield else None
+    feas_val  = td.curve[1] if len(td.curve) > 1 else None
+    stab_val  = td.meta.get("stability")
+    pblow_val = td.meta.get("p_blow")
+
     entry = IPLEntry(
         path_id=path_id,
         z=z,
         z_s=z_s,
         coarse_key=keys["coarse"],
         variance_key=keys["variance_bin"],
-        phase_zone=classify_phase_zone(phase_final),
+        phase_zone=classify_phase_zone(
+            phase_final,
+            risk=risk_val,
+            feasibility=feas_val,
+            stability=stab_val,
+            p_blow=pblow_val,
+        ),
         phase_final=phase_final,
         phase_max=phase_max,
     )
@@ -229,11 +310,19 @@ class IPLPhaseIndexer:
         subj = self._seed.subject
         phase = float(subj.get("phase_proximity", 0.7))
 
-        # Minimal TDOutputs with a one-bin riskfield / curve
+        # v2: derive a riskfield/feasibility proxy from seed so pre-eval
+        # classification is consistent with post-eval (both see multi-signal).
+        risk_proxy = 0.4 * float(subj.get("phase_proximity", 0.5)) \
+                   + 0.3 * float(subj.get("stress_level", 0.5)) \
+                   + 0.3 * float(subj.get("instability_sensitivity", 0.5))
+        feas_proxy = 0.4 * float(subj.get("aim_coupling", 0.5)) \
+                   + 0.3 * float(subj.get("control_precision", 0.5)) \
+                   + 0.3 * float(subj.get("load_tolerance", 0.5))
+
         td = TDOutputs(
-            riskfield=[phase],
+            riskfield=[risk_proxy],
             graph=[],
-            curve=[phase],
+            curve=[phase, feas_proxy],
             samples={},
             meta={"source": "IPLPhaseIndexer"},
         )
