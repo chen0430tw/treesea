@@ -224,12 +224,20 @@ class WeatherCalibration:
     # (~80° veering at 25°N over 24h). Fitted as circular median(obs-td) across
     # training days. Applied as: corrected_wd = (td_wd + offset) % 360.
     wind_dir_offset_deg: float = 0.0
+    # Per-fit baselines for pressure mapping. Model-dependent: our shallow-water
+    # runs at BASE_H≈5400 with obs-P offset ±24m. Forcing h_baseline=5700 (old
+    # default) made dh dominated by the 300m offset, collapsing the Theil-Sen
+    # ratio fit. Fit-time stores mean(h_ctr) and mean(P_real) so the slope is
+    # a pure (P vs h) regression around the training data's center of mass.
+    h_baseline_m: float = 5700.0
+    p_baseline_hPa: float = 1013.0
 
     def map_temperature(self, T_internal_K: float) -> float:
         return self.T_scale * T_internal_K + self.T_offset_K
 
-    def map_pressure(self, h_center_m: float, h_baseline: float = 5700.0) -> float:
-        return 1013.0 - self.h_to_pressure_k * (h_center_m - h_baseline)
+    def map_pressure(self, h_center_m: float, h_baseline: float | None = None) -> float:
+        hb = self.h_baseline_m if h_baseline is None else h_baseline
+        return self.p_baseline_hPa - self.h_to_pressure_k * (h_center_m - hb)
 
     def map_humidity(self, q_internal: float, T_2m_C: float) -> float:
         e_sat = 6.11 * np.exp(17.27 * T_2m_C / (T_2m_C + 237.3))

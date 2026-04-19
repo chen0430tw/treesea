@@ -92,8 +92,22 @@ P_real = np.array([r["obs"]["P_mean_hPa"] for r in rows])
 Tf = fit_two_param(T_int, T_real); wf = fit_scale_through_origin(win_int, win_real)
 T_2m_C_ts = Tf["theilsen"]["slope"] * T_int + Tf["theilsen"]["intercept"] - 273.15
 q_rh = float(np.median(invert_q_to_rh_ratio(q_int, T_2m_C_ts, RH_real)))
-dh = h_ctr - 5700.0; mask = np.abs(dh) > 10.0
-h2p = float(np.median((1013 - P_real[mask]) / dh[mask])) if mask.sum() >= 3 else 0.02
+# Theil-Sen slope of P vs h around training-data center of mass (not ratio
+# through forced baseline=5700, which swamped the slope when BASE_H=5400).
+# h_to_pressure_k = -slope(P vs h); baselines stored so map_pressure uses
+# them instead of hardcoded (5700, 1013).
+_slopes_Ph = []
+for i in range(len(P_real)):
+    for j in range(i + 1, len(P_real)):
+        _dh = h_ctr[i] - h_ctr[j]
+        if abs(_dh) > 0.1:
+            _slopes_Ph.append((P_real[i] - P_real[j]) / _dh)
+slope_P_h = float(np.median(_slopes_Ph)) if _slopes_Ph else 0.0
+h2p = -slope_P_h   # map_pressure: P = p_base - h2p*(h - h_base)
+h_baseline_fit = float(np.mean(h_ctr))
+p_baseline_fit = float(np.mean(P_real))
+print(f"Pressure fit: slope(P vs h)={slope_P_h:+.5f} hPa/m  "
+      f"h_baseline={h_baseline_fit:.1f}m  p_baseline={p_baseline_fit:.2f}hPa")
 
 # Fit wind-direction offset: circular median of (obs_wd - td_wd) across training days.
 # Wraps each diff to [-180, 180]; simple median is robust if diffs cluster.
@@ -113,18 +127,22 @@ cal = WeatherCalibration(
     h_to_pressure_k=h2p, q_to_rh_ratio=q_rh,
     wind_scale=wf["theilsen_median"]["scale"],
     wind_dir_offset_deg=wd_offset,
+    h_baseline_m=h_baseline_fit,
+    p_baseline_hPa=p_baseline_fit,
 )
 print(f"Calibration: T_scale={cal.T_scale:.4f} T_offset_K={cal.T_offset_K:+.3f} "
       f"q_to_rh={cal.q_to_rh_ratio:.3f} wind_scale={cal.wind_scale:.3f} h2p={cal.h_to_pressure_k:+.5f}")
 
 CAL_OUT.write_text(json.dumps({
-    "scheme": "B (256×192, τ_condense=600, Kessler precip, wind_nudge decay, wd offset)",
+    "scheme": "B (256×192, τ_condense=600, Kessler precip, wind_nudge decay, wd offset, P-baselines)",
     "calibration": {
         "location_name": cal.location_name, "fitted_date": cal.fitted_date,
         "T_offset_K": cal.T_offset_K, "T_scale": cal.T_scale,
         "h_to_pressure_k": cal.h_to_pressure_k,
         "q_to_rh_ratio": cal.q_to_rh_ratio, "wind_scale": cal.wind_scale,
         "wind_dir_offset_deg": cal.wind_dir_offset_deg,
+        "h_baseline_m": cal.h_baseline_m,
+        "p_baseline_hPa": cal.p_baseline_hPa,
     }}, indent=2))
 
 # Build climatology obs (for days 2-7 to relax toward instead of today's pinned values)
