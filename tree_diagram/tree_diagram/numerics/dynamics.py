@@ -138,11 +138,19 @@ def saturation_q_tetens(T_K, p_hpa: float = 500.0):
 
 
 def compute_cfl_dt(u, v, DX: float, DY: float,
-                   dt_target: float, cfl: float = CFL_FACTOR) -> tuple[float, int]:
+                   dt_target: float, cfl: float = CFL_FACTOR,
+                   c_gravity: float = 0.0) -> tuple[float, int]:
+    """CFL for shallow water: must include gravity wave speed c = sqrt(g*h),
+    not just advection. Without c_gravity the scheme is numerically unstable
+    on fine grids (DX ≤ ~12km) regardless of wind magnitude — any perturbation
+    excites gravity waves that grow to clip bounds (±35 m/s)."""
     xp = get_xp(u)
     u_max = float(xp.max(xp.abs(u))) + 1e-6
     v_max = float(xp.max(xp.abs(v))) + 1e-6
-    dt_cfl = cfl * min(DX / u_max, DY / v_max)
+    # Effective wave speed = advection + gravity wave
+    u_eff = u_max + c_gravity
+    v_eff = v_max + c_gravity
+    dt_cfl = cfl * min(DX / u_eff, DY / v_eff)
     if dt_target <= dt_cfl:
         return dt_target, 1
     n = int(np.ceil(dt_target / dt_cfl))
@@ -249,7 +257,8 @@ def branch_step(
     h, u, v, T, q = state.h, state.u, state.v, state.T, state.q
     xp = get_xp(h)
 
-    dt_safe, n_substeps = compute_cfl_dt(u, v, DX, DY, cfg.DT)
+    c_g = float(np.sqrt(G * cfg.BASE_H))
+    dt_safe, n_substeps = compute_cfl_dt(u, v, DX, DY, cfg.DT, c_gravity=c_g)
     sub_dt = dt_safe
 
     if budget is None:

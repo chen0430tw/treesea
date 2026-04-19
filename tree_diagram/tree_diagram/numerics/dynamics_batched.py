@@ -190,10 +190,11 @@ def batched_branch_step(state_b: WeatherState, params_b: dict,
 
     h, u, v, T, q = state_b.h, state_b.u, state_b.v, state_b.T, state_b.q
 
-    # CFL: use global max across batch (conservative)
+    # CFL: gravity wave speed included (shallow water requires c_g = sqrt(g*h))
     u_max = float(xp.max(xp.abs(u))) + 1e-6
     v_max = float(xp.max(xp.abs(v))) + 1e-6
-    dt_cfl = CFL_FACTOR * min(DX / u_max, DY / v_max)
+    c_g = float(np.sqrt(G * cfg.BASE_H))
+    dt_cfl = CFL_FACTOR * min(DX / (u_max + c_g), DY / (v_max + c_g))
     if cfg.DT <= dt_cfl:
         sub_dt, n_sub = cfg.DT, 1
     else:
