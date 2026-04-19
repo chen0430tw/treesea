@@ -93,8 +93,10 @@ def build_taipei_state(XX, YY, topography, cfg: GridConfig,
 
     # 气候态背景（不随 obs 变，保持远场稳定）
     h_bg = cfg.BASE_H + 220.0 * np.sin(1.8 * np.pi * XX) * np.cos(1.4 * np.pi * YY) - 0.06 * topography
-    u_bg = 14.0 * np.cos(1.2 * np.pi * YY) - 6.0 * np.sin(0.8 * np.pi * XX)
-    v_bg = 7.0 * np.sin(1.6 * np.pi * XX) * np.cos(np.pi * YY)
+    # Background wind: climo-scale (2 m/s) not generic synoptic (14 m/s)
+    # — prevents background advection from overwhelming obs-anchored center wind
+    u_bg = 2.0 * np.cos(1.2 * np.pi * YY) - 0.9 * np.sin(0.8 * np.pi * XX)
+    v_bg = 1.5 * np.sin(1.6 * np.pi * XX) * np.cos(np.pi * YY)
     T_bg = 273.15 + 18.0 * np.cos(np.pi * YY) - 8.0 * np.sin(np.pi * XX) - 0.004 * topography
     q_bg = 0.008 + 0.005 * np.cos(np.pi * YY)**2 - 0.002 * np.sin(np.pi * XX)**2
     q_bg = np.clip(q_bg, 1e-4, 0.025)

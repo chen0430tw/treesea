@@ -43,9 +43,12 @@ def build_obs(
     topography: np.ndarray,
     cfg: GridConfig,
 ) -> WeatherState:
+    # Background wind amplitudes scaled to climatological mesoscale (~2 m/s)
+    # instead of the old arbitrary 14 m/s — prevents advective contamination
+    # of obs-anchored center wind (MWR 2017 localization-radius research).
     h_obs = cfg.BASE_H + 220.0 * np.sin(1.8 * np.pi * XX) * np.cos(1.4 * np.pi * YY) - 0.06 * topography
-    u_obs = 14.0 * np.cos(1.2 * np.pi * YY) - 6.0 * np.sin(0.8 * np.pi * XX)
-    v_obs = 7.0 * np.sin(1.6 * np.pi * XX) * np.cos(np.pi * YY)
+    u_obs = 2.0 * np.cos(1.2 * np.pi * YY) - 0.9 * np.sin(0.8 * np.pi * XX)
+    v_obs = 1.5 * np.sin(1.6 * np.pi * XX) * np.cos(np.pi * YY)
     T_obs = 273.15 + 18.0 * np.cos(np.pi * YY) - 8.0 * np.sin(np.pi * XX) - 0.004 * topography
     q_obs = 0.008 + 0.005 * np.cos(np.pi * YY) ** 2 - 0.002 * np.sin(np.pi * XX) ** 2
     q_obs = np.clip(q_obs, 1e-4, 0.025)
@@ -59,8 +62,8 @@ def build_initial_state(
     cfg: GridConfig,
 ) -> WeatherState:
     h0 = cfg.BASE_H + 180.0 * np.sin(1.8 * np.pi * XX) * np.cos(1.4 * np.pi * YY) - 0.05 * topography
-    u0 = 12.0 * np.cos(1.2 * np.pi * YY) - 5.0 * np.sin(0.8 * np.pi * XX)
-    v0 = 5.0 * np.sin(1.6 * np.pi * XX) * np.cos(np.pi * YY)
+    u0 = 1.8 * np.cos(1.2 * np.pi * YY) - 0.7 * np.sin(0.8 * np.pi * XX)
+    v0 = 1.0 * np.sin(1.6 * np.pi * XX) * np.cos(np.pi * YY)
     T0 = 273.15 + 15.0 * np.cos(np.pi * YY) - 6.0 * np.sin(np.pi * XX) - 0.003 * topography
     q0 = 0.007 + 0.004 * np.cos(np.pi * YY) ** 2 - 0.001 * np.sin(np.pi * XX) ** 2
     q0 = np.clip(q0, 1e-4, 0.025)
