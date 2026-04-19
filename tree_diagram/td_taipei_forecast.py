@@ -75,10 +75,13 @@ def build_taipei_state(XX, YY, topography, cfg: GridConfig,
     # 耦合系数 1.0：避免初始就人为压缩 obs 信号；让校准层只做线性映射，不兼做压缩
     T_internal_taipei = 268.0 + 1.0 * (obs_ref.T_avg_C - TAIPEI_CLIMO_T_C) + perturbation
 
-    # 内部 h 锚点：与 BASE_H (5400) 对齐，避免在中心形成 300m 高的凸起
-    # （凸起会产生巨大局部 PGF，覆盖线性 h_bg 的 climo-directed 梯度）。
-    # obs 的气压 P 变化仍反映为小偏移（0.1m/hPa）。
-    h_taipei = cfg.BASE_H - 0.1 * (obs_ref.P_hPa - TAIPEI_CLIMO_P_HPA) + perturbation * 1.0
+    # Uniform h offset from obs P deviation: shifts entire domain h by a
+    # synoptic-scale anomaly (hypsometric ~8 m/hPa at 500 hPa reference).
+    # Because it's uniform, ∂h/∂x and ∂h/∂y are unchanged → geostrophic wind
+    # is preserved. Gives day-to-day h_center variation that drives varying
+    # pressure output via map_pressure (previously h had zero obs-P dependence
+    # → bit-exact pressure across all forecast days).
+    _h_obs_offset = 8.0 * (obs_ref.P_hPa - TAIPEI_CLIMO_P_HPA) + perturbation * 1.0
 
     # 风向矢量化（wd 是 FROM 方向；u 向东正，v 向北正）
     wd_rad = math.radians(obs_ref.wd_deg)
@@ -118,11 +121,9 @@ def build_taipei_state(XX, YY, topography, cfg: GridConfig,
     q_bg = 0.008 + 0.005 * np.cos(np.pi * YY)**2 - 0.002 * np.sin(np.pi * XX)**2
     q_bg = np.clip(q_bg, 1e-4, 0.025)
 
-    # h: pure linear h_bg (no Gaussian blend with h_taipei) — Gaussian blending
-    # created a BASE_H plateau at center that destroyed the climo-directed
-    # geostrophic gradient and produced spurious radial PGF. Tensorearch
-    # flagged this as topo-hotspot in build_taipei_state.
-    h = h_bg
+    # h: linear climo-geostrophic h_bg + uniform obs-P offset. No Gaussian
+    # blend (it created a center plateau that killed the geostrophic gradient).
+    h = h_bg + _h_obs_offset
     u = taipei_weight * u_taipei + (1 - taipei_weight) * u_bg
     v = taipei_weight * v_taipei + (1 - taipei_weight) * v_bg
     T = taipei_weight * T_internal_taipei + (1 - taipei_weight) * T_bg
