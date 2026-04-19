@@ -95,6 +95,13 @@ SMAGORINSKY_C           = 0.17
 SMAGORINSKY_MIN_NU      = 100.0
 SMAGORINSKY_MAX_NU      = 5.0e4
 
+# Radiative cooling rate — mid-tropospheric IR emission to space.
+# Held-Suarez / SWAMPE standard: ~1.5 K/day in free troposphere, balances
+# condensational latent heating on multi-day timescale. Without this, free
+# integration runs away to condensation-driven warm equilibrium. Exposed
+# as module-level for sweep tuning.
+T_RAD_COOL_K_PER_DAY    = 1.5
+
 
 # ====================================================================
 # Section 3 — 物理子模块
@@ -247,7 +254,10 @@ def branch_step(
         T_diff = 0.3 * smagorinsky_diffusion(T_adv, nu_smag, DX, DY)
         T_nudge = nudging * (obs.T - T_adv)
         T_relax = -(T_adv - T_ref) / TAU_T_SEC
-        T_new = T_adv + sub_dt * (T_diff + T_nudge + T_relax)
+        # Radiative cooling — balances condensational latent heating. Read
+        # module-global so sweep can tune it per-task.
+        T_rad = -T_RAD_COOL_K_PER_DAY / 86400.0
+        T_new = T_adv + sub_dt * (T_diff + T_nudge + T_relax + T_rad)
 
         q_diff = 0.5 * smagorinsky_diffusion(q_adv, nu_smag, DX, DY)
         q_nudge = nudging * (obs.q - q_adv)
