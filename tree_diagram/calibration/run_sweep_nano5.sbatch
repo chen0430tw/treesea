@@ -6,7 +6,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
-#SBATCH --gpus-per-node=0
+#SBATCH --gpus-per-node=1   # nano5 only has GPU partitions; sweep is CPU-only
 #SBATCH --output=/work/twsuday816/treesea/tree_diagram/calibration/sweep_%j.out
 #SBATCH --error=/work/twsuday816/treesea/tree_diagram/calibration/sweep_%j.err
 
