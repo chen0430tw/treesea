@@ -81,11 +81,15 @@ def build_taipei_state(XX, YY, topography, cfg: GridConfig,
     u_taipei = -obs_ref.ws_ms * math.sin(wd_rad)
     v_taipei = -obs_ref.ws_ms * math.cos(wd_rad)
 
-    # Tetens 从当日 T+RH+P 算地面比湿，再 × 0.5 近似中层
-    e_sat = 6.11 * np.exp(17.27 * obs_ref.T_avg_C / (obs_ref.T_avg_C + 237.3))
-    e_actual = e_sat * obs_ref.RH_pct / 100.0
-    q_surface = 0.622 * e_actual / (obs_ref.P_hPa - e_actual)
-    q_taipei = q_surface * 0.5
+    # 中层比湿：用 T_internal_taipei 的饱和水汽压 + 当日 RH，500 hPa 总压。
+    # 水汽密度 ρ_v = e/(R_v·T) 随温度强依赖；旧版 q_surface × 0.5 会超饱和
+    # （surface q≈0.016 × 0.5 = 0.008，但 -5°C/500hPa 饱和 q≈0.005）。
+    # 新公式直接在内部 T 上算 e_sat，保证 q_taipei 物理上可达。
+    T_mid_C = T_internal_taipei - 273.15
+    e_sat_mid = 6.11 * math.exp(17.27 * T_mid_C / (T_mid_C + 237.3))
+    P_mid_hPa = 500.0
+    e_mid = e_sat_mid * obs_ref.RH_pct / 100.0
+    q_taipei = 0.622 * e_mid / (P_mid_hPa - e_mid)
 
     # 气候态背景（不随 obs 变，保持远场稳定）
     h_bg = cfg.BASE_H + 220.0 * np.sin(1.8 * np.pi * XX) * np.cos(1.4 * np.pi * YY) - 0.06 * topography

@@ -27,18 +27,36 @@ def score_state(
     w_rms_obs = float(np.sqrt(np.mean(obs.u ** 2 + obs.v ** 2))) + 1.0
     w_err = float(np.sqrt(np.mean((state.u - obs.u) ** 2 + (state.v - obs.v) ** 2))) / w_rms_obs
 
+    # Center-cell wind direction micro-penalty. Grid-wide w_err is diluted by
+    # background cells even when the target location's wind direction is 180°
+    # wrong. This term isolates the target cell (grid center).
+    cy, cx = NY // 2, NX // 2
+    wd_state = float(np.arctan2(state.u[cy, cx], state.v[cy, cx]))
+    wd_obs   = float(np.arctan2(obs.u[cy, cx],   obs.v[cy, cx]))
+    d_wd = abs(((wd_state - wd_obs) + np.pi) % (2 * np.pi) - np.pi)  # [0, π]
+    wd_center_penalty = d_wd / np.pi                                   # [0, 1]
+
     # Instability: variance of h anomaly relative to obs
     h_anom = state.h - obs.h
     instability = float(np.std(h_anom)) / (h_rms_obs + 1.0)
 
-    # Composite score: lower error = higher score
-    score = 1.0 / (1.0 + 0.30 * h_err + 0.25 * t_err + 0.25 * q_err + 0.20 * w_err)
+    # Composite score: lower error = higher score. wd_center_penalty is additive
+    # (mild, weight 0.05) — existing h/t/q/w weights unchanged.
+    score = 1.0 / (
+        1.0
+        + 0.30 * h_err
+        + 0.25 * t_err
+        + 0.25 * q_err
+        + 0.20 * w_err
+        + 0.05 * wd_center_penalty
+    )
 
     return {
         "h_err": h_err,
         "t_err": t_err,
         "q_err": q_err,
         "w_err": w_err,
+        "wd_center_penalty": wd_center_penalty,
         "instability": instability,
         "score": score,
     }
