@@ -26,33 +26,28 @@ DEFAULT_BRANCHES: List[dict] = [
 ]
 
 
-def _rotate_wind_inplace(state: WeatherState, angle_deg: float,
-                         local_alpha: float = 3.0) -> WeatherState:
-    """Rotate (u, v) locally around grid center by angle_deg.
+def _rotate_wind_inplace(state: WeatherState, angle_deg: float) -> WeatherState:
+    """Rotate (u, v) uniformly across the whole grid by angle_deg.
 
-    Localization: mask = exp(-local_alpha * (x² + y²)) with x,y ∈ [-1,1].
-    local_alpha=3.0 matches the Taipei Gaussian in build_taipei_state so
-    rotation acts on the obs-injected region while the background flow
-    (outside ~r=0.5) stays intact. This removes the ±30° ceiling that
-    uniform rotation hit — now ±90° or ±180° is physically safe because
-    it doesn't desync the global h gradient from the wind field.
+    Used on the per-family NUDGING TARGET obs (not the scoring obs). Because
+    branch_step nudges the state toward this rotated target continuously every
+    step (strength ~1.5e-4 / step × 120 steps), the signal doesn't decay like
+    a one-shot initial perturbation would — this is the WRF/ECMWF FDDA
+    convention (Stauffer & Seaman 1990, MWR Vol 118).
+
+    Design note: we chose uniform-grid rotation rather than localized because
+    continuous nudging naturally keeps the perturbation confined near the
+    actual obs structure; no extra Gaussian mask is needed.
 
     Returns a new WeatherState; h/T/q fields are reused (read-only aliases).
     """
     if abs(angle_deg) < 1e-9:
         return state
-    NY, NX = state.u.shape
-    y = np.linspace(-1.0, 1.0, NY).reshape(-1, 1)
-    x = np.linspace(-1.0, 1.0, NX).reshape(1, -1)
-    mask = np.exp(-local_alpha * (x * x + y * y))
-
     a = np.deg2rad(angle_deg)
     c, s = np.cos(a), np.sin(a)
     u_rot = c * state.u - s * state.v
     v_rot = s * state.u + c * state.v
-    u_new = mask * u_rot + (1.0 - mask) * state.u
-    v_new = mask * v_rot + (1.0 - mask) * state.v
-    return WeatherState(h=state.h, u=u_new, v=v_new, T=state.T, q=state.q)
+    return WeatherState(h=state.h, u=u_rot, v=v_rot, T=state.T, q=state.q)
 
 
 def _run_one_task(args: tuple) -> dict:
@@ -67,11 +62,15 @@ def _run_one_task(args: tuple) -> dict:
     params["pg_scale"] = params.get("pg_scale", 1.0) * pressure_balance
     wind_rot = float(params.get("wind_rot_deg", 0.0))
 
+    # Family-specific rotated obs for NUDGING only (continuous forcing in
+    # branch_step). Score against original obs so ranking rewards the family
+    # whose rotated target matches reality — not a self-fulfilling loop.
+    obs_target = _rotate_wind_inplace(obs, wind_rot)
+
     state = WeatherState.from_dict(initial_state.to_dict())
-    state = _rotate_wind_inplace(state, wind_rot)
     budget = None
     for _ in range(cfg.STEPS):
-        state, budget = branch_step(state, params, obs, topography, cfg, budget)
+        state, budget = branch_step(state, params, obs_target, topography, cfg, budget)
 
     metric = score_state(state, obs, cfg)
     result = {"name": branch_params["name"], "state": state.to_dict(),
@@ -92,11 +91,12 @@ def run_one_branch(
     params["pg_scale"] = params.get("pg_scale", 1.0) * pressure_balance
     wind_rot = float(params.get("wind_rot_deg", 0.0))
 
+    obs_target = _rotate_wind_inplace(obs, wind_rot)
+
     state = WeatherState.from_dict(initial_state.to_dict())
-    state = _rotate_wind_inplace(state, wind_rot)
     budget = None
     for _ in range(cfg.STEPS):
-        state, budget = branch_step(state, params, obs, topography, cfg, budget)
+        state, budget = branch_step(state, params, obs_target, topography, cfg, budget)
 
     metric = score_state(state, obs, cfg)
     result = {"name": branch_params["name"], "state": state.to_dict(),
