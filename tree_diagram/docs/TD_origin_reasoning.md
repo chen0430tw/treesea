@@ -1371,6 +1371,71 @@ weather oracle 不会再踩这个坑。
 
 ---
 
+## 11.13 精度 vs 投入产出：何时选择后处理（2026-04-19）
+
+### 11.13.1 背景
+
+§11.12 把气象子模块从 "43°C 非物理输出" 一路打磨到 "7-day Taipei 预报全物理量匹配
+climatology"。但最后一步 —— wind direction 从 obs anchor 经 24h 惯性振荡漂 ~80° —— 在
+TD 的 1-layer shallow-water 架构下**物理上修不完**：
+
+- 25°N Coriolis 参数 f ≈ 6e-5/s
+- 惯性周期 17h，24h 自由积分下风向必然旋转
+- 实际大气由斜压结构 + PBL 湍流阻尼抵消惯性振荡
+- TD 是单层，没有这两个稳定器
+
+### 11.13.2 决策原则
+
+两条修复路径：
+
+| 路径 | 工作量 | 物理保真度 | 可复用性 |
+|------|--------|-----------|----------|
+| 升级到多层 primitive equation | 数周重写 + 算力 ×10 | 完整 | 架构重写 |
+| 后处理 `wind_dir_offset_deg`（循环中位数拟合）| 2 行代码 | "够用" | **每个新站点重 fit 即可** |
+
+**气象业务 (NCEP/ECMWF/CWA) 的 NWP 输出都要经 MOS (Model Output Statistics)
+后处理**：T bias、wind veering、precipitation 分布都是常规修正对象。不是 workaround，
+是标准流程。
+
+### 11.13.3 识别后处理可接受场景
+
+两个判据：
+
+1. **偏差结构化**：误差是系统性 rigid transformation（线性 / 仿射 / SO(2) 旋转），
+   不是 state-dependent 非线性扰动
+2. **物理工作已完成**：T/RH/P/wind-speed 等核心量在合理范围内；残差维度纯粹是
+   坐标对齐问题
+
+Taipei wind direction 满足：训练集 30 天里 obs-td 差的循环中位数 = -68.4° ±10°，
+单一 rigid rotation 就搞定 —— 数学问题，不是物理问题。
+
+### 11.13.4 反例（不该后处理的情况）
+
+**不要**用后处理掩盖：
+
+- 凝结脉冲（day 2 突然 +8°C）—— 那是 `TAU_CONDENSE` 缺失的结构性物理漏洞，后处理
+  压不下瞬时异常
+- RH 饱和到 100% —— 那是没降水排水 (Kessler) 的守恒错误
+- wind open-loop bug —— 那是 `branch_step` 对 obs.u/v 完全不看，后处理只能纠外壳
+  不能修内部演化
+
+**后处理只对"物理已正确，坐标要对齐"这种情况成立。** 之前 wind_nudge bug 是核心
+bug，必须修物理；现在 Coriolis veering 是 structural 限制，后处理合适。
+
+### 11.13.5 给未来 Claude 的告诫
+
+当你面对 TD 某个子模块的"最后一步精度"：
+
+1. 先问：**残差是 rigid transformation 还是 state-dependent**？
+2. 查文献看行业怎么做 —— NWP、气象遥感、激光 SLAM 都把 rigid alignment 后处理化
+3. 拿"升级到更大模型"的成本 vs 后处理成本对比，通常后者赢 10×
+4. 后处理方案**每多一个新站点只要 30 天数据重 fit**，比架构重写的工程可复用性好
+
+**不要因为"后处理听起来不物理"就拒绝** —— TD 的定位是演绎系统，校准层本来就是
+设计的一部分。MOS 在气象界工作了 50 年。
+
+---
+
 ## 13. 记忆锚点（万一这份文档你将来只能读前三行）
 
 如果你只记得一句话，记这句：
@@ -1438,6 +1503,16 @@ weather oracle 不会再踩这个坑。
 > Taipei 把这个 bug 逼出来，因为它位于季风转换带 + 盆地；
 > 换成风向稳定的站可能永远发现不了。
 > 但 fix (`wind_nudge`) 是 location-agnostic 的。
+
+如果你只记得第十三句话，记这一句（§11.13 的精度-投入决策原则，
+区分"该修物理"和"该后处理"）：
+
+> *残差是 rigid transformation → 后处理；残差是 state-dependent → 修物理。*
+> *80° 风向偏差是 Coriolis rigid veer，一个 `wind_dir_offset_deg` 搞定；*
+> *凝结瞬时脉冲是物理漏洞，必须加 `TAU_CONDENSE`。*
+>
+> 气象界 50 年的 MOS 不是 workaround，是设计的一部分。
+> 别因为"后处理听起来不物理"就拒绝。
 
 ---
 
