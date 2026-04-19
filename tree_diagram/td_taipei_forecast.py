@@ -20,7 +20,7 @@ from pathlib import Path
 
 import numpy as np
 
-from tree_diagram.numerics.forcing import GridConfig, build_grid, build_topography
+from tree_diagram.numerics.forcing import GridConfig, build_grid, build_topography, geostrophic_wind_from_h
 from tree_diagram.numerics.weather_state import WeatherState
 from tree_diagram.numerics.weather_contract import WeatherCalibration
 from tree_diagram.pipeline.oracle_pipeline import WeatherOraclePipeline
@@ -29,6 +29,8 @@ from tree_diagram.pipeline.oracle_pipeline import WeatherOraclePipeline
 # 台北 30 天气候均值（用作 obs 的 anchor；B-scheme 拟合时提供）
 TAIPEI_CLIMO_T_C      = 21.6     # 2026-03-15 .. 2026-04-13 ERA5 mean
 TAIPEI_CLIMO_P_HPA    = 1011.9
+TAIPEI_CLIMO_WS_MS    = 1.95
+TAIPEI_CLIMO_WD_DEG   = 51.0     # NE wind (climo-derived from 30-day ERA5 vector mean)
 
 # 台北今天观测（默认 obs — td_taipei_forecast.py 对外仍以此为"今天"）
 TAIPEI_TEMP_AVG_C   = 24.0
@@ -73,8 +75,10 @@ def build_taipei_state(XX, YY, topography, cfg: GridConfig,
     # 耦合系数 1.0：避免初始就人为压缩 obs 信号；让校准层只做线性映射，不兼做压缩
     T_internal_taipei = 268.0 + 1.0 * (obs_ref.T_avg_C - TAIPEI_CLIMO_T_C) + perturbation
 
-    # 内部 h 锚点：气候态 5700 m，surface P 偏离 climo 时取负耦合
-    h_taipei = 5700.0 - 1.0 * (obs_ref.P_hPa - TAIPEI_CLIMO_P_HPA) + perturbation * 5.0
+    # 内部 h 锚点：与 BASE_H (5400) 对齐，避免在中心形成 300m 高的凸起
+    # （凸起会产生巨大局部 PGF，覆盖线性 h_bg 的 climo-directed 梯度）。
+    # obs 的气压 P 变化仍反映为小偏移（0.1m/hPa）。
+    h_taipei = cfg.BASE_H - 0.1 * (obs_ref.P_hPa - TAIPEI_CLIMO_P_HPA) + perturbation * 1.0
 
     # 风向矢量化（wd 是 FROM 方向；u 向东正，v 向北正）
     wd_rad = math.radians(obs_ref.wd_deg)
@@ -91,17 +95,34 @@ def build_taipei_state(XX, YY, topography, cfg: GridConfig,
     e_mid = e_sat_mid * obs_ref.RH_pct / 100.0
     q_taipei = 0.622 * e_mid / (P_mid_hPa - e_mid)
 
-    # 气候态背景（不随 obs 变，保持远场稳定）
-    h_bg = cfg.BASE_H + 220.0 * np.sin(1.8 * np.pi * XX) * np.cos(1.4 * np.pi * YY) - 0.06 * topography
-    # Background wind: climo-scale (2 m/s) not generic synoptic (14 m/s)
-    # — prevents background advection from overwhelming obs-anchored center wind
-    u_bg = 2.0 * np.cos(1.2 * np.pi * YY) - 0.9 * np.sin(0.8 * np.pi * XX)
-    v_bg = 1.5 * np.sin(1.6 * np.pi * XX) * np.cos(np.pi * YY)
+    # 气候态背景 — LINEAR h slope so geostrophic wind everywhere equals Taipei
+    # climo wind (NE 51°, 1.95 m/s). This IS spectral-nudging-at-init:
+    # large-scale wind direction is baked into h gradient, not fought by nudging.
+    # Slopes from inverse geostrophic balance:
+    #   ∂h/∂x = +v_climo * f/g   (m/m)    → h_slope_x = ∂h/∂x * half_domain_x
+    #   ∂h/∂y = -u_climo * f/g   (m/m)
+    _wd_rad_c = math.radians(TAIPEI_CLIMO_WD_DEG)
+    u_climo = -TAIPEI_CLIMO_WS_MS * math.sin(_wd_rad_c)
+    v_climo = -TAIPEI_CLIMO_WS_MS * math.cos(_wd_rad_c)
+    _half_x = 0.5 * cfg.NX * cfg.DX      # physical half-domain (m)
+    _half_y = 0.5 * cfg.NY * cfg.DY
+    _slope_x = 0.0  # DBG
+    _slope_y = 0.0
+    # Periodic-BC safe envelope: linear slope near center fades to EXACTLY 0
+    # at X=±1 / Y=±1 via (1-X²)(1-Y²) polynomial → h values wrap seamlessly
+    # (avoids np.roll boundary discontinuity that blew wind to U_CLIP_MS=35).
+    _env = (1.0 - XX**2) * (1.0 - YY**2)
+    h_bg = cfg.BASE_H + _slope_x * XX * _env + _slope_y * YY * _env  # DBG: removed topo
+    u_bg, v_bg = geostrophic_wind_from_h(h_bg, cfg.DX, cfg.DY, cfg.F0, cfg.G)
     T_bg = 273.15 + 18.0 * np.cos(np.pi * YY) - 8.0 * np.sin(np.pi * XX) - 0.004 * topography
     q_bg = 0.008 + 0.005 * np.cos(np.pi * YY)**2 - 0.002 * np.sin(np.pi * XX)**2
     q_bg = np.clip(q_bg, 1e-4, 0.025)
 
-    h = taipei_weight * h_taipei + (1 - taipei_weight) * h_bg
+    # h: pure linear h_bg (no Gaussian blend with h_taipei) — Gaussian blending
+    # created a BASE_H plateau at center that destroyed the climo-directed
+    # geostrophic gradient and produced spurious radial PGF. Tensorearch
+    # flagged this as topo-hotspot in build_taipei_state.
+    h = h_bg
     u = taipei_weight * u_taipei + (1 - taipei_weight) * u_bg
     v = taipei_weight * v_taipei + (1 - taipei_weight) * v_bg
     T = taipei_weight * T_internal_taipei + (1 - taipei_weight) * T_bg

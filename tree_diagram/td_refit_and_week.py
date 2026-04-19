@@ -11,6 +11,7 @@ sys.path.insert(0, str(HERE))
 
 from tree_diagram.numerics.forcing import GridConfig, build_grid, build_topography
 from tree_diagram.numerics.ensemble import DEFAULT_BRANCHES, _rotate_wind_inplace
+from tree_diagram.numerics.weather_state import WeatherState
 from tree_diagram.numerics.dynamics_batched import (
     batched_branch_step, stack_families, unstack_families
 )
@@ -142,9 +143,36 @@ print(f"Climatology obs for free days: T={climo_T:.1f}°C  RH={climo_RH:.1f}%  "
 # Week forecast
 print("\nWeek forecast (zero wind_rot, climo obs days 2-7, wind_nudge decay τ=2d)...")
 today_obs = ReferenceObs(T_avg_C=24.0, RH_pct=82.5, P_hPa=1009.0, ws_ms=3.6, wd_deg=270.0)
-init = _gpu(build_taipei_state(XX, YY, topo, cfg_day, perturbation=-1.0, obs_ref=today_obs))
-obs_today_gpu = _gpu(build_taipei_state(XX, YY, topo, cfg_day, perturbation=0.0, obs_ref=today_obs))
-obs_climo_gpu = _gpu(build_taipei_state(XX, YY, topo, cfg_day, perturbation=0.0, obs_ref=climo_ref))
+# Init wind uniform at today value (not Gaussian-blended) — prevents advection
+# from far-field climo-direction cells polluting the center.
+_init_base = build_taipei_state(XX, YY, topo, cfg_day, perturbation=-1.0, obs_ref=today_obs)
+_today_wd_rad = math.radians(today_obs.wd_deg)
+_u_today = -today_obs.ws_ms * math.sin(_today_wd_rad)
+_v_today = -today_obs.ws_ms * math.cos(_today_wd_rad)
+init = _gpu(WeatherState(
+    h=_init_base.h, T=_init_base.T, q=_init_base.q,
+    u=np.full_like(_init_base.u, _u_today),
+    v=np.full_like(_init_base.v, _v_today),
+))
+def _make_uniform_wind_obs(obs_ref, base_fn):
+    """Build obs state with UNIFORM (u,v) = obs wind value everywhere, while
+    keeping h/T/q spatial structure from build_taipei_state. Spectral-nudging
+    style: large-scale wind forcing baked into obs target across full grid,
+    not Gaussian-localized at center (which advection dilutes on fine grids)."""
+    base = base_fn(XX, YY, topo, cfg_day, perturbation=0.0, obs_ref=obs_ref)
+    wd_rad = math.radians(obs_ref.wd_deg)
+    u_uniform = -obs_ref.ws_ms * math.sin(wd_rad)
+    v_uniform = -obs_ref.ws_ms * math.cos(wd_rad)
+    return WeatherState(
+        h=base.h, T=base.T, q=base.q,
+        u=np.full_like(base.u, u_uniform),
+        v=np.full_like(base.v, v_uniform),
+    )
+
+# Day 1 obs: uniform TODAY wind across grid (not Gaussian-weighted)
+# Days 2-7 obs: uniform CLIMO wind across grid
+obs_today_gpu = _gpu(_make_uniform_wind_obs(today_obs, build_taipei_state))
+obs_climo_gpu = _gpu(_make_uniform_wind_obs(climo_ref, build_taipei_state))
 
 forecast_branches = _forecast_families()   # wind_rot=0 for all
 # No rotation needed — stack init directly
@@ -153,18 +181,36 @@ p_act = {k: [f[k] for f in forecast_branches] for k in
          ["drag","humid_couple","nudging","pg_scale","wind_nudge"]}
 
 t0 = time.time(); daily = []; budget = None
+CLIMO_WIND_BOOST = 3.0   # spectral-nudging-style: amplify wind_nudge on climo days to override PGF
 for d_idx in range(7):
-    decay = math.exp(-d_idx / TAU_PERSIST_DAYS)
-    obs_for_day = obs_today_gpu if d_idx == 0 else obs_climo_gpu
+    if d_idx == 0:
+        decay = 1.0
+        wind_boost = 1.0
+        obs_for_day = obs_today_gpu
+    else:
+        decay = 1.0                    # climo permanent
+        wind_boost = CLIMO_WIND_BOOST  # strong uniform climo wind (spectral nudging)
+        obs_for_day = obs_climo_gpu
     pb = {
         "drag": p_act["drag"], "humid_couple": p_act["humid_couple"],
         "pg_scale": p_act["pg_scale"],
         "nudging":    [n * decay for n in p_act["nudging"]],
-        "wind_nudge": [w * decay for w in p_act["wind_nudge"]],
+        "wind_nudge": [w * decay * wind_boost for w in p_act["wind_nudge"]],
     }
+    # DEBUG: snapshot state at start of day
+    _dbg_u_start = float(state_b.u[0, cy, cx])
+    _dbg_v_start = float(state_b.v[0, cy, cx])
+    _obs_u_center = float(obs_for_day.u[cy, cx])
+    _obs_v_center = float(obs_for_day.v[cy, cx])
+    _wn_val = pb["wind_nudge"][0]
     for _ in range(1440):
         state_b, budget = batched_branch_step(state_b, pb, obs_for_day, topo_g, cfg_day, budget)
     fam_states = unstack_families(state_b)
+    _dbg_u_end = float(state_b.u[0, cy, cx])
+    _dbg_v_end = float(state_b.v[0, cy, cx])
+    print(f"  DBG d{d_idx+1}: obs(u,v)=({_obs_u_center:+.2f},{_obs_v_center:+.2f})  "
+          f"state fam0 start=({_dbg_u_start:+.2f},{_dbg_v_start:+.2f}) "
+          f"end=({_dbg_u_end:+.2f},{_dbg_v_end:+.2f})  wind_nudge={_wn_val:.2e}")
     # Per-day fusion weights: score each family against the day's obs target
     day_scores = np.array([float(score_state(st, obs_for_day, cfg_day)["score"]) for st in fam_states])
     daily.append({
@@ -179,9 +225,8 @@ for d_idx in range(7):
     date_str = (TODAY + timedelta(days=d_idx+1)).isoformat()
     decay = math.exp(-d_idx / TAU_PERSIST_DAYS)
     day = daily[d_idx]
-    # Per-day weights from that day's scores (not day-1 frozen)
-    sc = day["scores"]
-    w_day = sc - sc.min() + 1e-6; w_day = w_day / w_day.sum()
+    # TEMP: uniform weights to match probe behavior and isolate physics
+    w_day = np.ones(len(day["centers"])) / len(day["centers"])
     Ts = np.array([c[0] for c in day["centers"]]); qs = np.array([c[2] for c in day["centers"]])
     hs = np.array([c[1] for c in day["centers"]])
     us = np.array([c[3] for c in day["centers"]]); vs = np.array([c[4] for c in day["centers"]])
@@ -190,7 +235,7 @@ for d_idx in range(7):
     T_C = cal.T_scale * T_int + cal.T_offset_K - 273.15
     RH = cal.map_humidity(q, T_C); ws = cal.map_wind(u, v)
     wd_raw = (math.degrees(math.atan2(-u, -v)) + 360.0) % 360.0
-    wd = (wd_raw + cal.wind_dir_offset_deg) % 360.0   # offset near 0 after friction fix
+    wd = wd_raw   # TEMP: print RAW wd, offset disabled to see linear h_bg effect
     P = cal.map_pressure(h)
     mode = "DA" if d_idx == 0 else "free"
     print(f"{date_str:<12} {mode:<5} {decay:>5.2f}  {T_C:>5.1f}°C {RH:>5.1f}% {ws:>4.1f} m/s @ {wd:>3.0f}° {P:>6.1f}hPa")

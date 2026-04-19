@@ -2,7 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import numpy as np
 
-from .forcing import GridConfig
+from .forcing import GridConfig, geostrophic_wind_from_h
 
 
 @dataclass
@@ -43,12 +43,12 @@ def build_obs(
     topography: np.ndarray,
     cfg: GridConfig,
 ) -> WeatherState:
-    # Background wind amplitudes scaled to climatological mesoscale (~2 m/s)
-    # instead of the old arbitrary 14 m/s — prevents advective contamination
-    # of obs-anchored center wind (MWR 2017 localization-radius research).
-    h_obs = cfg.BASE_H + 220.0 * np.sin(1.8 * np.pi * XX) * np.cos(1.4 * np.pi * YY) - 0.06 * topography
-    u_obs = 2.0 * np.cos(1.2 * np.pi * YY) - 0.9 * np.sin(0.8 * np.pi * XX)
-    v_obs = 1.5 * np.sin(1.6 * np.pi * XX) * np.cos(np.pi * YY)
+    # h_bg amplitude scaled 220→22m (synoptic 500hPa perturbations ~20m/1000km).
+    # Wind derived geostrophically from h — self-consistent (Rossby adjustment
+    # balance; Dickinson-Williamson 1972 NNMI). No more arbitrary wind sinusoids
+    # disagreeing with pressure field.
+    h_obs = cfg.BASE_H + 22.0 * np.sin(1.8 * np.pi * XX) * np.cos(1.4 * np.pi * YY) - 0.006 * topography
+    u_obs, v_obs = geostrophic_wind_from_h(h_obs, cfg.DX, cfg.DY, cfg.F0, cfg.G)
     T_obs = 273.15 + 18.0 * np.cos(np.pi * YY) - 8.0 * np.sin(np.pi * XX) - 0.004 * topography
     q_obs = 0.008 + 0.005 * np.cos(np.pi * YY) ** 2 - 0.002 * np.sin(np.pi * XX) ** 2
     q_obs = np.clip(q_obs, 1e-4, 0.025)
@@ -61,9 +61,8 @@ def build_initial_state(
     topography: np.ndarray,
     cfg: GridConfig,
 ) -> WeatherState:
-    h0 = cfg.BASE_H + 180.0 * np.sin(1.8 * np.pi * XX) * np.cos(1.4 * np.pi * YY) - 0.05 * topography
-    u0 = 1.8 * np.cos(1.2 * np.pi * YY) - 0.7 * np.sin(0.8 * np.pi * XX)
-    v0 = 1.0 * np.sin(1.6 * np.pi * XX) * np.cos(np.pi * YY)
+    h0 = cfg.BASE_H + 18.0 * np.sin(1.8 * np.pi * XX) * np.cos(1.4 * np.pi * YY) - 0.005 * topography
+    u0, v0 = geostrophic_wind_from_h(h0, cfg.DX, cfg.DY, cfg.F0, cfg.G)
     T0 = 273.15 + 15.0 * np.cos(np.pi * YY) - 6.0 * np.sin(np.pi * XX) - 0.003 * topography
     q0 = 0.007 + 0.004 * np.cos(np.pi * YY) ** 2 - 0.001 * np.sin(np.pi * XX) ** 2
     q0 = np.clip(q0, 1e-4, 0.025)
