@@ -31,8 +31,10 @@ def hydro_adjust_abstract(results: List[EvaluationResult]) -> dict:
     mean_balanced_score = sum(r.balanced_score for r in results) / n
     mean_risk = sum(r.risk for r in results) / n
 
-    # pressure_balance: higher active ratio → balanced; high wither → imbalanced
-    pressure_balance = max(0.0, min(2.0, 1.0 + active_ratio - wither_ratio))
+    # pressure_balance: 1.0 = FLOW (healthy). Withered branches pull DROUGHT;
+    # restricted-but-competing branches pull FLOOD. All-active = baseline 1.0.
+    # Previous formula used active_ratio (anti-pattern: all-active → 2.0 FLOOD).
+    pressure_balance = max(0.0, min(2.0, 1.0 + restricted_ratio - wither_ratio))
 
     return {
         "pressure_balance": pressure_balance,
@@ -68,8 +70,20 @@ def hydro_adjust_numerical(metrics: List[dict]) -> dict:
     top_margin = (sorted_scores[0] - sorted_scores[1]) if len(sorted_scores) > 1 else 0.0
     score_spread = sorted_scores[0] - sorted_scores[-1] if sorted_scores else 0.0
 
-    # pressure_balance: 1.0 baseline, adjusted by mean instability
-    pressure_balance = max(0.0, min(2.0, 1.0 - 0.5 * mean_instability + 0.2 * (1.0 - mean_instability)))
+    # pressure_balance: 1.0 baseline (FLOW), driven to DROUGHT by high
+    # mean_instability and to FLOOD by high score_spread (excess competition).
+    # Previous formula expanded to 1.2 - 0.7·mi, whose baseline (mi=0) was 1.2,
+    # already above the FLOOD threshold (1.15) — so hydro=FLOOD was pinned on.
+    pressure_balance = max(
+        0.0,
+        min(
+            2.0,
+            1.0
+            - 0.4 * mean_instability       # instability pulls toward DROUGHT
+            + 0.5 * score_spread           # competition pushes toward FLOOD
+            - 0.3 * top_margin,            # clear dominance pulls toward DROUGHT
+        ),
+    )
 
     return {
         "pressure_balance": pressure_balance,

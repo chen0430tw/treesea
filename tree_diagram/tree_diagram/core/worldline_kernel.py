@@ -971,14 +971,23 @@ def score_candidates(
 
 
 def classify_relative(scores: np.ndarray) -> List[str]:
-    best = scores.max(); span = max(1e-9, best - scores.min())
+    """Classify branches by relative score distance from the leader.
+
+    Uses pure fraction-of-span thresholds (no absolute guards), so the
+    classification scales with any dynamic range. Previous implementation
+    used max(0.20, …) absolute guards, which were larger than the typical
+    score span (~0.05–0.20), collapsing every branch into 'active' and
+    starving the downstream hydro analysis of branch_status signal.
+    """
+    best = scores.max()
+    span = max(1e-9, best - scores.min())
     out = []
     for s in scores:
-        rel = best - s
-        if   rel <= max(0.20, 0.22*span): out.append("active")
-        elif rel <= max(0.55, 0.45*span): out.append("restricted")
-        elif rel <= max(1.20, 0.90*span): out.append("starved")
-        else:                              out.append("withered")
+        rel = (best - s) / span
+        if   rel <= 0.25: out.append("active")
+        elif rel <= 0.55: out.append("restricted")
+        elif rel <= 0.85: out.append("starved")
+        else:             out.append("withered")
     return out
 
 

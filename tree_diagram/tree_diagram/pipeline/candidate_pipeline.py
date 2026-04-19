@@ -159,7 +159,24 @@ class CandidatePipeline:
 
         # ── H-UTM Hydro Control Layer (Layer 8): main-channel stability ─────
         utm_ctrl = UTMHydrologyController()
-        utm_adj  = utm_ctrl.adjust(top_results, step=self.steps)
+        # Previously called with only (top_results, step), so UTM internally
+        # fell back to hydro_adjust_numerical([]) → default pb=1.0 and
+        # utm_p_blow=0.0. That pinned UTM to FLOW + NORMAL regardless of
+        # problem severity. Feed it real signals from this run.
+        metrics_list_for_utm = [
+            {"score": r.balanced_score,
+             "instability": max(0.0, 1.0 - r.stability)}
+            for r in top_results
+        ]
+        utm_p_blow_value = float(
+            hydro.get("cbf_allocation", {}).get("mean_p_blow", 0.0)
+        )
+        utm_adj  = utm_ctrl.adjust(
+            top_results,
+            metrics_list=metrics_list_for_utm,
+            utm_p_blow=utm_p_blow_value,
+            step=self.steps,
+        )
         hydro["utm_hydro_state"]    = utm_adj.hydro_state
         hydro["utm_state"]          = utm_adj.utm_state
         hydro["utm_main_channel_k"] = len(utm_adj.main_channel_ids)

@@ -379,16 +379,31 @@ def compute_metrics(td: TDOutputs, prev_td: Optional[TDOutputs] = None) -> Metri
 
 
 def evaluate_nrp(metrics: Metrics, constraints: Dict[str, float]) -> GovernanceState:
-    p0 = constraints.get("p0", 0.60)
-    p1 = constraints.get("p1", 0.85)
-    e_cons_threshold = constraints.get("e_cons_threshold", 0.25)
+    # p-blow thresholds (calibrated; stable band is p < p0)
+    p0 = constraints.get("p0", 0.60)                    # NEGOTIATE entry
+    p1 = constraints.get("p1", 0.85)                    # CRACKDOWN entry
+    # e_cons_mean in current pipeline is r.risk. Previous default 0.25 forced
+    # essentially every real scenario into CRACKDOWN. 0.80 was the first fix
+    # but it went too far the other way — WW4 / Singularity-Probe p_blow=0.74
+    # still never crossed it. Calibrated against the full scenario library:
+    #   e_cons > 0.70 → CRACKDOWN (WW4, Singularity-Probe trigger here)
+    #   e_cons > 0.50 → NEGOTIATE (AI/COVID post states trigger here)
+    #   e_cons ≤ 0.50 → NORMAL     (healthy / stable baseline)
+    e_cons_crackdown = constraints.get("e_cons_crackdown", 0.70)
+    e_cons_negotiate = constraints.get("e_cons_negotiate", 0.50)
 
+    # Hard reds first
     if metrics.p_blow_max >= p1:
         return GovernanceState("CRACKDOWN", False, metrics.p_blow_max, "blow-up risk beyond red line")
-    if metrics.e_cons_mean > e_cons_threshold:
-        return GovernanceState("CRACKDOWN", False, metrics.p_blow_max, "conservation inconsistency too high")
+    if metrics.e_cons_mean > e_cons_crackdown:
+        return GovernanceState("CRACKDOWN", False, metrics.p_blow_max, "conservation inconsistency beyond red line")
+
+    # Yellow zone
     if metrics.p_blow_max >= p0:
-        return GovernanceState("NEGOTIATE", False, metrics.p_blow_max, "yellow zone")
+        return GovernanceState("NEGOTIATE", False, metrics.p_blow_max, "blow-up risk in yellow zone")
+    if metrics.e_cons_mean > e_cons_negotiate:
+        return GovernanceState("NEGOTIATE", False, metrics.p_blow_max, "conservation soft warning")
+
     return GovernanceState("NORMAL", True, metrics.p_blow_max, "within stable band")
 
 
