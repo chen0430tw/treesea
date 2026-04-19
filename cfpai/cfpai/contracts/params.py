@@ -15,3 +15,6 @@ class CFPAIParams:
     cash_floor: float = 0.10           # 最低现金保留 10%
     max_single_weight: float = 0.50    # 单一资产上限 50%
     scoring_mode: str = "maxwell_demon" # "classic" | "updown_vol" | "maxwell_demon"
+    allow_short: bool = False          # 是否允许做空（负权重）
+    max_leverage: float = 1.0          # 最大杠杆比率（1.0=无杠杆）
+    sentiment_alpha: float = 0.15      # 情绪调制强度

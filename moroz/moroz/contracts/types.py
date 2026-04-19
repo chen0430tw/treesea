@@ -1,26 +1,10 @@
-# types.py
-from __future__ import annotations
-from dataclasses import dataclass, field
-from typing import Any, Literal
+"""MOROZ Contracts 类型定义 — 从 core.types 统一导入。
 
-LayerName = Literal["common_char", "common_pinyin", "whois_domain", "personal", "context", "external"]
-
-@dataclass
-class FrontierCandidate:
-    text: str
-    base_score: float
-    source_layers: list[LayerName] = field(default_factory=list)
-    features: dict[str, float] = field(default_factory=dict)
-    template_tags: list[str] = field(default_factory=list)
-    provenance: dict[str, Any] = field(default_factory=dict)
-    meta: dict[str, Any] = field(default_factory=dict)
-
-@dataclass
-class CollapseCandidate:
-    text: str
-    base_score: float
-    collapse_score: float
-    final_score: float
-    trace_summary: dict[str, Any] = field(default_factory=dict)
-    source_layers: list[LayerName] = field(default_factory=list)
-    meta: dict[str, Any] = field(default_factory=dict)
+历史：原先 contracts 和 core 各自定义了一套 LayerName / FrontierCandidate / CollapseCandidate，
+导致两套类型不互通。现在统一为 core.types 作为唯一类型源，contracts 重导出。
+"""
+from moroz.core.types import (  # noqa: F401 — re-export
+    LayerName,
+    FrontierCandidate,
+    CollapseCandidate,
+)

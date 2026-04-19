@@ -41,6 +41,13 @@ def save_run(out_folder: str | Path, symbols: list[str], params: CFPAIParams, re
     plt.savefig(out / "latest_weights.png", dpi=160)
     plt.close()
 
-    report = f"# CFPAI Report\n\n## Symbols\n{', '.join(symbols)}\n\n## Stats\n```json\n{json.dumps(stats, indent=2, ensure_ascii=False)}\n```\n"
+    disclaimer = (
+        "\n---\n\n"
+        "> **風險聲明：** 本報告由 CFPAI 系統自動生成，僅供研究與參考。"
+        "回測績效不代表未來表現，不構成投資建議。"
+        "使用者應自行承擔投資決策風險，並在投資前諮詢持牌專業金融顧問。"
+        "完整聲明請參閱 DISCLAIMER.md。\n"
+    )
+    report = f"# CFPAI Report\n\n## Symbols\n{', '.join(symbols)}\n\n## Stats\n```json\n{json.dumps(stats, indent=2, ensure_ascii=False)}\n```\n{disclaimer}"
     (out / "report.md").write_text(report, encoding="utf-8")
     return out
