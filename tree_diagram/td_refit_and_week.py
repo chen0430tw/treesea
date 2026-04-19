@@ -40,6 +40,7 @@ topo = build_topography(XX, YY)
 cy = int(np.argmin(np.abs(YY[:, 0])))
 cx = int(np.argmin(np.abs(XX[0, :])))
 
+topo = np.zeros_like(topo)   # DBG: disable topography
 if has_cupy():
     import cupy as cp
     topo_g = cp.asarray(topo)
