@@ -148,8 +148,9 @@ def run_worldline_weather(
         T=initial_state.T.copy(),
         q=initial_state.q.copy(),
     )
+    budget = None
     for _ in range(cfg.STEPS):
-        state = branch_step(state, branch_params, obs, topography, cfg)
+        state, budget = branch_step(state, branch_params, obs, topography, cfg, budget)
 
     metric = score_state(state, obs, cfg)
     return float(metric["score"])

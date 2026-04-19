@@ -4,7 +4,7 @@
 修复：
   1. 使用新的 run_safe(mode='regime_only') 只输出 regime（默认安全）
   2. 若要定量输出，必须提供 WeatherCalibration（观测锚定）
-  3. 内部状态一律经 weather_sanity 验证，非物理值直接标 invalid
+  3. 内部状态一律经 weather_contract 验证，非物理值直接标 invalid
 
 今天观测（2026-04-19）：
   - 温度：高 29°C / 低 19°C（平均 24°C）
@@ -20,7 +20,7 @@ import numpy as np
 
 from tree_diagram.numerics.forcing import GridConfig, build_grid, build_topography
 from tree_diagram.numerics.weather_state import WeatherState
-from tree_diagram.numerics.weather_output import WeatherCalibration
+from tree_diagram.numerics.weather_contract import WeatherCalibration
 from tree_diagram.pipeline.oracle_pipeline import WeatherOraclePipeline
 
 

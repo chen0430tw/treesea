@@ -8,10 +8,8 @@ from ..numerics.weather_state import WeatherState, build_obs, build_initial_stat
 from ..numerics.ensemble import run_ensemble
 from ..numerics.ranking import rank_ensemble
 from ..core.balance_layer import hydro_adjust_numerical
-from ..numerics.weather_sanity import (
+from ..numerics.weather_contract import (
     DEFAULT_BOUNDS, validate_state_arrays, UnsafeTemperatureRead,
-)
-from ..numerics.weather_output import (
     WeatherRegimeReport, WeatherQuantEstimate, WeatherCalibration,
     regime_report_from_ranked, quant_estimate_from_state,
 )
@@ -93,7 +91,7 @@ class WeatherOraclePipeline:
 
         The internal integrator's T/h/q are internal thermodynamic variables,
         not 2-meter observables. Only a calibration layer (fitted against
-        real observations) can translate them. See weather_output.WeatherCalibration.
+        real observations) can translate them. See weather_contract.WeatherCalibration.
         """
         cfg = self.cfg
         XX, YY, x, y = build_grid(cfg)
