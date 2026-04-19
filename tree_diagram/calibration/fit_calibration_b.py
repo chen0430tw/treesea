@@ -153,7 +153,7 @@ def main():
     print(f"Loaded {n_days} days of Taipei ERA5 obs")
 
     # Grid cache (built once)
-    cfg = GridConfig(NX=64, NY=48, DX=24000.0, DY=24000.0, DT=60.0, STEPS=240)
+    cfg = GridConfig(NX=64, NY=48, DX=24000.0, DY=24000.0, DT=60.0, STEPS=120)
     XX, YY, _x, _y = build_grid(cfg)
     topo = build_topography(XX, YY)
     cy = int(np.argmin(np.abs(YY[:, 0])))

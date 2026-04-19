@@ -69,8 +69,9 @@ def build_taipei_state(XX, YY, topography, cfg: GridConfig,
 
     taipei_weight = np.exp(-3.0 * (XX**2 + YY**2))
 
-    # 内部 T 锚点：气候态 268 K，surface T 偏离 climo 时按 0.5 比例传上 500 hPa
-    T_internal_taipei = 268.0 + 0.5 * (obs_ref.T_avg_C - TAIPEI_CLIMO_T_C) + perturbation
+    # 内部 T 锚点：气候态 268 K，surface T 偏离 climo 时全量传入（单位 K）
+    # 耦合系数 1.0：避免初始就人为压缩 obs 信号；让校准层只做线性映射，不兼做压缩
+    T_internal_taipei = 268.0 + 1.0 * (obs_ref.T_avg_C - TAIPEI_CLIMO_T_C) + perturbation
 
     # 内部 h 锚点：气候态 5700 m，surface P 偏离 climo 时取负耦合
     h_taipei = 5700.0 - 1.0 * (obs_ref.P_hPa - TAIPEI_CLIMO_P_HPA) + perturbation * 5.0
@@ -114,7 +115,7 @@ def run_regime_forecast():
           f"P: {TAIPEI_PRESSURE_HPA} hPa, wind: {TAIPEI_WIND_MS} m/s W")
     print()
 
-    cfg = GridConfig(NX=64, NY=48, DX=24000.0, DY=24000.0, DT=60.0, STEPS=240)
+    cfg = GridConfig(NX=64, NY=48, DX=24000.0, DY=24000.0, DT=60.0, STEPS=120)
     XX, YY, x, y = build_grid(cfg)
     topo = build_topography(XX, YY)
 
@@ -150,7 +151,7 @@ def attempt_calibrated_forecast():
     print("ATTEMPTING calibrated_quant MODE WITHOUT CALIBRATION")
     print("=" * 72)
 
-    cfg = GridConfig(NX=64, NY=48, DX=24000.0, DY=24000.0, DT=60.0, STEPS=240)
+    cfg = GridConfig(NX=64, NY=48, DX=24000.0, DY=24000.0, DT=60.0, STEPS=120)
     XX, YY, x, y = build_grid(cfg)
     topo = build_topography(XX, YY)
     obs = build_taipei_state(XX, YY, topo, cfg, perturbation=0.0)
@@ -204,7 +205,7 @@ def run_calibrated_forecast_with_fitted():
           f"q_to_rh_ratio={cal.q_to_rh_ratio:.3f}  wind_scale={cal.wind_scale:.3f}  "
           f"h_to_pressure_k={cal.h_to_pressure_k:+.5f}")
 
-    cfg = GridConfig(NX=64, NY=48, DX=24000.0, DY=24000.0, DT=60.0, STEPS=240)
+    cfg = GridConfig(NX=64, NY=48, DX=24000.0, DY=24000.0, DT=60.0, STEPS=120)
     XX, YY, x, y = build_grid(cfg)
     topo = build_topography(XX, YY)
     obs = build_taipei_state(XX, YY, topo, cfg, perturbation=0.0)
