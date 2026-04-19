@@ -7,7 +7,7 @@ from .weather_state import WeatherState
 
 # Module-level weight for the center-cell wind-direction micro-penalty.
 # Exposed so parameter sweeps can tune it without editing source.
-WD_CENTER_PENALTY_WEIGHT: float = 0.20
+WD_CENTER_PENALTY_WEIGHT: float = 0.80
 
 
 def score_state(
