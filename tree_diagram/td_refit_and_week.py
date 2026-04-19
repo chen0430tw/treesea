@@ -25,6 +25,13 @@ CAL_OUT  = HERE / "calibration" / "taipei_calibration_b.json"
 TAU_PERSIST_DAYS = 2.0
 TODAY = date(2026, 4, 19)
 
+# Forecast-mode families: zero rotation (rotation was only useful for OOS
+# ensemble-ranking diversity; for point forecast the uniform-rotation creates
+# advective contamination from rotated background and ends up fusing to
+# climatological wind direction regardless of today's obs).
+def _forecast_families():
+    return [dict(f, wind_rot_deg=0.0) for f in DEFAULT_BRANCHES]
+
 cfg_fit = GridConfig(NX=256, NY=192, DX=6000.0, DY=6000.0, DT=60.0, STEPS=120)
 cfg_day = GridConfig(NX=256, NY=192, DX=6000.0, DY=6000.0, DT=60.0, STEPS=1440)
 XX, YY, _, _ = build_grid(cfg_fit)
@@ -105,18 +112,36 @@ CAL_OUT.write_text(json.dumps({
         "q_to_rh_ratio": cal.q_to_rh_ratio, "wind_scale": cal.wind_scale,
     }}, indent=2))
 
-# Week forecast
-print("\nWeek forecast (wind_nudge decay τ_persist=2 days)...")
-obs_ref = ReferenceObs(T_avg_C=24.0, RH_pct=82.5, P_hPa=1009.0, ws_ms=3.6, wd_deg=270.0)
-init = _gpu(build_taipei_state(XX, YY, topo, cfg_day, perturbation=-1.0, obs_ref=obs_ref))
-obs_state = _gpu(build_taipei_state(XX, YY, topo, cfg_day, perturbation=0.0, obs_ref=obs_ref))
-rotated = [_rotate_wind_inplace(init, f["wind_rot_deg"]) for f in DEFAULT_BRANCHES]
-state_b = stack_families(rotated)
-p_act = {k: [f[k] for f in DEFAULT_BRANCHES] for k in ["drag","humid_couple","nudging","pg_scale","wind_nudge"]}
+# Build climatology obs (for days 2-7 to relax toward instead of today's pinned values)
+climo_T  = float(np.mean([d["T_mean_C"]    for d in obs_days]))
+climo_RH = float(np.mean([d["RH_mean_pct"] for d in obs_days]))
+climo_P  = float(np.mean([d["P_mean_hPa"]  for d in obs_days]))
+climo_ws = float(np.mean([d["ws_mean_ms"]  for d in obs_days]))
+u_s = sum(d["ws_mean_ms"] * math.sin(math.radians(d["wd_vec_deg"])) for d in obs_days)
+v_s = sum(d["ws_mean_ms"] * math.cos(math.radians(d["wd_vec_deg"])) for d in obs_days)
+climo_wd = (math.degrees(math.atan2(u_s, v_s)) + 360.0) % 360.0
+climo_ref = ReferenceObs(T_avg_C=climo_T, RH_pct=climo_RH, P_hPa=climo_P,
+                          ws_ms=climo_ws, wd_deg=climo_wd)
+print(f"Climatology obs for free days: T={climo_T:.1f}°C  RH={climo_RH:.1f}%  "
+      f"P={climo_P:.1f}hPa  wind={climo_ws:.2f} m/s @ {climo_wd:.0f}°")
 
-t0 = time.time(); daily = []; day1_scores = None; budget = None
+# Week forecast
+print("\nWeek forecast (zero wind_rot, climo obs days 2-7, wind_nudge decay τ=2d)...")
+today_obs = ReferenceObs(T_avg_C=24.0, RH_pct=82.5, P_hPa=1009.0, ws_ms=3.6, wd_deg=270.0)
+init = _gpu(build_taipei_state(XX, YY, topo, cfg_day, perturbation=-1.0, obs_ref=today_obs))
+obs_today_gpu = _gpu(build_taipei_state(XX, YY, topo, cfg_day, perturbation=0.0, obs_ref=today_obs))
+obs_climo_gpu = _gpu(build_taipei_state(XX, YY, topo, cfg_day, perturbation=0.0, obs_ref=climo_ref))
+
+forecast_branches = _forecast_families()   # wind_rot=0 for all
+# No rotation needed — stack init directly
+state_b = stack_families([init] * len(forecast_branches))
+p_act = {k: [f[k] for f in forecast_branches] for k in
+         ["drag","humid_couple","nudging","pg_scale","wind_nudge"]}
+
+t0 = time.time(); daily = []; budget = None
 for d_idx in range(7):
     decay = math.exp(-d_idx / TAU_PERSIST_DAYS)
+    obs_for_day = obs_today_gpu if d_idx == 0 else obs_climo_gpu
     pb = {
         "drag": p_act["drag"], "humid_couple": p_act["humid_couple"],
         "pg_scale": p_act["pg_scale"],
@@ -124,24 +149,30 @@ for d_idx in range(7):
         "wind_nudge": [w * decay for w in p_act["wind_nudge"]],
     }
     for _ in range(1440):
-        state_b, budget = batched_branch_step(state_b, pb, obs_state, topo_g, cfg_day, budget)
+        state_b, budget = batched_branch_step(state_b, pb, obs_for_day, topo_g, cfg_day, budget)
     fam_states = unstack_families(state_b)
-    if d_idx == 0:
-        day1_scores = np.array([float(score_state(st, obs_state, cfg_day)["score"]) for st in fam_states])
-    daily.append([(float(st.T[cy,cx]), float(st.h[cy,cx]), float(st.q[cy,cx]),
-                   float(st.u[cy,cx]), float(st.v[cy,cx])) for st in fam_states])
+    # Per-day fusion weights: score each family against the day's obs target
+    day_scores = np.array([float(score_state(st, obs_for_day, cfg_day)["score"]) for st in fam_states])
+    daily.append({
+        "centers": [(float(st.T[cy,cx]), float(st.h[cy,cx]), float(st.q[cy,cx]),
+                     float(st.u[cy,cx]), float(st.v[cy,cx])) for st in fam_states],
+        "scores": day_scores,
+    })
 print(f"Week done in {time.time()-t0:.1f}s")
 
-w = day1_scores - day1_scores.min() + 1e-6; w = w / w.sum()
 print(f"\n{'Date':<12} {'Mode':<5} {'decay':>6} {'T':>7} {'RH':>6} {'Wind':>14}  {'P':>8}")
 for d_idx in range(7):
     date_str = (TODAY + timedelta(days=d_idx+1)).isoformat()
     decay = math.exp(-d_idx / TAU_PERSIST_DAYS)
-    Ts = np.array([c[0] for c in daily[d_idx]]); qs = np.array([c[2] for c in daily[d_idx]])
-    hs = np.array([c[1] for c in daily[d_idx]])
-    us = np.array([c[3] for c in daily[d_idx]]); vs = np.array([c[4] for c in daily[d_idx]])
-    T_int = np.average(Ts, weights=w); q = np.average(qs, weights=w)
-    h = np.average(hs, weights=w); u = np.average(us, weights=w); v = np.average(vs, weights=w)
+    day = daily[d_idx]
+    # Per-day weights from that day's scores (not day-1 frozen)
+    sc = day["scores"]
+    w_day = sc - sc.min() + 1e-6; w_day = w_day / w_day.sum()
+    Ts = np.array([c[0] for c in day["centers"]]); qs = np.array([c[2] for c in day["centers"]])
+    hs = np.array([c[1] for c in day["centers"]])
+    us = np.array([c[3] for c in day["centers"]]); vs = np.array([c[4] for c in day["centers"]])
+    T_int = np.average(Ts, weights=w_day); q = np.average(qs, weights=w_day)
+    h = np.average(hs, weights=w_day); u = np.average(us, weights=w_day); v = np.average(vs, weights=w_day)
     T_C = cal.T_scale * T_int + cal.T_offset_K - 273.15
     RH = cal.map_humidity(q, T_C); ws = cal.map_wind(u, v)
     wd = (math.degrees(math.atan2(-u, -v)) + 360.0) % 360.0
