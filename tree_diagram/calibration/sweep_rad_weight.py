@@ -28,6 +28,9 @@ from tree_diagram.numerics import ensemble, ranking, dynamics
 from tree_diagram.numerics.forcing import GridConfig, build_grid, build_topography
 from tree_diagram.numerics.weather_contract import WeatherCalibration
 from tree_diagram.numerics.dynamics import branch_step
+from tree_diagram.numerics.dynamics_batched import (
+    batched_branch_step, stack_families, unstack_families
+)
 from tree_diagram.numerics.ensemble import _rotate_wind_inplace, DEFAULT_BRANCHES
 from tree_diagram.numerics.ranking import score_state
 from tree_diagram.numerics.weather_state import WeatherState
@@ -101,14 +104,25 @@ def run_family(init_state: WeatherState, obs_state: WeatherState, topo,
 
 
 def run_ensemble_sequential(init_state, obs_state, topo, cfg, branches: list) -> list:
-    """Run all families sequentially, each from fresh init, return ranked list."""
+    """Run all families as ONE batched tensor. Dramatically faster than loop
+    when cupy is available (single GPU kernel per op vs N kernels)."""
+    # Build per-family initial states (apply rotation before batching)
+    rotated = [_rotate_wind_inplace(init_state, fam["wind_rot_deg"]) for fam in branches]
+    state_b = stack_families(rotated)
+
+    params_b = {k: [f[k] for f in branches] for k in
+                ["drag", "humid_couple", "nudging", "pg_scale", "wind_nudge"]}
+
+    budget = None
+    for _ in range(cfg.STEPS):
+        state_b, budget = batched_branch_step(state_b, params_b, obs_state, topo, cfg, budget)
+
+    # Unstack and score each family against shared obs
+    family_states = unstack_families(state_b)
     results = []
-    for fam in branches:
-        state, _ = run_family(init_state, obs_state, topo, cfg, fam, cfg.STEPS)
-        metric = score_state(state, obs_state, cfg)
-        result = {"name": fam["name"], "state": state, **metric}
-        results.append(result)
-    # Sort by score desc
+    for fam, st in zip(branches, family_states):
+        metric = score_state(st, obs_state, cfg)
+        results.append({"name": fam["name"], "state": st, **metric})
     results.sort(key=lambda x: x["score"], reverse=True)
     return results
 
@@ -198,27 +212,31 @@ def run_week(topo, cfg_day, branches, cal, grid_center) -> dict:
     obs_np = build_taipei_state(XX, YY, to_numpy(topo), cfg_day, perturbation=0.0, obs_ref=TAIPEI_OBS)
     init = _maybe_gpu_state(init_np); obs_state = _maybe_gpu_state(obs_np)
 
-    per_family = []
-    for fam in branches:
-        state = _rotate_wind_inplace(init, fam["wind_rot_deg"])
-        budget = None
-        daily = []
-        day1_score = None
-        for d_idx in range(7):
-            params = dict(fam)
-            if d_idx + 1 > 1:
-                params["nudging"] = 0.0
-                params["wind_nudge"] = 0.0
-            for _ in range(cfg_day.STEPS):
-                state, budget = branch_step(state, params, obs_state, topo, cfg_day, budget)
+    # Batched: stack rotated families, evolve all 6 together each day
+    rotated = [_rotate_wind_inplace(init, fam["wind_rot_deg"]) for fam in branches]
+    state_b = stack_families(rotated)
+    params_active_b = {k: [f[k] for f in branches] for k in
+                       ["drag", "humid_couple", "nudging", "pg_scale", "wind_nudge"]}
+    params_free_b = dict(params_active_b)
+    params_free_b["nudging"]    = [0.0] * len(branches)
+    params_free_b["wind_nudge"] = [0.0] * len(branches)
+
+    per_family = [{"name": fam["name"], "daily": [], "day1_score": None}
+                  for fam in branches]
+    budget = None
+    for d_idx in range(7):
+        pb = params_active_b if d_idx == 0 else params_free_b
+        for _ in range(cfg_day.STEPS):
+            state_b, budget = batched_branch_step(state_b, pb, obs_state, topo, cfg_day, budget)
+        states_per_fam = unstack_families(state_b)
+        for i, st in enumerate(states_per_fam):
             if d_idx == 0:
-                day1_score = float(score_state(state, obs_state, cfg_day)["score"])
-            daily.append({
-                "T_K": float(state.T[cy, cx]), "h": float(state.h[cy, cx]),
-                "q": float(state.q[cy, cx]),
-                "u": float(state.u[cy, cx]), "v": float(state.v[cy, cx]),
+                per_family[i]["day1_score"] = float(score_state(st, obs_state, cfg_day)["score"])
+            per_family[i]["daily"].append({
+                "T_K": float(st.T[cy, cx]), "h": float(st.h[cy, cx]),
+                "q": float(st.q[cy, cx]),
+                "u": float(st.u[cy, cx]), "v": float(st.v[cy, cx]),
             })
-        per_family.append({"name": fam["name"], "day1_score": day1_score, "daily": daily})
 
     # Weighted fusion via day-1 score (softmax-shifted)
     scores = np.array([f["day1_score"] for f in per_family])
