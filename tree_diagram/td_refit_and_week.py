@@ -194,23 +194,38 @@ def _make_uniform_wind_obs(obs_ref, base_fn):
         v=np.full_like(base.v, v_uniform),
     )
 
-# Day 1 obs: uniform TODAY wind across grid (not Gaussian-weighted)
-# Days 2-7 obs: uniform CLIMO wind across grid
-obs_today_gpu = _gpu(_make_uniform_wind_obs(today_obs, build_taipei_state))
+# =====================================================================
+# Forecast mode switch — TD native 6-family ensemble vs legacy analog
+# =====================================================================
+# Default: native TD — day 2-7 free-integrate from day-1 DA state, 6 branch
+# families diverge via their own param spread (drag/pg_scale/humid_couple).
+# This is弹幕动力学's intended use: one IC, N parameter-diverse trajectories
+# form the forecast uncertainty cone. No obs pulling after day 1.
+#
+# Legacy (USE_ANALOG_ENSEMBLE=True): each free day nudges toward a historical
+# analog sampled from the 30-day training set. Data-driven, not physics-driven.
+# Kept behind a switch because it may be useful for downscaling / bias-correction
+# workflows where you *want* to blend a historical template with live physics.
+USE_ANALOG_ENSEMBLE = False
 
-# Analog ensemble: days 2-7 each sample a historical day from the 30-day
-# training set rather than using static climo. Gives real day-to-day
-# variability (synoptic evolution baked into actual past data).
-_rng = np.random.default_rng(seed=20260420)   # reproducible
-_analog_day_idxs = _rng.choice(len(obs_days), size=6, replace=False)
-_analog_obs_gpu = []
-for _idx in _analog_day_idxs:
-    d = obs_days[int(_idx)]
-    aref = ReferenceObs(T_avg_C=d["T_mean_C"], RH_pct=d["RH_mean_pct"],
-                         P_hPa=d["P_mean_hPa"], ws_ms=d["ws_mean_ms"],
-                         wd_deg=d["wd_vec_deg"])
-    _analog_obs_gpu.append(_gpu(_make_uniform_wind_obs(aref, build_taipei_state)))
-print(f"Analog days chosen: {[obs_days[int(i)]['date'] for i in _analog_day_idxs]}")
+obs_today_gpu = _gpu(_make_uniform_wind_obs(today_obs, build_taipei_state))
+# Climo obs — T/q Held-Suarez relaxation target on free days.
+obs_climo_gpu = _gpu(_make_uniform_wind_obs(climo_ref, build_taipei_state))
+
+if USE_ANALOG_ENSEMBLE:
+    _rng = np.random.default_rng(seed=20260420)   # reproducible
+    _analog_day_idxs = _rng.choice(len(obs_days), size=6, replace=False)
+    _analog_obs_gpu = []
+    for _idx in _analog_day_idxs:
+        d = obs_days[int(_idx)]
+        aref = ReferenceObs(T_avg_C=d["T_mean_C"], RH_pct=d["RH_mean_pct"],
+                             P_hPa=d["P_mean_hPa"], ws_ms=d["ws_mean_ms"],
+                             wd_deg=d["wd_vec_deg"])
+        _analog_obs_gpu.append(_gpu(_make_uniform_wind_obs(aref, build_taipei_state)))
+    print(f"[legacy] analog days chosen: {[obs_days[int(i)]['date'] for i in _analog_day_idxs]}")
+else:
+    _analog_obs_gpu = None
+    print("TD native ensemble: day 2-7 free integration, 6-family branch divergence")
 
 forecast_branches = _forecast_families()   # wind_rot=0 for all
 # No rotation needed — stack init directly
@@ -227,13 +242,23 @@ t0 = time.time(); daily = []; budget = None
 CLIMO_WIND_BOOST = 3.0   # spectral-nudging-style: amplify wind_nudge on climo days to override PGF
 for d_idx in range(7):
     if d_idx == 0:
+        # Day 1 DA: full nudging to today_obs
         decay = 1.0
         wind_boost = 1.0
         obs_for_day = obs_today_gpu
-    else:
+    elif USE_ANALOG_ENSEMBLE:
+        # Legacy: nudge hard toward sampled historical analog day
         decay = 1.0
         wind_boost = CLIMO_WIND_BOOST
-        obs_for_day = _analog_obs_gpu[d_idx - 1]   # different historical day each free day
+        obs_for_day = _analog_obs_gpu[d_idx - 1]
+    else:
+        # TD native: decay=0 zeros all FDDA. Pure physics free-integration.
+        # Held-Suarez T_relax/q_relax toward obs_climo still active inside
+        # dynamics.py (TAU_T_SEC/TAU_Q_SEC, 5-day scale) — that's the only
+        # long-term anchor, and it's physically correct.
+        decay = 0.0
+        wind_boost = 1.0
+        obs_for_day = obs_climo_gpu
     pb = {
         "drag": p_act["drag"], "humid_couple": p_act["humid_couple"],
         "pg_scale": p_act["pg_scale"],
