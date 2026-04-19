@@ -26,9 +26,13 @@ import numpy as np
 from tree_diagram.numerics.forcing import GridConfig, build_grid, build_topography
 from tree_diagram.numerics.weather_state import WeatherState
 from tree_diagram.numerics.ensemble import DEFAULT_BRANCHES, run_ensemble, _rotate_wind_inplace
-from tree_diagram.numerics.ranking import rank_ensemble
+from tree_diagram.numerics.ranking import rank_ensemble, score_state
 from tree_diagram.numerics.dynamics import branch_step, LatentHeatingBudget
+from tree_diagram.numerics.dynamics_batched import (
+    batched_branch_step, stack_families, unstack_families
+)
 from tree_diagram.numerics.weather_contract import WeatherCalibration
+from tree_diagram.numerics._xp import has_cupy, to_numpy
 from td_taipei_forecast import build_taipei_state, ReferenceObs
 
 

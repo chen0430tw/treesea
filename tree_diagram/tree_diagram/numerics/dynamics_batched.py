@@ -26,7 +26,7 @@ from .dynamics import (
     LATENT_HEATING_STEP_K, LATENT_HEATING_HOUR_K,
     CFL_FACTOR, TAU_T_SEC, TAU_Q_SEC, TAU_FRICTION_SEC,
     SMAGORINSKY_C, SMAGORINSKY_MIN_NU, SMAGORINSKY_MAX_NU,
-    T_RAD_COOL_K_PER_DAY,
+    T_RAD_COOL_K_PER_DAY, TAU_CONDENSE_SEC,
 )
 from . import dynamics as _dyn
 
@@ -124,19 +124,21 @@ class BatchedBudget:
     hour_cap_K: float = LATENT_HEATING_HOUR_K
 
 
-def _condensation_limited_batched(T, q, humid_couple_bc, LV, CP, budget):
-    """T,q: (B,NY,NX). humid_couple_bc: (B,1,1)."""
+def _condensation_limited_batched(T, q, humid_couple_bc, LV, CP, budget, sub_dt: float):
+    """T,q: (B,NY,NX). humid_couple_bc: (B,1,1). τ-relaxed condensation."""
     xp = get_xp(T)
     qs = _saturation_q(T)
     q_target = qs * humid_couple_bc
     excess = xp.maximum(0.0, q - q_target)
-    dT_raw = (LV / CP) * excess
+    condense_frac = float(1.0 - np.exp(-sub_dt / TAU_CONDENSE_SEC))
+    q_released = excess * condense_frac
+    dT_raw = (LV / CP) * q_released
     dT_step = xp.minimum(dT_raw, budget.step_cap_K)
     room = xp.maximum(0.0, budget.hour_cap_K - budget.hour_accumulator_K)
     dT_limited = xp.minimum(dT_step, room)
     safe_dT_raw = xp.where(dT_raw > 1e-10, dT_raw, 1.0)
     frac = xp.where(dT_raw > 1e-10, dT_limited / safe_dT_raw, 0.0)
-    excess_used = excess * frac
+    excess_used = q_released * frac
     q_new = q - excess_used
     T_new = T + dT_limited
     budget.hour_accumulator_K = budget.hour_accumulator_K + dT_limited
@@ -244,7 +246,7 @@ def batched_branch_step(state_b: WeatherState, params_b: dict,
         q_new = q_adv + sub_dt * (q_diff + q_nudge + q_relax)
 
         T_new, q_new = _condensation_limited_batched(T_new, q_new, humid_couple_bc,
-                                                      LV, CP, budget)
+                                                      LV, CP, budget, sub_dt)
 
         h_new = _smooth(h_new)
         u_new = _smooth(u_new)

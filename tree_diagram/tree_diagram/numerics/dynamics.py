@@ -111,6 +111,12 @@ SMAGORINSKY_MAX_NU      = 5.0e4
 # as module-level for sweep tuning.
 T_RAD_COOL_K_PER_DAY    = 1.5
 
+# Condensation relaxation timescale — supersaturated q condenses over τ,
+# not one-shot per step. Real cloud microphysics timescales are ~10-30 min.
+# Old code released all excess-capped-by-T in a single step, creating sharp
+# Day-2 spikes in free integration. Exponential relaxation smears the release.
+TAU_CONDENSE_SEC        = 600.0
+
 
 # ====================================================================
 # Section 3 — 物理子模块
@@ -147,18 +153,28 @@ class LatentHeatingBudget:
 
 def condensation_limited(T, q, humid_couple: float,
                          LV: float, CP: float,
-                         budget: LatentHeatingBudget):
+                         budget: LatentHeatingBudget,
+                         sub_dt: float = 60.0):
+    """Relaxation-based condensation: excess_q decays toward 0 with τ = TAU_CONDENSE_SEC.
+
+    Per step: fraction released = 1 - exp(-sub_dt/τ). Safety caps (step_cap_K,
+    hour_cap_K) still apply as upper bounds on dT, protecting against
+    pathological excess bursts.
+    """
     xp = get_xp(T)
     qs = saturation_q_tetens(T)
     q_target = qs * humid_couple
     excess = xp.maximum(0.0, q - q_target)
-    dT_raw = (LV / CP) * excess
+    import math as _math
+    condense_frac = float(1.0 - _math.exp(-sub_dt / TAU_CONDENSE_SEC))
+    q_released = excess * condense_frac
+    dT_raw = (LV / CP) * q_released
     dT_step = xp.minimum(dT_raw, budget.step_cap_K)
     room = xp.maximum(0.0, budget.hour_cap_K - budget.hour_accumulator_K)
     dT_limited = xp.minimum(dT_step, room)
-    # cupy doesn't have errstate context manager with same semantics; avoid via where
+    # Track what fraction of the already-scaled release actually stuck
     frac = xp.where(dT_raw > 1e-10, dT_limited / xp.where(dT_raw > 1e-10, dT_raw, 1.0), 0.0)
-    excess_used = excess * frac
+    excess_used = q_released * frac
     q_new = q - excess_used
     T_new = T + dT_limited
     budget.hour_accumulator_K = budget.hour_accumulator_K + dT_limited
@@ -279,7 +295,7 @@ def branch_step(
         q_relax = -(q_adv - q_clim) / TAU_Q_SEC
         q_new = q_adv + sub_dt * (q_diff + q_nudge + q_relax)
 
-        T_new, q_new = condensation_limited(T_new, q_new, humid_couple, LV, CP, budget)
+        T_new, q_new = condensation_limited(T_new, q_new, humid_couple, LV, CP, budget, sub_dt)
 
         h_new = smooth(h_new, alpha=0.05)
         u_new = smooth(u_new, alpha=0.05)
