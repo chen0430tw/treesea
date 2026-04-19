@@ -33,6 +33,7 @@ from tree_diagram.numerics.forcing import GridConfig, build_grid, build_topograp
 from tree_diagram.numerics.weather_contract import WeatherCalibration
 from tree_diagram.numerics.dynamics import branch_step
 from tree_diagram.numerics.ensemble import _rotate_wind_inplace
+from tree_diagram.numerics.ranking import score_state
 from tree_diagram.numerics.weather_state import WeatherState
 from td_taipei_forecast import build_taipei_state, ReferenceObs
 from scipy import stats as sp_stats
@@ -124,6 +125,7 @@ def _worker_week_family(task: tuple) -> dict:
     state = _rotate_wind_inplace(init, fam["wind_rot_deg"])
     budget = None
     daily = []
+    day1_score = None
     for d_idx in range(7):
         params = dict(fam)
         if d_idx + 1 > 1:
@@ -131,13 +133,17 @@ def _worker_week_family(task: tuple) -> dict:
             params["wind_nudge"] = 0.0
         for _ in range(1440):
             state, budget = branch_step(state, params, obs_state, topo, cfg_day, budget)
+        if d_idx == 0:
+            # Day-1 score uses the current WD_CENTER_PENALTY_WEIGHT, so it
+            # varies with the sweep's weight parameter — this is the signal
+            # needed to differentiate families for multi-day fusion.
+            day1_score = float(score_state(state, obs_state, cfg_day)["score"])
         daily.append({"T_K": float(state.T[cy, cx]),
                       "h": float(state.h[cy, cx]),
                       "q": float(state.q[cy, cx]),
                       "u": float(state.u[cy, cx]),
                       "v": float(state.v[cy, cx])})
-    return {"family": fam["name"], "score": fam.get("_day1_score", 0.5),
-            "daily": daily}
+    return {"family": fam["name"], "day1_score": day1_score, "daily": daily}
 
 
 def fit_and_eval(cfg, obs_train, obs_oos, branches, wd_w, rad, pool) -> dict:
@@ -187,8 +193,11 @@ def fit_and_eval(cfg, obs_train, obs_oos, branches, wd_w, rad, pool) -> dict:
     fam_results = pool.map(_worker_week_family,
                             [(f, obs_ref_d, branches, wd_w, rad) for f in branches])
 
-    # Use day-1 score as weights (uniform fallback)
-    weights = np.ones(6) / 6
+    # Per-family day-1 scores (depend on current WD_CENTER_PENALTY_WEIGHT).
+    # Softmax-style: subtract min so positive, proportional to relative score.
+    day1_scores = np.array([fr["day1_score"] for fr in fam_results])
+    shifted = day1_scores - day1_scores.min() + 1e-6
+    weights = shifted / shifted.sum()
     # Weighted daily center
     week_T_C = []
     week_RH = []
@@ -211,6 +220,7 @@ def fit_and_eval(cfg, obs_train, obs_oos, branches, wd_w, rad, pool) -> dict:
         "week_T_spike": float(max(week_T_C) - week_T_C[0]),
         "week_RH_day7": float(week_RH[6]),
         "week_trajectory_T_C": [float(t) for t in week_T_C],
+        "family_weights": {fr["family"]: float(w) for fr, w in zip(fam_results, weights)},
         "calibration": cal_dict,
     }
 
