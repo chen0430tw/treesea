@@ -218,6 +218,12 @@ class WeatherCalibration:
     h_to_pressure_k: float = 0.02
     q_to_rh_ratio: float = 1.0
     wind_scale: float = 1.0
+    # Post-process offset for the 1-layer Coriolis veering residual.
+    # TD's single-layer shallow-water lacks baroclinic structure / PBL damping,
+    # so obs→TD wind direction accumulates an inertial-oscillation rotation
+    # (~80° veering at 25°N over 24h). Fitted as circular median(obs-td) across
+    # training days. Applied as: corrected_wd = (td_wd + offset) % 360.
+    wind_dir_offset_deg: float = 0.0
 
     def map_temperature(self, T_internal_K: float) -> float:
         return self.T_scale * T_internal_K + self.T_offset_K

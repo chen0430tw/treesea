@@ -63,9 +63,10 @@ def fit_day(obs_ref):
     scored = [(float(score_state(st, obs_state, cfg_fit)["score"]), st) for st in states]
     scored.sort(key=lambda x: -x[0])
     top = scored[0][1]
+    u, v = float(top.u[cy,cx]), float(top.v[cy,cx])
+    wd_td = (math.degrees(math.atan2(-u, -v)) + 360.0) % 360.0
     return dict(T_int=float(top.T[cy,cx]), h_ctr=float(top.h[cy,cx]),
-                q_int=float(top.q[cy,cx]),
-                u=float(top.u[cy,cx]), v=float(top.v[cy,cx]))
+                q_int=float(top.q[cy,cx]), u=u, v=v, wd_td=wd_td)
 
 
 print(f"Fitting B-calibration on 30 days ({'GPU batched' if has_cupy() else 'CPU numpy'})...")
@@ -93,23 +94,36 @@ q_rh = float(np.median(invert_q_to_rh_ratio(q_int, T_2m_C_ts, RH_real)))
 dh = h_ctr - 5700.0; mask = np.abs(dh) > 10.0
 h2p = float(np.median((1013 - P_real[mask]) / dh[mask])) if mask.sum() >= 3 else 0.02
 
+# Fit wind-direction offset: circular median of (obs_wd - td_wd) across training days.
+# Wraps each diff to [-180, 180]; simple median is robust if diffs cluster.
+wd_diffs = []
+for r in rows:
+    obs_wd = r["obs"]["wd_vec_deg"]
+    td_wd = r["td"]["wd_td"]
+    d = (obs_wd - td_wd + 540.0) % 360.0 - 180.0
+    wd_diffs.append(d)
+wd_offset = float(np.median(wd_diffs))
+print(f"Wind-dir offset: circular-median(obs - td) = {wd_offset:+.1f}° (n={len(wd_diffs)})")
+
 cal = WeatherCalibration(
-    location_name="Taipei (256×192+τ_cond+Kessler)",
-    fitted_date="2026-04-19 (finer grid + τ_condense + Kessler precip)",
+    location_name="Taipei (256×192+τ_cond+Kessler+wd_offset)",
+    fitted_date="2026-04-19 (finer grid + τ_condense + Kessler precip + wd Coriolis-offset)",
     T_offset_K=Tf["theilsen"]["intercept"], T_scale=Tf["theilsen"]["slope"],
     h_to_pressure_k=h2p, q_to_rh_ratio=q_rh,
     wind_scale=wf["theilsen_median"]["scale"],
+    wind_dir_offset_deg=wd_offset,
 )
 print(f"Calibration: T_scale={cal.T_scale:.4f} T_offset_K={cal.T_offset_K:+.3f} "
       f"q_to_rh={cal.q_to_rh_ratio:.3f} wind_scale={cal.wind_scale:.3f} h2p={cal.h_to_pressure_k:+.5f}")
 
 CAL_OUT.write_text(json.dumps({
-    "scheme": "B (256×192, τ_condense=600, Kessler precip τ=1000, wind_nudge decay)",
+    "scheme": "B (256×192, τ_condense=600, Kessler precip, wind_nudge decay, wd offset)",
     "calibration": {
         "location_name": cal.location_name, "fitted_date": cal.fitted_date,
         "T_offset_K": cal.T_offset_K, "T_scale": cal.T_scale,
         "h_to_pressure_k": cal.h_to_pressure_k,
         "q_to_rh_ratio": cal.q_to_rh_ratio, "wind_scale": cal.wind_scale,
+        "wind_dir_offset_deg": cal.wind_dir_offset_deg,
     }}, indent=2))
 
 # Build climatology obs (for days 2-7 to relax toward instead of today's pinned values)
@@ -175,7 +189,8 @@ for d_idx in range(7):
     h = np.average(hs, weights=w_day); u = np.average(us, weights=w_day); v = np.average(vs, weights=w_day)
     T_C = cal.T_scale * T_int + cal.T_offset_K - 273.15
     RH = cal.map_humidity(q, T_C); ws = cal.map_wind(u, v)
-    wd = (math.degrees(math.atan2(-u, -v)) + 360.0) % 360.0
+    wd_raw = (math.degrees(math.atan2(-u, -v)) + 360.0) % 360.0
+    wd = (wd_raw + cal.wind_dir_offset_deg) % 360.0
     P = cal.map_pressure(h)
     mode = "DA" if d_idx == 0 else "free"
     print(f"{date_str:<12} {mode:<5} {decay:>5.2f}  {T_C:>5.1f}°C {RH:>5.1f}% {ws:>4.1f} m/s @ {wd:>3.0f}° {P:>6.1f}hPa")
