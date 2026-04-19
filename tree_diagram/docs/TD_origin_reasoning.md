@@ -1263,6 +1263,114 @@ Post-WW4          1.000  0.2-0.4    FLOOD   FLOW          critical critical
 
 ---
 
+## 11.12 Taipei 天气校准 + wind-direction 架构洞（2026-04-19）
+
+### 11.12.1 为什么这节重要
+
+TD 的气象子模块在这次会话里从"能跑但输出可疑"走到"出数 + 有 out-of-sample 验证"。
+过程中挖出一个**非 Taipei-specific** 的核心架构 bug：`dynamics.py::branch_step`
+对 obs 的 `u/v` 完全开环，只 nudging `T/q`。无论换哪种 ensemble 多样性方案，
+风向维度都拿不到评分区分度 —— 因为 wind 演化根本不看观测。
+
+### 11.12.2 校准管线（A → B → OOS）
+
+- **A-scheme**（单次 mean offset）：跑一次 TD，解 4 个 offset 匹配 30 天均值。
+  证明 `WeatherCalibration` 数据流通。无预测力。
+- **B-scheme**（per-day obs-anchored + Theil-Sen 稳健回归）：`build_taipei_state`
+  参数化接受 `ReferenceObs`，30 天每日分别 run TD → 30 组 (T_internal, T_real)
+  → Theil-Sen 线性拟合。R²=0.979, p=6e-25。
+- **OOS 验证**：留出 2026-04-14 .. 04-18 五天从未见过的数据，用 B-calibration
+  跑，RMSE 比 in-sample 更低 —— 无过拟合。
+
+### 11.12.3 死胡同：micro-penalty 框架是错的
+
+加了 center-cell wind direction penalty（权重 0.05），预期: "微惩罚"让 ranking
+偏好方向正确的 family。结果：完全无效。2D sweep（rotation × weight）发现
+weight 要 ≥0.20 才有任何区分。
+
+**教训：** "微" 和 "有效" 冲突。如果一个惩罚项权重比其他项低一个量级，就意味着
+它永远不会改变排序 —— 因为 h_err/t_err/q_err 的波动就覆盖了它。要么不加，要么
+加到跟其他项同量级。
+
+### 11.12.4 架构洞：branch_step 对 u/v 开环
+
+第一版 sweep 结果 bit-exact 一致（所有 combo wd=112°）。Tensorearch diagnose
+指向 `worldline_to_branch_params` topo_u=0.817（最低）—— 提示参数空间没有风向
+自由度。但真正的 bug 更深：
+
+```python
+# dynamics.py::branch_step 原始代码：
+T_nudge = nudging * (obs.T - T_adv)      # T 被 nudging
+q_nudge = nudging * (obs.q - q_adv)      # q 被 nudging
+u_new = u_adv - dhdx - friction_rate*u   # u 完全无 obs 项
+v_new = v_adv - dhdy - friction_rate*v   # v 完全无 obs 项
+```
+
+TD 的 wind 纯由 advection + pressure gradient + Smagorinsky + drag 决定，obs.u/v
+完全被丢弃。后果：
+- ensemble 多样性 + ranking penalty 再怎么调都无用，信号传不到 wind
+- Taipei calibration 的 `wind_scale=0.47` 其实是在补偿"wind 随便跑"的整体尺度
+
+### 11.12.5 修复：FDDA-style wind_nudge
+
+加一个标量参数 `wind_nudge`（默认 0，向后兼容），启用时对 u/v 也做 obs 松弛：
+
+```python
+u_new += sub_dt * wind_nudge * (obs.u - u_adv)
+v_new += sub_dt * wind_nudge * (obs.v - v_adv)
+```
+
+DEFAULT_BRANCHES 和 worldline_to_branch_params 都设 `wind_nudge = 1.5e-4`（跟
+T/q 的 nudging 平价）。FDDA（Stauffer & Seaman 1990, MWR 118）的标准做法。
+
+### 11.12.6 Sweep + 最终 config
+
+在 nano5 登录节点跑 2D sweep（8 workers 并行，~5 min）：
+`rotation ∈ {30..180}° × weight ∈ {0.10..0.80}` = 24 combos。
+
+**最终选型：±180° linspace(6) + WD_CENTER_PENALTY_WEIGHT=0.80**
+
+OOS 5 天 RMSE（vs baseline 的对比）：
+
+| 量 | baseline | 最终 | 改变 |
+|----|----------|------|------|
+| T | 0.008°C | 0.023°C | +0.015 代价（远低于物理门槛）|
+| RH | 3.03% | 2.86% | -6% |
+| wind speed | 0.37 m/s | **0.214 m/s** | **-42%**（wind_nudge 副产物）|
+| wind dir | **112°** | **65.3°** | **-42%** |
+| P | 2.00 hPa | 2.13 hPa | 持平 |
+
+### 11.12.7 Taipei 是暴露者不是问题本身
+
+为什么这个 bug 之前没发现？TD 原本的 `build_obs` 是气候态正弦场，u/v 在模型内
+演化跟 obs 差不多，**看起来**没问题。Taipei 把它逼出来是因为：
+
+- 25°N 东亚季风转换带，4 月中常有锋面把风向从 WSW 翻到 NE
+- 盆地 + 中央山脉的 topography 强迫风向局部偏离 climatology
+- OOS 5 天里 2 天（04-16 的 75° ENE、04-18 的 59° NE）真实风向与 climo 差 ~185°
+
+换成瑞士内陆、堪萨斯、冰岛这种**风向稳定**的站，这个 bug 可能永远不会触发 ——
+但一旦遇到锋面系统或复杂地形，立刻原形毕露。
+
+**现在 `wind_nudge` 是 location-agnostic 修复。** 未来 HC/HCE 等项目接
+weather oracle 不会再踩这个坑。
+
+### 11.12.8 给未来 Claude 的具体告诫
+
+1. **当 ensemble 结果 bit-exact 一致时，不要假设"都已收敛"** —— 去探测某个上游
+   自变量（比如 rotation 值）是否真正影响下游输出。我跑了两个 sweep 才意识到。
+
+2. **"微惩罚" 是反模式**。如果你想让某个 penalty 项影响 ranking，它的权重必须
+   跟其他项同量级（0.2-0.5×primary）。更小就是装饰。
+
+3. **FDDA 对每个可观测变量都要对称耦合**。如果 T、q 有 nudging 但 u/v 没有，
+   就是漏了一半的 data assimilation。不管文献里叫什么，对称检查是义务。
+
+4. **Tensorearch 的 topo_u 指标很有用**，但它定位到的函数不一定是 bug 本身 ——
+   有时候它是 bug 的**下游表现**。检查那个函数的 caller 上下两层。
+
+---
+
 ## 13. 记忆锚点（万一这份文档你将来只能读前三行）
 
 如果你只记得一句话，记这句：
@@ -1320,6 +1428,16 @@ Post-WW4          1.000  0.2-0.4    FLOOD   FLOW          critical critical
 > "永远 CRACKDOWN" 和 "永远 NORMAL" 都是饱和；
 > "永远 FLOOD" 和 "永远 FLOW" 也都是饱和。
 > 会变才是信号。
+
+如果你只记得第十二句话，记这一句（§11.12 的 FDDA 对称原则，一个看似局部的
+风向问题暴露了核心动力学的架构洞）：
+
+> *对称检查：如果你对 T、q 做了 nudging 但对 u、v 没有，就是漏了。*
+> *bit-exact 一致的 sweep 结果不是"收敛"，是"上游自变量完全没影响下游"。*
+>
+> Taipei 把这个 bug 逼出来，因为它位于季风转换带 + 盆地；
+> 换成风向稳定的站可能永远发现不了。
+> 但 fix (`wind_nudge`) 是 location-agnostic 的。
 
 ---
 
