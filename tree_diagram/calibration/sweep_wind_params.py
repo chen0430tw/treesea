@@ -211,7 +211,7 @@ def main():
 
     # Multiprocessing: single Pool with spawn context (fork OOMs on login node).
     # Params are passed per-task so no respawn needed.
-    n_workers = 16
+    n_workers = 8
     cfg_dict = {"NX": cfg.NX, "NY": cfg.NY, "DX": cfg.DX, "DY": cfg.DY,
                 "DT": cfg.DT, "STEPS": cfg.STEPS}
     print(f"Using {n_workers} worker processes (spawn, persistent)")
