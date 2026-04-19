@@ -1078,6 +1078,191 @@ TD 的 17 维相空间不是为给你的自尊心打分设计的。
 
 ---
 
+## 11.11 全核心审计：五个饱和的控制阈值（2026-04-19）
+
+> **记录动机**：§11.1 修 zone classifier 饱和时以为 bug 只在离散层。
+> §11.8 修 weather pipeline 43°C 时以为只是 weather 模块问题。
+> 但每次跑场景都看到 `crackdown_ratio = 1.000` 和 `hydro_state = FLOOD`
+> **恒定**出现——不管是 WW4 还是 Ultra-Healthy。这不是噪声，是信号：
+> **TD 的整条控制链路有多处保守阈值同时饱和**。
+>
+> 用户点出"TD 是 treesea 所有项目的核心，如果它出问题下游全部受影响"，
+> 我做了一次系统审计，发现五个联动 bug。全部来自 session 前的早期
+> feat commits，不是本次会话写的——但本次会话之前都视而不见，用
+> "工具有边界" 糊弄过去了。
+
+### 11.11.1 症状链：为什么一个都看不出来
+
+单看任何一个指标都能找到"合理解释"：
+- `crackdown_ratio = 1.000` → "所有场景都是高风险，合理"
+- `hydro_state = FLOOD` → "系统积分到饱和，合理"
+- 每个候选 `branch_status = active` → "ensemble 都是健康成员，合理"
+
+五个指标**联合呈现恒定模式**时，才暴露真相：**整条控制链被多个阈值
+同时锁死在一端**。
+
+### 11.11.2 五个 bug 的 git 追踪
+
+| Bug | 位置 | 进仓库的 commit |
+|-----|------|----------------|
+| A | `umdst_kernel.evaluate_nrp` — `e_cons_threshold = 0.25` | `e2eb601 feat: add full architecture layers` |
+| B | `balance_layer.hydro_adjust_numerical` — `pb = 1.2 - 0.7·mi` | `bce1b5d feat: implement full two-stage integrated pipeline` |
+| C | `balance_layer.hydro_adjust_abstract` — `pb = 1.0 + active_ratio - wither_ratio` | 同 `bce1b5d` |
+| D | `worldline_kernel.classify_relative` — 绝对阈值 `max(0.20, 0.22·span)` | 同 `bce1b5d` |
+| E | `candidate_pipeline` 调 UTM 时丢了 `metrics_list` / `utm_p_blow` | `ea3b73b feat: wire CBF Balance and H-UTM into pipeline` |
+
+**都是"搭完骨架后填数字的时候随手写的默认值"**。每个单独看"看起来
+合理"，组合起来让整条控制链饱和。
+
+### 11.11.3 Bug 详情与修法
+
+**Bug A：NRP e_cons_threshold = 0.25 过严**
+
+```python
+if metrics.e_cons_mean > e_cons_threshold:   # e_cons = r.risk
+    return CRACKDOWN
+```
+
+问题：真实场景 `r.risk` 都在 0.3-0.7，`0.25` 几乎**所有场景都触发
+CRACKDOWN**。跟 p_blow 阶梯（`p0=0.60`/`p1=0.85`）完全不对齐。
+
+修法：改成三档阶梯对齐 p_blow：
+```python
+e_cons_crackdown = 0.70     # WW4/Singularity-Probe 触发
+e_cons_negotiate = 0.50     # AI/COVID Post 触发
+```
+
+**Bug B：numerical hydro 公式 baseline = 1.2 > FLOOD 阈值**
+
+```python
+pb = 1.0 - 0.5·mi + 0.2·(1.0 - mi)        # 展开 = 1.2 - 0.7·mi
+# FLOOD threshold = 1.15
+# mi=0 ⇒ pb=1.2 ⇒ FLOOD (永远触发)
+```
+
+修法：重新设计让 baseline=1.0 且双向可触发：
+```python
+pb = 1.0 - 0.4·mi + 0.5·score_spread - 0.3·top_margin
+# mi=0, ss=0, tm=0 ⇒ pb=1.0 FLOW (中性) ✓
+```
+
+**Bug C：abstract hydro 公式让 all-active → FLOOD**
+
+```python
+pb = 1.0 + active_ratio - wither_ratio
+# 所有 candidate active (常态) ⇒ pb=2.0 → 深 FLOOD
+```
+
+active 是好信号，不该推向"overflow"。修法：
+```python
+pb = 1.0 + restricted_ratio - wither_ratio
+# 全 active = 1.0 FLOW baseline
+# restricted 多 = FLOOD (竞争大)
+# wither 多 = DROUGHT (供给不足)
+```
+
+**Bug D：classify_relative 绝对阈值 > 动态 span**
+
+```python
+if rel <= max(0.20, 0.22·span):  out.append("active")
+# TD score 动态范围只有 0.05-0.20
+# 绝对阈值 0.20 意味着所有候选都 "active"
+```
+
+修法：**纯 fraction-of-span 分类**，任何 span 都能分档：
+```python
+rel = (best - s) / span
+if   rel <= 0.25: active
+elif rel <= 0.55: restricted
+elif rel <= 0.85: starved
+else:             withered
+```
+
+**Bug E：candidate_pipeline 漏传 UTM 参数**
+
+```python
+utm_adj = utm_ctrl.adjust(top_results, step=self.steps)
+#                                 ↑ 没传 metrics_list
+#                                 ↑ 没传 utm_p_blow
+```
+
+UTM 内部 fallback：
+```python
+if metrics_list:  numerical_h = hydro_adjust_numerical(metrics_list)
+else:             numerical_h = hydro_adjust_numerical([])  # default pb=1.0
+```
+
+修法：从 pipeline 内部状态构造 metrics_list，并从 CBF allocation 里
+拿 mean_p_blow：
+```python
+metrics_list_for_utm = [
+    {"score": r.balanced_score,
+     "instability": max(0.0, 1.0 - r.stability)}
+    for r in top_results
+]
+utm_p_blow_value = hydro["cbf_allocation"]["mean_p_blow"]
+utm_adj = utm_ctrl.adjust(top_results, metrics_list=...,
+                          utm_p_blow=..., step=self.steps)
+```
+
+### 11.11.4 修复前后对比（五个场景 ✕ 四个指标）
+
+```
+                  crackdown_ratio   hydro_state           zone
+                  before  after      before  after         before  after
+Ultra-Healthy     1.000  0.000      FLOOD   FLOW          stable  stable
+Stable-Baseline   1.000  0.000      FLOOD   FLOW          stable  transition
+Singularity-Probe 1.000  1.000      FLOOD   FLOW          critical critical
+WW3-Emergence     1.000  0.400      FLOOD   FLOW          critical critical
+Pre-WW3           1.000  0.000      FLOOD   FLOW          transition transition
+Post-WW4          1.000  0.2-0.4    FLOOD   FLOW          critical critical
+```
+
+**关键**：
+- `crackdown_ratio` 不再恒定 1.000，真正依赖场景严重度
+- `hydro_state` 从恒定 FLOOD 变 FLOW 为主（但 DROUGHT/FLOOD 两端都可触发）
+- `zone` 分布更真实——stable-baseline 从 5/5 对半分变成 3/7 倾向 transition
+- Singularity-Probe 是**第一次**看到真正的 `crackdown=1.000` red line
+
+### 11.11.5 这一节的教训
+
+1. **饱和的阈值 = 看不见的 bug**。输出都合理、代码都合理、但**联合
+   呈现恒定模式**时，就是整条链路被多个点同时拽到一端。排查方法：
+   同时跑多个数量级差异的场景，看控制指标是否跟着变化。
+
+2. **GPT 骨架 ≠ 数值定值**。GPT 当初只给出模块、接口、函数名。具体
+   阈值（0.25、0.20、1.2-0.7×mi）是后续 feat commit "填数字时"写
+   的默认值。**每个单独都看起来合理，组合起来就饱和**。
+
+3. **Agent 很容易把饱和 bug 说成"工具边界"**。我之前看到 crackdown
+   恒定时，给出的解释是"TD 天生保守，对一般场景都判红"——这种
+   "系统级解释"正是认知偏差的伪装（§10 / §11.7.4 已经诊断过）。
+   当解释听起来像"这就是工具的性格"，要警惕。
+
+4. **TD 是 treesea 所有项目的核心依赖**。这五个 bug 单独看在天气、
+   weather、forecast 场景里都能糊弄过去，但任何下游项目（CFPAI、
+   MOROZ、HCE、Honkai Core）如果调用 TD 的控制链，都会拿到
+   `crackdown_ratio=1.000 / hydro=FLOOD` 这种**恒定无信号的输出**，
+   导致它们的判定层也失效。**修一次 TD = 潜在修六个下游项目**。
+
+5. **审计原则**：遇到"看起来保守但永远不变"的输出，直接 grep 所有
+   数值阈值，看它们跟当前数据的动态范围是否匹配。阈值高于实际范围
+   上限（如 0.20 > 动态 span 0.1）或低于实际范围下限（如 0.25 <
+   真实 risk 0.3），就是饱和病灶。
+
+### 11.11.6 给未来 Claude 的具体告诫
+
+如果你（读到这段）未来看到 TD 某个控制指标"恒定"——
+
+**不要立刻解释**。先做三件事：
+1. 用 3 种量级差异的场景（healthy / moderate / extreme）各跑一次
+2. 如果该指标在三种场景下都一样 → 饱和 bug，不是"工具边界"
+3. grep 所有 hard-coded 数值阈值，跟当前实际数据范围对比
+
+然后再写解释。否则你就是在给恒定 1.000 的数字写合理化借口。
+
+---
+
 ## 13. 记忆锚点（万一这份文档你将来只能读前三行）
 
 如果你只记得一句话，记这句：
@@ -1124,6 +1309,17 @@ TD 的 17 维相空间不是为给你的自尊心打分设计的。
 >
 > 你在写 ProblemSeed 时，如果觉得自己很聪明 / 很诚实 / 很有深度——
 > 先问自己：**这是不是一道 Claude 版弱智吧题？**
+
+如果你只记得第十一句话，记这一句（§11.11 的审计原则，TD 是 treesea
+所有项目的核心，饱和 bug 会污染下游所有项目）：
+
+> *某个 TD 控制指标"恒定不变"时——不要解释，先测。*
+> *用 healthy / moderate / extreme 三种场景各跑一次，*
+> *如果三档输出一样，那不是"工具性格"，是饱和 bug。*
+>
+> "永远 CRACKDOWN" 和 "永远 NORMAL" 都是饱和；
+> "永远 FLOOD" 和 "永远 FLOW" 也都是饱和。
+> 会变才是信号。
 
 ---
 
