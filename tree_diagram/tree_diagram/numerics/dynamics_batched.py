@@ -187,6 +187,7 @@ def batched_branch_step(state_b: WeatherState, params_b: dict,
     nudging_bc      = _to_b11(xp, params_b["nudging"], B)
     pg_scale_bc     = _to_b11(xp, params_b["pg_scale"], B)
     wind_nudge_bc   = _to_b11(xp, params_b.get("wind_nudge", [0.0] * B), B)
+    h_nudge_bc      = _to_b11(xp, params_b.get("h_nudge", [0.0] * B), B)
 
     h, u, v, T, q = state_b.h, state_b.u, state_b.v, state_b.T, state_b.q
 
@@ -238,7 +239,8 @@ def batched_branch_step(state_b: WeatherState, params_b: dict,
 
         div = _grad_x(u_new, DX) + _grad_y(v_new, DY)
         h_new = (h_adv - sub_dt * cfg.BASE_H * div
-                 + sub_dt * _smag_diffusion(h_adv, nu_smag, DX, DY))
+                 + sub_dt * _smag_diffusion(h_adv, nu_smag, DX, DY)
+                 + sub_dt * h_nudge_bc * (obs.h - h_adv))
 
         T_diff = 0.3 * _smag_diffusion(T_adv, nu_smag, DX, DY)
         T_nudge = nudging_bc * (obs.T - T_adv)

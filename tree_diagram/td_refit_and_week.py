@@ -57,6 +57,10 @@ def fit_day(obs_ref):
     rotated = [_rotate_wind_inplace(init, f["wind_rot_deg"]) for f in DEFAULT_BRANCHES]
     state_b = stack_families(rotated)
     params = {k: [f[k] for f in DEFAULT_BRANCHES] for k in ["drag","humid_couple","nudging","pg_scale","wind_nudge"]}
+    # Training consistency: enable h-nudging during fit so training h_ctr
+    # reflects obs_ref.P_hPa. Without this, slope(P vs h) fit would still
+    # see h_ctr near-constant → collapsed h2p.
+    params["h_nudge"] = [1.16e-5 for _ in DEFAULT_BRANCHES]
     bud = None
     for _ in range(cfg_fit.STEPS):
         state_b, bud = batched_branch_step(state_b, params, obs_state, topo_g, cfg_fit, bud)
@@ -210,6 +214,11 @@ forecast_branches = _forecast_families()   # wind_rot=0 for all
 state_b = stack_families([init] * len(forecast_branches))
 p_act = {k: [f[k] for f in forecast_branches] for k in
          ["drag","humid_couple","nudging","pg_scale","wind_nudge"]}
+# h-nudge: 1/day timescale (~1.16e-5 /s). Without this, init h is locked
+# by today_obs.P and days 2-7 all output bit-exact pressure regardless
+# of analog obs P. Same decay schedule as wind_nudge (fades with forecast lead).
+H_NUDGE_BASE = 1.16e-5
+p_act["h_nudge"] = [H_NUDGE_BASE for _ in forecast_branches]
 
 t0 = time.time(); daily = []; budget = None
 CLIMO_WIND_BOOST = 3.0   # spectral-nudging-style: amplify wind_nudge on climo days to override PGF
@@ -227,6 +236,7 @@ for d_idx in range(7):
         "pg_scale": p_act["pg_scale"],
         "nudging":    [n * decay for n in p_act["nudging"]],
         "wind_nudge": [w * decay * wind_boost for w in p_act["wind_nudge"]],
+        "h_nudge":    [h * decay for h in p_act["h_nudge"]],
     }
     # DEBUG: snapshot state at start of day
     _dbg_u_start = float(state_b.u[0, cy, cx])

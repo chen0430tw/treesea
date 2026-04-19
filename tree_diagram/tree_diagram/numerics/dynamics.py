@@ -300,8 +300,14 @@ def branch_step(
                  + sub_dt * wind_nudge * (obs.v - v_adv))
 
         div = grad_x(u_new, DX) + grad_y(v_new, DY)
+        # h-nudging: without it, synoptic pressure anomaly from obs (encoded
+        # as uniform h offset in build_taipei_state) can't propagate past
+        # init, so multi-day forecasts with varying analog obs P all show
+        # the same model h_center → bit-exact pressure output.
+        h_nudge = params.get("h_nudge", 0.0)
         h_new = (h_adv - sub_dt * cfg.BASE_H * div
-                 + sub_dt * smagorinsky_diffusion(h_adv, nu_smag, DX, DY))
+                 + sub_dt * smagorinsky_diffusion(h_adv, nu_smag, DX, DY)
+                 + sub_dt * h_nudge * (obs.h - h_adv))
 
         T_diff = 0.3 * smagorinsky_diffusion(T_adv, nu_smag, DX, DY)
         T_nudge = nudging * (obs.T - T_adv)
