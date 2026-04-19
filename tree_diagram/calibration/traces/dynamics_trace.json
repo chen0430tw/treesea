@@ -1,0 +1,125 @@
+{
+  "system": {
+    "name": "dynamics",
+    "batch_size": 0,
+    "seq_len": 0,
+    "latency_ms": 0.0,
+    "tokens_per_sec": 0.0,
+    "device": "unknown"
+  },
+  "summary": {
+    "global_coupling_efficiency": 0.14497431116035586,
+    "global_obedience_score": 0.5480645544428118,
+    "global_intelligence_score": 0.0,
+    "predicted_bottleneck": "blk0.mid_block"
+  },
+  "slices": [
+    {
+      "slice_id": "blk0.mid_block",
+      "kind": "mid_block",
+      "op_type": "attention",
+      "cost": 10.0,
+      "propagated_cost": 16.56,
+      "slice_bottleneck_index": 0.2806779661016949,
+      "topological_congestion": 5.520293887832669,
+      "direct_effect": 9.5,
+      "estimated_total_effect": 15.731999999999998,
+      "freedom_index": 0.7991636335244856,
+      "compliance_index": 0.5174801672075012,
+      "route_entropy": 0.0,
+      "effect_entropy": 0.0,
+      "compliance_entropy": 0.9921901493683896,
+      "intelligence_index": 0.0,
+      "propagated_state": 7.991199999999998
+    },
+    {
+      "slice_id": "blk0.down_block",
+      "kind": "down_block",
+      "op_type": "downsample",
+      "cost": 8.2,
+      "propagated_cost": 16.2,
+      "slice_bottleneck_index": 0.2745762711864407,
+      "topological_congestion": 6.7320657168691085,
+      "direct_effect": 7.789999999999999,
+      "estimated_total_effect": 15.389999999999999,
+      "freedom_index": 0.4578128001093248,
+      "compliance_index": 0.5456368056164055,
+      "route_entropy": 0.0,
+      "effect_entropy": 0.0,
+      "compliance_entropy": 0.9410731335616511,
+      "intelligence_index": 0.0,
+      "propagated_state": 5.0176
+    },
+    {
+      "slice_id": "blk0.conv_in",
+      "kind": "conv_in",
+      "op_type": "conv",
+      "cost": 5.0,
+      "propagated_cost": 11.559999999999999,
+      "slice_bottleneck_index": 0.1959322033898305,
+      "topological_congestion": 6.394362436556622,
+      "direct_effect": 4.75,
+      "estimated_total_effect": 10.981999999999998,
+      "freedom_index": 0.4143047261303364,
+      "compliance_index": 0.5613137074280256,
+      "route_entropy": 0.0,
+      "effect_entropy": 0.0,
+      "compliance_entropy": 0.9244650947438154,
+      "intelligence_index": 0.0,
+      "propagated_state": 1.7149999999999996
+    },
+    {
+      "slice_id": "blk0.up_block",
+      "kind": "up_block",
+      "op_type": "upsample",
+      "cost": 8.2,
+      "propagated_cost": 11.08,
+      "slice_bottleneck_index": 0.18779661016949153,
+      "topological_congestion": 2.7837820176920776,
+      "direct_effect": 7.789999999999999,
+      "estimated_total_effect": 10.526,
+      "freedom_index": 0.4578128001093248,
+      "compliance_index": 0.5456368056164055,
+      "route_entropy": 0.0,
+      "effect_entropy": 0.0,
+      "compliance_entropy": 0.9410731335616511,
+      "intelligence_index": 0.0,
+      "propagated_state": 8.907399999999997
+    },
+    {
+      "slice_id": "blk0.conv_out",
+      "kind": "conv_out",
+      "op_type": "conv",
+      "cost": 3.6,
+      "propagated_cost": 3.6,
+      "slice_bottleneck_index": 0.061016949152542375,
+      "topological_congestion": 0,
+      "direct_effect": 3.42,
+      "estimated_total_effect": 3.42,
+      "freedom_index": 0.3905604916824598,
+      "compliance_index": 0.5702552863457211,
+      "route_entropy": 0.0,
+      "effect_entropy": 0.0,
+      "compliance_entropy": 0.91401594582377,
+      "intelligence_index": 0.0,
+      "propagated_state": 6.962399999999999
+    }
+  ],
+  "top_edge_attributions": [
+    {
+      "src": "blk0.down_block",
+      "dst": "blk0.mid_block",
+      "edge_attribution": 7.068669002712564
+    },
+    {
+      "src": "blk0.conv_in",
+      "dst": "blk0.down_block",
+      "edge_attribution": 6.7842625851271485
+    },
+    {
+      "src": "blk0.mid_block",
+      "dst": "blk0.up_block",
+      "edge_attribution": 5.856897173676124
+    }
+  ]
+}

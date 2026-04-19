@@ -19,7 +19,7 @@ from datetime import date, timedelta
 from pathlib import Path
 import numpy as np
 
-sys.path.insert(0, str(Path("D:/treesea/tree_diagram").resolve()))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tree_diagram.numerics.forcing import GridConfig, build_grid, build_topography
 from tree_diagram.numerics.ensemble import run_ensemble
@@ -33,8 +33,8 @@ TAIPEI_LON = 121.5319
 OOS_START = date(2026, 4, 14)
 OOS_END   = date(2026, 4, 18)
 
-CAL_FILE = Path("D:/treesea/tree_diagram/calibration/taipei_calibration_b.json")
-OUT_FILE = Path("D:/treesea/tree_diagram/calibration/taipei_oos_validation.json")
+CAL_FILE = Path(__file__).parent / "taipei_calibration_b.json"
+OUT_FILE = Path(__file__).parent / "taipei_oos_validation.json"
 
 
 def fetch_obs(start: date, end: date) -> list[dict]:

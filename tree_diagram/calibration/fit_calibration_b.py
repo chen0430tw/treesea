@@ -28,7 +28,7 @@ from pathlib import Path
 import numpy as np
 from scipy import stats as sp_stats
 
-sys.path.insert(0, str(Path("D:/treesea/tree_diagram").resolve()))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tree_diagram.numerics.forcing import GridConfig, build_grid, build_topography
 from tree_diagram.numerics.ensemble import run_ensemble
@@ -36,8 +36,8 @@ from tree_diagram.numerics.ranking import rank_ensemble
 from tree_diagram.numerics.weather_contract import WeatherCalibration
 from td_taipei_forecast import build_taipei_state, ReferenceObs
 
-OBS_FILE = Path("D:/treesea/tree_diagram/calibration/taipei_obs_daily.json")
-CAL_OUT  = Path("D:/treesea/tree_diagram/calibration/taipei_calibration_b.json")
+OBS_FILE = Path(__file__).parent / "taipei_obs_daily.json"
+CAL_OUT  = Path(__file__).parent / "taipei_calibration_b.json"
 
 
 # ---------------------------------------------------------------------------

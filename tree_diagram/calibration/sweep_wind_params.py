@@ -18,7 +18,7 @@ from datetime import date
 from pathlib import Path
 import numpy as np
 
-sys.path.insert(0, str(Path("D:/treesea/tree_diagram").resolve()))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tree_diagram.numerics import ensemble, ranking
 from tree_diagram.numerics.forcing import GridConfig, build_grid, build_topography
@@ -37,7 +37,7 @@ from calibration.oos_validate import fetch_obs, predict_day, OOS_START, OOS_END
 ROT_MAX_VALUES = [30.0, 60.0, 90.0, 120.0, 150.0, 180.0]
 WEIGHT_VALUES  = [0.10, 0.20, 0.40, 0.80]
 
-OUT_FILE = Path("D:/treesea/tree_diagram/calibration/sweep_wind_params_localized.json")
+OUT_FILE = Path(__file__).parent / "sweep_wind_params_localized.json"
 
 
 def build_rotated_branches(rot_max: float) -> list:
