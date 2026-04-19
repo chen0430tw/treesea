@@ -120,7 +120,7 @@ def main():
     cal_dict = json.loads(CAL_FILE.read_text(encoding="utf-8"))["calibration"]
     cal = WeatherCalibration(**cal_dict)
 
-    cfg = GridConfig(NX=64, NY=48, DX=24000.0, DY=24000.0, DT=60.0, STEPS=STEPS_PER_DAY)
+    cfg = GridConfig(NX=256, NY=192, DX=6000.0, DY=6000.0, DT=60.0, STEPS=STEPS_PER_DAY)
     XX, YY, _x, _y = build_grid(cfg)
     topo = build_topography(XX, YY)
     cy = int(np.argmin(np.abs(YY[:, 0])))
@@ -146,7 +146,7 @@ def main():
 
     # Weight families by day-1 ensemble score (run standard ensemble for day-1 scoring)
     print("\nRanking families by day-1 ensemble score (for weighted fusion)...")
-    day1_cfg = GridConfig(NX=64, NY=48, DX=24000.0, DY=24000.0, DT=60.0, STEPS=STEPS_PER_DAY)
+    day1_cfg = GridConfig(NX=256, NY=192, DX=6000.0, DY=6000.0, DT=60.0, STEPS=STEPS_PER_DAY)
     day1_raw = run_ensemble(initial_state=init, obs=obs_state, topography=topo,
                              cfg=day1_cfg, pressure_balance=1.0, n_workers=1)
     day1_ranked = rank_ensemble(day1_raw)

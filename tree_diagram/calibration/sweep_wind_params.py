@@ -202,7 +202,7 @@ def main():
     print(f"Fetched {len(obs_oos)} OOS days\n")
 
     # Grid cache
-    cfg = GridConfig(NX=64, NY=48, DX=24000.0, DY=24000.0, DT=60.0, STEPS=120)
+    cfg = GridConfig(NX=256, NY=192, DX=6000.0, DY=6000.0, DT=60.0, STEPS=120)
     XX, YY, _x, _y = build_grid(cfg)
     topo = build_topography(XX, YY)
     cy = int(np.argmin(np.abs(YY[:, 0])))

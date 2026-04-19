@@ -119,7 +119,7 @@ def run_regime_forecast():
           f"P: {TAIPEI_PRESSURE_HPA} hPa, wind: {TAIPEI_WIND_MS} m/s W")
     print()
 
-    cfg = GridConfig(NX=64, NY=48, DX=24000.0, DY=24000.0, DT=60.0, STEPS=120)
+    cfg = GridConfig(NX=256, NY=192, DX=6000.0, DY=6000.0, DT=60.0, STEPS=120)
     XX, YY, x, y = build_grid(cfg)
     topo = build_topography(XX, YY)
 
@@ -155,7 +155,7 @@ def attempt_calibrated_forecast():
     print("ATTEMPTING calibrated_quant MODE WITHOUT CALIBRATION")
     print("=" * 72)
 
-    cfg = GridConfig(NX=64, NY=48, DX=24000.0, DY=24000.0, DT=60.0, STEPS=120)
+    cfg = GridConfig(NX=256, NY=192, DX=6000.0, DY=6000.0, DT=60.0, STEPS=120)
     XX, YY, x, y = build_grid(cfg)
     topo = build_topography(XX, YY)
     obs = build_taipei_state(XX, YY, topo, cfg, perturbation=0.0)
@@ -209,7 +209,7 @@ def run_calibrated_forecast_with_fitted():
           f"q_to_rh_ratio={cal.q_to_rh_ratio:.3f}  wind_scale={cal.wind_scale:.3f}  "
           f"h_to_pressure_k={cal.h_to_pressure_k:+.5f}")
 
-    cfg = GridConfig(NX=64, NY=48, DX=24000.0, DY=24000.0, DT=60.0, STEPS=120)
+    cfg = GridConfig(NX=256, NY=192, DX=6000.0, DY=6000.0, DT=60.0, STEPS=120)
     XX, YY, x, y = build_grid(cfg)
     topo = build_topography(XX, YY)
     obs = build_taipei_state(XX, YY, topo, cfg, perturbation=0.0)

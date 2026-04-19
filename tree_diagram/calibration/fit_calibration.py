@@ -48,7 +48,7 @@ def load_obs_means():
 
 def run_td_and_extract_center():
     """Run TD once and return center-cell internal state."""
-    cfg = GridConfig(NX=64, NY=48, DX=24000.0, DY=24000.0, DT=60.0, STEPS=240)
+    cfg = GridConfig(NX=256, NY=192, DX=6000.0, DY=6000.0, DT=60.0, STEPS=240)
     XX, YY, x, y = build_grid(cfg)
     topo = build_topography(XX, YY)
     obs = build_taipei_state(XX, YY, topo, cfg, perturbation=0.0)
