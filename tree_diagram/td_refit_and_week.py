@@ -164,7 +164,10 @@ print(f"Climatology obs for free days: T={climo_T:.1f}°C  RH={climo_RH:.1f}%  "
 
 # Week forecast
 print("\nWeek forecast (zero wind_rot, climo obs days 2-7, wind_nudge decay τ=2d)...")
-today_obs = ReferenceObs(T_avg_C=24.0, RH_pct=82.5, P_hPa=1009.0, ws_ms=3.6, wd_deg=270.0)
+# 2026-04-19 actual daily-mean from Open-Meteo/ECMWF (verified 2026-04-20).
+# Previous hardcoded 24.0/82.5/1009/3.6@270 was wrong — wind direction
+# especially (270° W vs actual 44° NE) poisoned day-1 DA output.
+today_obs = ReferenceObs(T_avg_C=23.8, RH_pct=75.0, P_hPa=1012.3, ws_ms=1.69, wd_deg=44.0)
 # Init wind uniform at today value (not Gaussian-blended) — prevents advection
 # from far-field climo-direction cells polluting the center.
 _init_base = build_taipei_state(XX, YY, topo, cfg_day, perturbation=-1.0, obs_ref=today_obs)
