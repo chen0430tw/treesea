@@ -106,13 +106,13 @@ def build_taipei_state(XX, YY, topography, cfg: GridConfig,
     v_climo = -TAIPEI_CLIMO_WS_MS * math.cos(_wd_rad_c)
     _half_x = 0.5 * cfg.NX * cfg.DX      # physical half-domain (m)
     _half_y = 0.5 * cfg.NY * cfg.DY
-    _slope_x = 0.0  # DBG
-    _slope_y = 0.0
+    _slope_x = v_climo * cfg.F0 / cfg.G * _half_x
+    _slope_y = -u_climo * cfg.F0 / cfg.G * _half_y
     # Periodic-BC safe envelope: linear slope near center fades to EXACTLY 0
     # at X=±1 / Y=±1 via (1-X²)(1-Y²) polynomial → h values wrap seamlessly
     # (avoids np.roll boundary discontinuity that blew wind to U_CLIP_MS=35).
     _env = (1.0 - XX**2) * (1.0 - YY**2)
-    h_bg = cfg.BASE_H + _slope_x * XX * _env + _slope_y * YY * _env  # DBG: removed topo
+    h_bg = cfg.BASE_H + _slope_x * XX * _env + _slope_y * YY * _env - 0.006 * topography
     u_bg, v_bg = geostrophic_wind_from_h(h_bg, cfg.DX, cfg.DY, cfg.F0, cfg.G)
     T_bg = 273.15 + 18.0 * np.cos(np.pi * YY) - 8.0 * np.sin(np.pi * XX) - 0.004 * topography
     q_bg = 0.008 + 0.005 * np.cos(np.pi * YY)**2 - 0.002 * np.sin(np.pi * XX)**2

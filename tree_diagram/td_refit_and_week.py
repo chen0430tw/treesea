@@ -40,7 +40,6 @@ topo = build_topography(XX, YY)
 cy = int(np.argmin(np.abs(YY[:, 0])))
 cx = int(np.argmin(np.abs(XX[0, :])))
 
-topo = np.zeros_like(topo)   # DBG: disable topography
 if has_cupy():
     import cupy as cp
     topo_g = cp.asarray(topo)
@@ -195,8 +194,8 @@ for d_idx in range(7):
     pb = {
         "drag": p_act["drag"], "humid_couple": p_act["humid_couple"],
         "pg_scale": p_act["pg_scale"],
-        "nudging":    [0.0 for _ in p_act["nudging"]],       # DBG
-        "wind_nudge": [0.0 for _ in p_act["wind_nudge"]],    # DBG
+        "nudging":    [n * decay for n in p_act["nudging"]],
+        "wind_nudge": [w * decay * wind_boost for w in p_act["wind_nudge"]],
     }
     # DEBUG: snapshot state at start of day
     _dbg_u_start = float(state_b.u[0, cy, cx])
