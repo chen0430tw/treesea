@@ -172,7 +172,20 @@ def _make_uniform_wind_obs(obs_ref, base_fn):
 # Day 1 obs: uniform TODAY wind across grid (not Gaussian-weighted)
 # Days 2-7 obs: uniform CLIMO wind across grid
 obs_today_gpu = _gpu(_make_uniform_wind_obs(today_obs, build_taipei_state))
-obs_climo_gpu = _gpu(_make_uniform_wind_obs(climo_ref, build_taipei_state))
+
+# Analog ensemble: days 2-7 each sample a historical day from the 30-day
+# training set rather than using static climo. Gives real day-to-day
+# variability (synoptic evolution baked into actual past data).
+_rng = np.random.default_rng(seed=20260420)   # reproducible
+_analog_day_idxs = _rng.choice(len(obs_days), size=6, replace=False)
+_analog_obs_gpu = []
+for _idx in _analog_day_idxs:
+    d = obs_days[int(_idx)]
+    aref = ReferenceObs(T_avg_C=d["T_mean_C"], RH_pct=d["RH_mean_pct"],
+                         P_hPa=d["P_mean_hPa"], ws_ms=d["ws_mean_ms"],
+                         wd_deg=d["wd_vec_deg"])
+    _analog_obs_gpu.append(_gpu(_make_uniform_wind_obs(aref, build_taipei_state)))
+print(f"Analog days chosen: {[obs_days[int(i)]['date'] for i in _analog_day_idxs]}")
 
 forecast_branches = _forecast_families()   # wind_rot=0 for all
 # No rotation needed — stack init directly
@@ -188,9 +201,9 @@ for d_idx in range(7):
         wind_boost = 1.0
         obs_for_day = obs_today_gpu
     else:
-        decay = 1.0                    # climo permanent
-        wind_boost = CLIMO_WIND_BOOST  # strong uniform climo wind (spectral nudging)
-        obs_for_day = obs_climo_gpu
+        decay = 1.0
+        wind_boost = CLIMO_WIND_BOOST
+        obs_for_day = _analog_obs_gpu[d_idx - 1]   # different historical day each free day
     pb = {
         "drag": p_act["drag"], "humid_couple": p_act["humid_couple"],
         "pg_scale": p_act["pg_scale"],
