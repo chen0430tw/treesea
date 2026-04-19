@@ -266,20 +266,58 @@ for d_idx in range(7):
         "wind_nudge": [w * decay * wind_boost for w in p_act["wind_nudge"]],
         "h_nudge":    [h * decay for h in p_act["h_nudge"]],
     }
-    # DEBUG: snapshot state at start of day
-    _dbg_u_start = float(state_b.u[0, cy, cx])
-    _dbg_v_start = float(state_b.v[0, cy, cx])
-    _obs_u_center = float(obs_for_day.u[cy, cx])
-    _obs_v_center = float(obs_for_day.v[cy, cx])
-    _wn_val = pb["wind_nudge"][0]
+    # ==================================================================
+    # DIAGNOSTIC: what does TD see / compute each day?
+    # ==================================================================
+    _to_np = lambda a: a.get() if hasattr(a, "get") else np.asarray(a)
+
+    def _stats(name, arr):
+        a = _to_np(arr)
+        return (f"{name}: min={float(a.min()):+.3e} max={float(a.max()):+.3e} "
+                f"mean={float(a.mean()):+.3e} std={float(a.std()):.3e}")
+
+    # State at START of day (first family)
+    print(f"\n  === Day {d_idx+1} START (fam0) ===")
+    print("    " + _stats("h   ", state_b.h[0]))
+    print("    " + _stats("u   ", state_b.u[0]))
+    print("    " + _stats("v   ", state_b.v[0]))
+    print("    " + _stats("T   ", state_b.T[0]))
+    print("    " + _stats("q   ", state_b.q[0]))
+    # What obs target is being fed to nudging (even if decay=0)?
+    print(f"  === Day {d_idx+1} obs target (fed to branch_step, nudge strength={pb['wind_nudge'][0]:.2e}) ===")
+    print("    " + _stats("obs.h", obs_for_day.h))
+    print("    " + _stats("obs.u", obs_for_day.u))
+    print("    " + _stats("obs.v", obs_for_day.v))
+    print("    " + _stats("obs.T", obs_for_day.T))
+    # Per-family params being used
+    print(f"  === Day {d_idx+1} params (per-family) ===")
+    for _i, _name in enumerate(["weak_mix","balanced","high_mix","humid_bias","strong_pg","terrain_lock"]):
+        print(f"    fam{_i} {_name:<12}: drag={pb['drag'][_i]:.2e} "
+              f"humid_couple={pb['humid_couple'][_i]:.3f} pg_scale={pb['pg_scale'][_i]:.3f} "
+              f"nudging={pb['nudging'][_i]:.2e} wind_nudge={pb['wind_nudge'][_i]:.2e} "
+              f"h_nudge={pb['h_nudge'][_i]:.2e}")
+
     for _ in range(1440):
         state_b, budget = batched_branch_step(state_b, pb, obs_for_day, topo_g, cfg_day, budget)
     fam_states = unstack_families(state_b)
-    _dbg_u_end = float(state_b.u[0, cy, cx])
-    _dbg_v_end = float(state_b.v[0, cy, cx])
-    print(f"  DBG d{d_idx+1}: obs(u,v)=({_obs_u_center:+.2f},{_obs_v_center:+.2f})  "
-          f"state fam0 start=({_dbg_u_start:+.2f},{_dbg_v_start:+.2f}) "
-          f"end=({_dbg_u_end:+.2f},{_dbg_v_end:+.2f})  wind_nudge={_wn_val:.2e}")
+
+    # State at END of day — all 6 families (to see divergence)
+    print(f"  === Day {d_idx+1} END (all 6 families, center cell) ===")
+    for _i, _st in enumerate(fam_states):
+        _h_c = float(_to_np(_st.h)[cy, cx])
+        _u_c = float(_to_np(_st.u)[cy, cx])
+        _v_c = float(_to_np(_st.v)[cy, cx])
+        _T_c = float(_to_np(_st.T)[cy, cx])
+        _q_c = float(_to_np(_st.q)[cy, cx])
+        print(f"    fam{_i}: h={_h_c:7.1f}  u={_u_c:+5.2f}  v={_v_c:+5.2f}  "
+              f"T={_T_c:6.2f}K  q={_q_c:.4e}")
+    # Spatial variance check (is the field still spatially structured or flat?)
+    print(f"  === Day {d_idx+1} END spatial stats (fam0) ===")
+    print("    " + _stats("h   ", state_b.h[0]))
+    print("    " + _stats("u   ", state_b.u[0]))
+    print("    " + _stats("v   ", state_b.v[0]))
+    print("    " + _stats("T   ", state_b.T[0]))
+    print("    " + _stats("q   ", state_b.q[0]))
     # Per-day fusion weights: score each family against the day's obs target
     day_scores = np.array([float(score_state(st, obs_for_day, cfg_day)["score"]) for st in fam_states])
     daily.append({
