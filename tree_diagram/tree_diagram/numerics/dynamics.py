@@ -117,6 +117,13 @@ T_RAD_COOL_K_PER_DAY    = 1.5
 # Day-2 spikes in free integration. Exponential relaxation smears the release.
 TAU_CONDENSE_SEC        = 600.0
 
+# Kessler-style warm-rain autoconversion (1969): cloud water above threshold
+# precipitates out linearly, leaving the system permanently. Prevents RH from
+# pinning at 100% during multi-day free integration.
+# Classical parameters (Kessler 1969, AMS 2004 review): a_K ≈ 1e-3/s, q_c ≈ 1 g/kg.
+Q_PRECIP_THRESHOLD_KGKG = 0.001
+TAU_PRECIP_SEC          = 1000.0
+
 
 # ====================================================================
 # Section 3 — 物理子模块
@@ -177,6 +184,11 @@ def condensation_limited(T, q, humid_couple: float,
     excess_used = q_released * frac
     q_new = q - excess_used
     T_new = T + dT_limited
+    # Kessler autoconversion: q above threshold drains as precipitation,
+    # leaving the system. Prevents indefinite RH=100% pinning in free integration.
+    precip_excess = xp.maximum(0.0, q_new - Q_PRECIP_THRESHOLD_KGKG)
+    precip = precip_excess * float(sub_dt / TAU_PRECIP_SEC)
+    q_new = q_new - precip
     budget.hour_accumulator_K = budget.hour_accumulator_K + dT_limited
     budget.hour_counter_steps += 1
     if budget.hour_counter_steps >= budget.steps_per_hour:

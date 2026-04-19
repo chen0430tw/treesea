@@ -27,6 +27,7 @@ from .dynamics import (
     CFL_FACTOR, TAU_T_SEC, TAU_Q_SEC, TAU_FRICTION_SEC,
     SMAGORINSKY_C, SMAGORINSKY_MIN_NU, SMAGORINSKY_MAX_NU,
     T_RAD_COOL_K_PER_DAY, TAU_CONDENSE_SEC,
+    Q_PRECIP_THRESHOLD_KGKG, TAU_PRECIP_SEC,
 )
 from . import dynamics as _dyn
 
@@ -141,6 +142,10 @@ def _condensation_limited_batched(T, q, humid_couple_bc, LV, CP, budget, sub_dt:
     excess_used = q_released * frac
     q_new = q - excess_used
     T_new = T + dT_limited
+    # Kessler precip drain
+    precip_excess = xp.maximum(0.0, q_new - Q_PRECIP_THRESHOLD_KGKG)
+    precip = precip_excess * float(sub_dt / TAU_PRECIP_SEC)
+    q_new = q_new - precip
     budget.hour_accumulator_K = budget.hour_accumulator_K + dT_limited
     budget.hour_counter_steps += 1
     if budget.hour_counter_steps >= budget.steps_per_hour:
