@@ -13,6 +13,12 @@ from __future__ import annotations
 import json
 import math
 import os
+# Limit BLAS threads per process — with 16 workers × 64 OpenBLAS default threads
+# we overflow RLIMIT_NPROC on the login node. 1 thread per worker is fine for
+# 64×48 grids (multiprocessing already gives us real parallelism).
+for _var in ("OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "OMP_NUM_THREADS",
+             "NUMEXPR_NUM_THREADS"):
+    os.environ.setdefault(_var, "1")
 import sys
 import time
 from datetime import date
