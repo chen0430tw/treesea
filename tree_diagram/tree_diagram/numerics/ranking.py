@@ -5,6 +5,10 @@ import numpy as np
 from .forcing import GridConfig
 from .weather_state import WeatherState
 
+# Module-level weight for the center-cell wind-direction micro-penalty.
+# Exposed so parameter sweeps can tune it without editing source.
+WD_CENTER_PENALTY_WEIGHT: float = 0.20
+
 
 def score_state(
     state: WeatherState,
@@ -48,7 +52,7 @@ def score_state(
         + 0.25 * t_err
         + 0.25 * q_err
         + 0.20 * w_err
-        + 0.05 * wd_center_penalty
+        + WD_CENTER_PENALTY_WEIGHT * wd_center_penalty
     )
 
     return {

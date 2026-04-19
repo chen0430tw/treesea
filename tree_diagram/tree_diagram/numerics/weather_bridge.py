@@ -47,6 +47,19 @@ _FAMILY_KhKtKq: dict = {
     "composite":  (330, 170, 135),   # terrain-aware
 }
 
+# Per-family wind-rotation offset (deg). Breaks the directional symmetry
+# that otherwise makes every candidate end up with the same center-cell
+# wind direction, letting the ranking layer actually discriminate.
+_FAMILY_WIND_ROT: dict = {
+    "batch":        0.0,
+    "network":    +20.0,
+    "phase":      -30.0,
+    "electrical": +10.0,
+    "ascetic":    -15.0,
+    "hybrid":     -10.0,
+    "composite":  +30.0,
+}
+
 
 def worldline_to_branch_params(
     w: CandidateWorldline,
@@ -91,6 +104,7 @@ def worldline_to_branch_params(
 
     # family → base diffusion coefficients
     Kh, Kt, Kq = _FAMILY_KhKtKq.get(w.family, _FAMILY_KhKtKq["batch"])
+    wind_rot = _FAMILY_WIND_ROT.get(w.family, 0.0)
 
     return {
         "name": w.template,
@@ -101,6 +115,7 @@ def worldline_to_branch_params(
         "humid_couple": humid_couple,
         "nudging": nudging,
         "pg_scale": pg_scale,
+        "wind_rot_deg": wind_rot,
     }
 
 
