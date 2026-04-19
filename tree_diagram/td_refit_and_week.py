@@ -190,7 +190,8 @@ for d_idx in range(7):
     T_C = cal.T_scale * T_int + cal.T_offset_K - 273.15
     RH = cal.map_humidity(q, T_C); ws = cal.map_wind(u, v)
     wd_raw = (math.degrees(math.atan2(-u, -v)) + 360.0) % 360.0
-    wd = (wd_raw + cal.wind_dir_offset_deg) % 360.0
+    # NB: printing RAW wd (before offset) so we can directly see physics effect
+    wd = wd_raw
     P = cal.map_pressure(h)
     mode = "DA" if d_idx == 0 else "free"
     print(f"{date_str:<12} {mode:<5} {decay:>5.2f}  {T_C:>5.1f}°C {RH:>5.1f}% {ws:>4.1f} m/s @ {wd:>3.0f}° {P:>6.1f}hPa")
