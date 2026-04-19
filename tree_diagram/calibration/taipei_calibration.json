@@ -1,0 +1,34 @@
+{
+  "scheme": "A (single-shot mean offset)",
+  "fitted_on": "2026-04-19",
+  "obs_means_30d": {
+    "n_days": 30,
+    "T_mean_C": 21.604333333333333,
+    "RH_mean_pct": 81.41,
+    "P_mean_hPa": 1011.9366666666667,
+    "ws_mean_ms": 1.9476666666666664,
+    "date_range": [
+      "2026-03-15",
+      "2026-04-13"
+    ]
+  },
+  "internal_anchor": {
+    "T_internal_K": 269.738846694598,
+    "h_center_m": 5545.802514864418,
+    "q_internal": 0.007387816714997969,
+    "u_center": 4.259994601304227,
+    "v_center": 1.6768042656687892,
+    "top_worldline": "humid_bias",
+    "top_score": 0.8047231872666633
+  },
+  "calibration": {
+    "location_name": "Taipei (A-scheme mean-fit)",
+    "fitted_date": "2026-04-19 (A-scheme from 2026-03-15..2026-04-13, N=30 days)",
+    "T_offset_K": 25.015486638735297,
+    "T_scale": 1.0,
+    "h_to_pressure_k": -0.006895918778430889,
+    "q_to_rh_ratio": 1.7838184786123736,
+    "wind_scale": 0.4254289164374836
+  },
+  "caveat": "A-scheme: T_scale fixed at 1.0 (cannot resolve slope from a single internal point). All offsets are the mean-match values — no per-day initial conditions were varied. For predictive validation, upgrade to B-scheme (per-day obs injection + linear regression)."
+}
