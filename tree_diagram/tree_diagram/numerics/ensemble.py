@@ -5,7 +5,9 @@ import multiprocessing
 from .forcing import GridConfig
 from .weather_state import WeatherState
 from .dynamics import branch_step
+from .dynamics_safe import branch_step_safe, LatentHeatingBudget
 from .ranking import score_state
+import numpy as np
 
 
 DEFAULT_BRANCHES: List[dict] = [
@@ -74,7 +76,8 @@ DEFAULT_BRANCHES: List[dict] = [
 
 def _run_one_task(args: tuple) -> dict:
     """Top-level function for multiprocessing (must be picklable)."""
-    branch_params, initial_state_dict, obs_dict, topography, cfg, pressure_balance = args
+    (branch_params, initial_state_dict, obs_dict, topography,
+     cfg, pressure_balance, use_safe_physics) = args
 
     initial_state = WeatherState.from_dict(initial_state_dict)
     obs = WeatherState.from_dict(obs_dict)
@@ -84,8 +87,18 @@ def _run_one_task(args: tuple) -> dict:
     params["pg_scale"] = params.get("pg_scale", 1.0) * pressure_balance
 
     state = WeatherState.from_dict(initial_state.to_dict())
-    for _ in range(cfg.STEPS):
-        state = branch_step(state, params, obs, topography, cfg)
+    if use_safe_physics:
+        steps_per_hour = max(1, int(3600.0 / cfg.DT))
+        budget = LatentHeatingBudget(
+            hour_accumulator_K=np.zeros_like(state.T),
+            hour_counter_steps=0,
+            steps_per_hour=steps_per_hour,
+        )
+        for _ in range(cfg.STEPS):
+            state, budget = branch_step_safe(state, params, obs, topography, cfg, budget)
+    else:
+        for _ in range(cfg.STEPS):
+            state = branch_step(state, params, obs, topography, cfg)
 
     metric = score_state(state, obs, cfg)
     result = {"name": branch_params["name"], "state": state.to_dict()}
@@ -124,12 +137,16 @@ def run_ensemble(
     pressure_balance: float = 1.0,
     branches: Optional[List[dict]] = None,
     n_workers: int = 1,
+    use_safe_physics: bool = True,
 ) -> List[dict]:
+    """Run ensemble forecast. use_safe_physics=True (default) uses branch_step_safe
+    with physical guardrails; False uses legacy branch_step (demo-grade only)."""
     if branches is None:
         branches = DEFAULT_BRANCHES
 
     tasks = [
-        (bp, initial_state.to_dict(), obs.to_dict(), topography, cfg, pressure_balance)
+        (bp, initial_state.to_dict(), obs.to_dict(), topography,
+         cfg, pressure_balance, use_safe_physics)
         for bp in branches
     ]
 
