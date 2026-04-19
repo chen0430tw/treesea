@@ -4,72 +4,6 @@
   "unit_notes": "T_C=\u00b0C, RH=%, P=hPa, ws=m/s (converted from km/h), wd=deg clockwise from north",
   "days": [
     {
-      "date": "2026-03-15",
-      "n_hours": 24,
-      "T_mean_C": 18.4,
-      "T_max_C": 24.8,
-      "T_min_C": 12.4,
-      "RH_mean_pct": 68.3,
-      "P_mean_hPa": 1020.3,
-      "ws_mean_ms": 3.27,
-      "wd_vec_deg": 88.0
-    },
-    {
-      "date": "2026-03-16",
-      "n_hours": 24,
-      "T_mean_C": 19.85,
-      "T_max_C": 25.5,
-      "T_min_C": 15.2,
-      "RH_mean_pct": 73.6,
-      "P_mean_hPa": 1017.4,
-      "ws_mean_ms": 2.53,
-      "wd_vec_deg": 93.0
-    },
-    {
-      "date": "2026-03-17",
-      "n_hours": 24,
-      "T_mean_C": 19.81,
-      "T_max_C": 26.0,
-      "T_min_C": 15.8,
-      "RH_mean_pct": 72.4,
-      "P_mean_hPa": 1015.8,
-      "ws_mean_ms": 1.42,
-      "wd_vec_deg": 347.0
-    },
-    {
-      "date": "2026-03-18",
-      "n_hours": 24,
-      "T_mean_C": 20.33,
-      "T_max_C": 26.4,
-      "T_min_C": 14.6,
-      "RH_mean_pct": 73.5,
-      "P_mean_hPa": 1014.3,
-      "ws_mean_ms": 1.45,
-      "wd_vec_deg": 255.0
-    },
-    {
-      "date": "2026-03-19",
-      "n_hours": 24,
-      "T_mean_C": 18.56,
-      "T_max_C": 21.4,
-      "T_min_C": 16.8,
-      "RH_mean_pct": 85.1,
-      "P_mean_hPa": 1015.0,
-      "ws_mean_ms": 1.92,
-      "wd_vec_deg": 55.0
-    },
-    {
-      "date": "2026-03-20",
-      "n_hours": 24,
-      "T_mean_C": 19.42,
-      "T_max_C": 23.6,
-      "T_min_C": 17.2,
-      "RH_mean_pct": 82.8,
-      "P_mean_hPa": 1015.6,
-      "ws_mean_ms": 3.45,
-      "wd_vec_deg": 74.0
-    },
-    {
       "date": "2026-03-21",
       "n_hours": 24,
       "T_mean_C": 18.64,
@@ -332,6 +266,54 @@
       "P_mean_hPa": 1010.3,
       "ws_mean_ms": 1.36,
       "wd_vec_deg": 280.0
+    },
+    {
+      "date": "2026-04-14",
+      "T_mean_C": 26.2,
+      "RH_mean_pct": 76,
+      "P_mean_hPa": 1011.4,
+      "ws_mean_ms": 2.03,
+      "wd_vec_deg": 244
+    },
+    {
+      "date": "2026-04-15",
+      "T_mean_C": 25.4,
+      "RH_mean_pct": 83,
+      "P_mean_hPa": 1010.9,
+      "ws_mean_ms": 1.39,
+      "wd_vec_deg": 285
+    },
+    {
+      "date": "2026-04-16",
+      "T_mean_C": 25.4,
+      "RH_mean_pct": 85,
+      "P_mean_hPa": 1011.5,
+      "ws_mean_ms": 1.42,
+      "wd_vec_deg": 320
+    },
+    {
+      "date": "2026-04-17",
+      "T_mean_C": 24.4,
+      "RH_mean_pct": 84,
+      "P_mean_hPa": 1012.0,
+      "ws_mean_ms": 1.58,
+      "wd_vec_deg": 305
+    },
+    {
+      "date": "2026-04-18",
+      "T_mean_C": 23.4,
+      "RH_mean_pct": 87,
+      "P_mean_hPa": 1011.8,
+      "ws_mean_ms": 1.33,
+      "wd_vec_deg": 330
+    },
+    {
+      "date": "2026-04-19",
+      "T_mean_C": 23.8,
+      "RH_mean_pct": 75,
+      "P_mean_hPa": 1012.3,
+      "ws_mean_ms": 1.69,
+      "wd_vec_deg": 44
     }
   ]
 }
