@@ -34,10 +34,10 @@ from calibration.fit_calibration_b import (
 from calibration.oos_validate import fetch_obs, predict_day, OOS_START, OOS_END
 
 
-ROT_MAX_VALUES = [15.0, 30.0, 45.0, 60.0, 90.0]
-WEIGHT_VALUES  = [0.05, 0.10, 0.20, 0.40]
+ROT_MAX_VALUES = [30.0, 60.0, 90.0, 120.0, 150.0, 180.0]
+WEIGHT_VALUES  = [0.10, 0.20, 0.40, 0.80]
 
-OUT_FILE = Path("D:/treesea/tree_diagram/calibration/sweep_wind_params.json")
+OUT_FILE = Path("D:/treesea/tree_diagram/calibration/sweep_wind_params_localized.json")
 
 
 def build_rotated_branches(rot_max: float) -> list:

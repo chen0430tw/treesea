@@ -26,21 +26,33 @@ DEFAULT_BRANCHES: List[dict] = [
 ]
 
 
-def _rotate_wind_inplace(state: WeatherState, angle_deg: float) -> WeatherState:
-    """Rotate (u, v) fields by angle_deg (positive = counter-clockwise).
+def _rotate_wind_inplace(state: WeatherState, angle_deg: float,
+                         local_alpha: float = 3.0) -> WeatherState:
+    """Rotate (u, v) locally around grid center by angle_deg.
+
+    Localization: mask = exp(-local_alpha * (x² + y²)) with x,y ∈ [-1,1].
+    local_alpha=3.0 matches the Taipei Gaussian in build_taipei_state so
+    rotation acts on the obs-injected region while the background flow
+    (outside ~r=0.5) stays intact. This removes the ±30° ceiling that
+    uniform rotation hit — now ±90° or ±180° is physically safe because
+    it doesn't desync the global h gradient from the wind field.
 
     Returns a new WeatherState; h/T/q fields are reused (read-only aliases).
-    The rotation is applied uniformly across the grid — small angles (±30°)
-    only mildly perturb the background flow while giving each ensemble
-    member a distinct center-cell wind direction.
     """
     if abs(angle_deg) < 1e-9:
         return state
+    NY, NX = state.u.shape
+    y = np.linspace(-1.0, 1.0, NY).reshape(-1, 1)
+    x = np.linspace(-1.0, 1.0, NX).reshape(1, -1)
+    mask = np.exp(-local_alpha * (x * x + y * y))
+
     a = np.deg2rad(angle_deg)
     c, s = np.cos(a), np.sin(a)
-    u_rot =  c * state.u - s * state.v
-    v_rot =  s * state.u + c * state.v
-    return WeatherState(h=state.h, u=u_rot, v=v_rot, T=state.T, q=state.q)
+    u_rot = c * state.u - s * state.v
+    v_rot = s * state.u + c * state.v
+    u_new = mask * u_rot + (1.0 - mask) * state.u
+    v_new = mask * v_rot + (1.0 - mask) * state.v
+    return WeatherState(h=state.h, u=u_new, v=v_new, T=state.T, q=state.q)
 
 
 def _run_one_task(args: tuple) -> dict:

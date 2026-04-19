@@ -38,6 +38,14 @@ OUT_FILE = Path("D:/treesea/tree_diagram/calibration/taipei_oos_validation.json"
 
 
 def fetch_obs(start: date, end: date) -> list[dict]:
+    # Prefer cached file if present — compute nodes may lack internet
+    cache = Path(__file__).parent / "taipei_obs_oos_cache.json"
+    if cache.exists():
+        d = json.loads(cache.read_text(encoding="utf-8"))
+        if d.get("start") == start.isoformat() and d.get("end") == end.isoformat():
+            print(f"Loaded cached {start} .. {end} ({len(d['days'])} days)")
+            return d["days"]
+
     hourly_vars = ",".join([
         "temperature_2m", "relative_humidity_2m", "surface_pressure",
         "wind_speed_10m", "wind_direction_10m",
