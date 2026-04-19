@@ -6,6 +6,7 @@ from .forcing import GridConfig
 from .weather_state import WeatherState
 from .dynamics import branch_step, LatentHeatingBudget
 from .ranking import score_state
+from ._xp import get_xp
 import numpy as np
 
 
@@ -46,7 +47,7 @@ def _rotate_wind_inplace(state: WeatherState, angle_deg: float) -> WeatherState:
     """
     if abs(angle_deg) < 1e-9:
         return state
-    a = np.deg2rad(angle_deg)
+    a = float(np.deg2rad(angle_deg))   # scalar, no xp needed
     c, s = np.cos(a), np.sin(a)
     u_rot = c * state.u - s * state.v
     v_rot = s * state.u + c * state.v

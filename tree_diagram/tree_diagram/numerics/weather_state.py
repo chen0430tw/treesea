@@ -20,6 +20,22 @@ class WeatherState:
     def from_dict(cls, d: dict) -> "WeatherState":
         return cls(h=d["h"], u=d["u"], v=d["v"], T=d["T"], q=d["q"])
 
+    def to_gpu(self) -> "WeatherState":
+        """Transfer all fields to cupy (H100 acceleration path)."""
+        import cupy as cp
+        return WeatherState(
+            h=cp.asarray(self.h), u=cp.asarray(self.u), v=cp.asarray(self.v),
+            T=cp.asarray(self.T), q=cp.asarray(self.q),
+        )
+
+    def to_cpu(self) -> "WeatherState":
+        """Pull fields back to numpy (for IO / reporting)."""
+        from ._xp import to_numpy
+        return WeatherState(
+            h=to_numpy(self.h), u=to_numpy(self.u), v=to_numpy(self.v),
+            T=to_numpy(self.T), q=to_numpy(self.q),
+        )
+
 
 def build_obs(
     XX: np.ndarray,

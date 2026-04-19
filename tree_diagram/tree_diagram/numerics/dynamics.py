@@ -21,37 +21,42 @@ import numpy as np
 
 from .forcing import GridConfig
 from .weather_state import WeatherState
+from ._xp import get_xp
 
 
 # ====================================================================
-# Section 1 — 低层数值算子
+# Section 1 — 低层数值算子（numpy/cupy dispatch via get_xp）
 # ====================================================================
 
-def lap(f: np.ndarray, DX: float, DY: float) -> np.ndarray:
+def lap(f, DX: float, DY: float):
+    xp = get_xp(f)
     return (
-        (np.roll(f, -1, axis=1) - 2.0 * f + np.roll(f, 1, axis=1)) / (DX * DX)
-        + (np.roll(f, -1, axis=0) - 2.0 * f + np.roll(f, 1, axis=0)) / (DY * DY)
+        (xp.roll(f, -1, axis=1) - 2.0 * f + xp.roll(f, 1, axis=1)) / (DX * DX)
+        + (xp.roll(f, -1, axis=0) - 2.0 * f + xp.roll(f, 1, axis=0)) / (DY * DY)
     )
 
 
-def grad_x(f: np.ndarray, DX: float) -> np.ndarray:
-    return (np.roll(f, -1, axis=1) - np.roll(f, 1, axis=1)) / (2.0 * DX)
+def grad_x(f, DX: float):
+    xp = get_xp(f)
+    return (xp.roll(f, -1, axis=1) - xp.roll(f, 1, axis=1)) / (2.0 * DX)
 
 
-def grad_y(f: np.ndarray, DY: float) -> np.ndarray:
-    return (np.roll(f, -1, axis=0) - np.roll(f, 1, axis=0)) / (2.0 * DY)
+def grad_y(f, DY: float):
+    xp = get_xp(f)
+    return (xp.roll(f, -1, axis=0) - xp.roll(f, 1, axis=0)) / (2.0 * DY)
 
 
-def bilinear_sample(field: np.ndarray, px: np.ndarray, py: np.ndarray) -> np.ndarray:
+def bilinear_sample(field, px, py):
+    xp = get_xp(field)
     NY, NX = field.shape
-    px = np.clip(px, 0.0, NX - 1.0)
-    py = np.clip(py, 0.0, NY - 1.0)
-    ix = np.floor(px).astype(int)
-    iy = np.floor(py).astype(int)
+    px = xp.clip(px, 0.0, NX - 1.0)
+    py = xp.clip(py, 0.0, NY - 1.0)
+    ix = xp.floor(px).astype(int)
+    iy = xp.floor(py).astype(int)
     fx = px - ix
     fy = py - iy
-    ix1 = np.clip(ix + 1, 0, NX - 1)
-    iy1 = np.clip(iy + 1, 0, NY - 1)
+    ix1 = xp.clip(ix + 1, 0, NX - 1)
+    iy1 = xp.clip(iy + 1, 0, NY - 1)
     return (
         (1.0 - fx) * (1.0 - fy) * field[iy,  ix ]
         +       fx  * (1.0 - fy) * field[iy,  ix1]
@@ -60,19 +65,23 @@ def bilinear_sample(field: np.ndarray, px: np.ndarray, py: np.ndarray) -> np.nda
     )
 
 
-def semi_lagrangian(field: np.ndarray, u: np.ndarray, v: np.ndarray,
-                    dt: float, DX: float, DY: float) -> np.ndarray:
+def semi_lagrangian(field, u, v,
+                    dt: float, DX: float, DY: float):
+    xp = get_xp(field)
     NY, NX = field.shape
-    jj, ii = np.mgrid[0:NY, 0:NX].astype(float)
+    jj, ii = xp.mgrid[0:NY, 0:NX]
+    jj = jj.astype(float)
+    ii = ii.astype(float)
     px = ii - u * dt / DX
     py = jj - v * dt / DY
     return bilinear_sample(field, px, py)
 
 
-def smooth(field: np.ndarray, alpha: float = 0.10) -> np.ndarray:
+def smooth(field, alpha: float = 0.10):
+    xp = get_xp(field)
     neighbors = (
-        np.roll(field, -1, axis=0) + np.roll(field, 1, axis=0)
-        + np.roll(field, -1, axis=1) + np.roll(field, 1, axis=1)
+        xp.roll(field, -1, axis=0) + xp.roll(field, 1, axis=0)
+        + xp.roll(field, -1, axis=1) + xp.roll(field, 1, axis=1)
     )
     return (1.0 - alpha) * field + alpha * 0.25 * neighbors
 
@@ -107,17 +116,19 @@ T_RAD_COOL_K_PER_DAY    = 1.5
 # Section 3 — 物理子模块
 # ====================================================================
 
-def saturation_q_tetens(T_K: np.ndarray, p_hpa: float = 500.0) -> np.ndarray:
+def saturation_q_tetens(T_K, p_hpa: float = 500.0):
+    xp = get_xp(T_K)
     T_C = T_K - 273.15
-    e_sat_hpa = 6.112 * np.exp(17.67 * T_C / (T_C + 243.5))
-    e_sat_hpa = np.minimum(e_sat_hpa, 0.9 * p_hpa)
+    e_sat_hpa = 6.112 * xp.exp(17.67 * T_C / (T_C + 243.5))
+    e_sat_hpa = xp.minimum(e_sat_hpa, 0.9 * p_hpa)
     return 0.622 * e_sat_hpa / (p_hpa - e_sat_hpa)
 
 
-def compute_cfl_dt(u: np.ndarray, v: np.ndarray, DX: float, DY: float,
+def compute_cfl_dt(u, v, DX: float, DY: float,
                    dt_target: float, cfl: float = CFL_FACTOR) -> tuple[float, int]:
-    u_max = float(np.max(np.abs(u))) + 1e-6
-    v_max = float(np.max(np.abs(v))) + 1e-6
+    xp = get_xp(u)
+    u_max = float(xp.max(xp.abs(u))) + 1e-6
+    v_max = float(xp.max(xp.abs(v))) + 1e-6
     dt_cfl = cfl * min(DX / u_max, DY / v_max)
     if dt_target <= dt_cfl:
         return dt_target, 1
@@ -134,44 +145,47 @@ class LatentHeatingBudget:
     hour_cap_K: float = LATENT_HEATING_HOUR_K
 
 
-def condensation_limited(T: np.ndarray, q: np.ndarray, humid_couple: float,
+def condensation_limited(T, q, humid_couple: float,
                          LV: float, CP: float,
-                         budget: LatentHeatingBudget) -> tuple[np.ndarray, np.ndarray]:
+                         budget: LatentHeatingBudget):
+    xp = get_xp(T)
     qs = saturation_q_tetens(T)
     q_target = qs * humid_couple
-    excess = np.maximum(0.0, q - q_target)
+    excess = xp.maximum(0.0, q - q_target)
     dT_raw = (LV / CP) * excess
-    dT_step = np.minimum(dT_raw, budget.step_cap_K)
-    room = np.maximum(0.0, budget.hour_cap_K - budget.hour_accumulator_K)
-    dT_limited = np.minimum(dT_step, room)
-    with np.errstate(divide='ignore', invalid='ignore'):
-        frac = np.where(dT_raw > 1e-10, dT_limited / dT_raw, 0.0)
+    dT_step = xp.minimum(dT_raw, budget.step_cap_K)
+    room = xp.maximum(0.0, budget.hour_cap_K - budget.hour_accumulator_K)
+    dT_limited = xp.minimum(dT_step, room)
+    # cupy doesn't have errstate context manager with same semantics; avoid via where
+    frac = xp.where(dT_raw > 1e-10, dT_limited / xp.where(dT_raw > 1e-10, dT_raw, 1.0), 0.0)
     excess_used = excess * frac
     q_new = q - excess_used
     T_new = T + dT_limited
     budget.hour_accumulator_K = budget.hour_accumulator_K + dT_limited
     budget.hour_counter_steps += 1
     if budget.hour_counter_steps >= budget.steps_per_hour:
-        budget.hour_accumulator_K = np.zeros_like(budget.hour_accumulator_K)
+        budget.hour_accumulator_K = xp.zeros_like(budget.hour_accumulator_K)
         budget.hour_counter_steps = 0
     return T_new, q_new
 
 
-def combine_T_anomaly(T_prime: np.ndarray, T_ref: np.ndarray) -> np.ndarray:
-    return T_ref + np.clip(T_prime, -T_PRIME_CLIP_K, T_PRIME_CLIP_K)
+def combine_T_anomaly(T_prime, T_ref):
+    xp = get_xp(T_prime)
+    return T_ref + xp.clip(T_prime, -T_PRIME_CLIP_K, T_PRIME_CLIP_K)
 
 
-def smagorinsky_nu(u: np.ndarray, v: np.ndarray, DX: float, DY: float,
-                   C_smag: float = SMAGORINSKY_C) -> np.ndarray:
+def smagorinsky_nu(u, v, DX: float, DY: float,
+                   C_smag: float = SMAGORINSKY_C):
+    xp = get_xp(u)
     dudx = grad_x(u, DX); dudy = grad_y(u, DY)
     dvdx = grad_x(v, DX); dvdy = grad_y(v, DY)
-    S_norm = np.sqrt(2.0 * (dudx**2 + dvdy**2) + (dudy + dvdx)**2 + 1e-12)
-    Delta = np.sqrt(DX * DY)
-    return np.clip((C_smag * Delta) ** 2 * S_norm, SMAGORINSKY_MIN_NU, SMAGORINSKY_MAX_NU)
+    S_norm = xp.sqrt(2.0 * (dudx**2 + dvdy**2) + (dudy + dvdx)**2 + 1e-12)
+    Delta = float(np.sqrt(DX * DY))
+    return xp.clip((C_smag * Delta) ** 2 * S_norm, SMAGORINSKY_MIN_NU, SMAGORINSKY_MAX_NU)
 
 
-def smagorinsky_diffusion(field: np.ndarray, nu_field: np.ndarray,
-                          DX: float, DY: float) -> np.ndarray:
+def smagorinsky_diffusion(field, nu_field,
+                          DX: float, DY: float):
     return grad_x(nu_field * grad_x(field, DX), DX) + grad_y(nu_field * grad_y(field, DY), DY)
 
 
@@ -205,6 +219,7 @@ def branch_step(
     LV, CP = cfg.LV, cfg.CP
 
     h, u, v, T, q = state.h, state.u, state.v, state.T, state.q
+    xp = get_xp(h)
 
     dt_safe, n_substeps = compute_cfl_dt(u, v, DX, DY, cfg.DT)
     sub_dt = dt_safe
@@ -212,7 +227,7 @@ def branch_step(
     if budget is None:
         steps_per_hour = max(1, int(3600.0 / cfg.DT))
         budget = LatentHeatingBudget(
-            hour_accumulator_K=np.zeros_like(T),
+            hour_accumulator_K=xp.zeros_like(T),
             hour_counter_steps=0,
             steps_per_hour=steps_per_hour,
         )
@@ -272,10 +287,10 @@ def branch_step(
         T_new = smooth(T_new, alpha=0.05)
         q_new = smooth(q_new, alpha=0.05)
 
-        h_new = np.clip(h_new, cfg.BASE_H - 1500.0, cfg.BASE_H + 1500.0)
-        u_new = np.clip(u_new, -U_CLIP_MS, U_CLIP_MS)
-        v_new = np.clip(v_new, -U_CLIP_MS, U_CLIP_MS)
-        q_new = np.clip(q_new, Q_MIN, Q_MAX_SCALAR)
+        h_new = xp.clip(h_new, cfg.BASE_H - 1500.0, cfg.BASE_H + 1500.0)
+        u_new = xp.clip(u_new, -U_CLIP_MS, U_CLIP_MS)
+        v_new = xp.clip(v_new, -U_CLIP_MS, U_CLIP_MS)
+        q_new = xp.clip(q_new, Q_MIN, Q_MAX_SCALAR)
         T_new = combine_T_anomaly(T_new - T_ref, T_ref)
 
         h, u, v, T, q = h_new, u_new, v_new, T_new, q_new
