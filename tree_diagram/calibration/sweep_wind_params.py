@@ -52,7 +52,12 @@ def _worker_init(cfg_dict: dict):
     _WORKER_GRID = {"XX": XX, "YY": YY, "topo": topo, "cy": cy, "cx": cx}
 
 
-def _worker_run_day(d: dict) -> dict:
+def _worker_run_day(task: tuple) -> dict:
+    """task=(day_dict, branches_list, wd_weight). Worker updates module
+    globals before running so that respawning the Pool per combo is avoided."""
+    d, branches, wd_weight = task
+    ensemble.DEFAULT_BRANCHES = branches
+    ranking.WD_CENTER_PENALTY_WEIGHT = wd_weight
     obs_ref = ReferenceObs(T_avg_C=d["T_mean_C"], RH_pct=d["RH_mean_pct"],
                            P_hPa=d["P_mean_hPa"], ws_ms=d["ws_mean_ms"],
                            wd_deg=d["wd_vec_deg"])
@@ -60,8 +65,10 @@ def _worker_run_day(d: dict) -> dict:
     return {"obs": d, "td": r}
 
 
-def _worker_predict_day(args: tuple) -> dict:
-    d, cal_dict = args
+def _worker_predict_day(task: tuple) -> dict:
+    d, cal_dict, branches, wd_weight = task
+    ensemble.DEFAULT_BRANCHES = branches
+    ranking.WD_CENTER_PENALTY_WEIGHT = wd_weight
     cal = WeatherCalibration(**cal_dict)
     return predict_day(d, cal, _WORKER_CFG, _WORKER_GRID)
 
@@ -88,10 +95,13 @@ def build_rotated_branches(rot_max: float) -> list:
     return template
 
 
-def fit_and_oos(cfg, grid_cache, obs_train, obs_oos, pool: Pool) -> dict:
-    """Run 30-day fit + 5-day OOS. Pool parallelizes across days (30+5 tasks)."""
+def fit_and_oos(cfg, grid_cache, obs_train, obs_oos, pool: Pool,
+                branches: list, wd_weight: float) -> dict:
+    """Run 30-day fit + 5-day OOS. Pool parallelizes across days (30+5 tasks).
+    branches+wd_weight are passed per-task so the pool can be reused across combos.
+    """
     # Fit — 30 days in parallel
-    rows = pool.map(_worker_run_day, obs_train)
+    rows = pool.map(_worker_run_day, [(d, branches, wd_weight) for d in obs_train])
 
     T_int_K = np.array([r["td"]["T_internal_K"] for r in rows])
     T_real_K = np.array([r["obs"]["T_mean_C"] + 273.15 for r in rows])
@@ -145,7 +155,8 @@ def fit_and_oos(cfg, grid_cache, obs_train, obs_oos, pool: Pool) -> dict:
         "h_to_pressure_k": cal.h_to_pressure_k,
         "q_to_rh_ratio": cal.q_to_rh_ratio, "wind_scale": cal.wind_scale,
     }
-    oos_preds = pool.map(_worker_predict_day, [(d, cal_dict) for d in obs_oos])
+    oos_preds = pool.map(_worker_predict_day,
+                          [(d, cal_dict, branches, wd_weight) for d in obs_oos])
     errs_T, errs_RH, errs_ws, errs_P, errs_wd = [], [], [], [], []
     for d, p in zip(obs_oos, oos_preds):
         errs_T.append(p["T_C"] - d["T_mean_C"])
@@ -192,32 +203,36 @@ def main():
     cx = int(np.argmin(np.abs(XX[0, :])))
     grid_cache = {"XX": XX, "YY": YY, "topo": topo, "cy": cy, "cx": cx}
 
-    # Multiprocessing: 30 workers parallel over days. nano5 login has 224 CPUs;
-    # respawn pool per combo so forked workers inherit updated DEFAULT_BRANCHES
-    # and WD_CENTER_PENALTY_WEIGHT module-globals.
-    n_workers = min(30, max(1, (os.cpu_count() or 4) // 4))
+    # Multiprocessing: single Pool with spawn context (fork OOMs on login node).
+    # Params are passed per-task so no respawn needed.
+    n_workers = 16
     cfg_dict = {"NX": cfg.NX, "NY": cfg.NY, "DX": cfg.DX, "DY": cfg.DY,
                 "DT": cfg.DT, "STEPS": cfg.STEPS}
-    print(f"Using {n_workers} worker processes (per-combo respawn)")
+    print(f"Using {n_workers} worker processes (spawn, persistent)")
+
+    import multiprocessing as mp
+    ctx = mp.get_context("spawn")
+    pool = ctx.Pool(processes=n_workers, initializer=_worker_init, initargs=(cfg_dict,))
 
     results = []
     t0 = time.time()
-    for i, rot_max in enumerate(ROT_MAX_VALUES):
-        ensemble.DEFAULT_BRANCHES = build_rotated_branches(rot_max)
+    try:
+      for i, rot_max in enumerate(ROT_MAX_VALUES):
+        branches = build_rotated_branches(rot_max)
         for j, weight in enumerate(WEIGHT_VALUES):
-            ranking.WD_CENTER_PENALTY_WEIGHT = weight
             k = i * len(WEIGHT_VALUES) + j + 1
             N = len(ROT_MAX_VALUES) * len(WEIGHT_VALUES)
             elapsed = time.time() - t0
             print(f"[{k:2d}/{N}] rot=±{rot_max:4.0f}°  w={weight:.2f}  ...", end=" ", flush=True)
-            with Pool(processes=n_workers,
-                      initializer=_worker_init, initargs=(cfg_dict,)) as pool:
-                m = fit_and_oos(cfg, grid_cache, obs_train, obs_oos, pool)
+            m = fit_and_oos(cfg, grid_cache, obs_train, obs_oos, pool, branches, weight)
             print(f"IS T={m['in_sample']['T_C']:.3f}°C  OOS T={m['out_of_sample']['T_C']:.3f}  "
                   f"wd={m['out_of_sample']['wd_deg']:.1f}°  ws={m['out_of_sample']['ws_ms']:.3f}  "
                   f"RH={m['out_of_sample']['RH_pct']:.2f}%  "
                   f"[{elapsed:.0f}s elapsed]")
             results.append({"rot_max_deg": rot_max, "weight": weight, **m})
+    finally:
+      pool.close()
+      pool.join()
 
     # Build heatmap tables
     print("\n" + "=" * 80)
