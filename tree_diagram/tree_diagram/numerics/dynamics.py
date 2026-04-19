@@ -226,12 +226,19 @@ def branch_step(
         dtopox = grad_x(topography, DX); dtopoy = grad_y(topography, DY)
 
         friction_rate = 1.0 / TAU_FRICTION_SEC + drag
+        # Wind nudging (FDDA-style) — pulls (u,v) toward obs. Historically
+        # absent: TD's wind was open-loop w.r.t. obs, which means direction
+        # couldn't be discriminated by the ensemble. Gated by wind_nudge param
+        # (default 0 = backward compat; ≈nudging for parity with T/q).
+        wind_nudge = params.get("wind_nudge", 0.0)
         u_new = (u_adv - sub_dt * G * pg_scale * dhdx - sub_dt * G * 0.05 * dtopox
                  + sub_dt * F0 * v_adv - sub_dt * friction_rate * u_adv
-                 + sub_dt * smagorinsky_diffusion(u_adv, nu_smag, DX, DY))
+                 + sub_dt * smagorinsky_diffusion(u_adv, nu_smag, DX, DY)
+                 + sub_dt * wind_nudge * (obs.u - u_adv))
         v_new = (v_adv - sub_dt * G * pg_scale * dhdy - sub_dt * G * 0.05 * dtopoy
                  - sub_dt * F0 * u_adv - sub_dt * friction_rate * v_adv
-                 + sub_dt * smagorinsky_diffusion(v_adv, nu_smag, DX, DY))
+                 + sub_dt * smagorinsky_diffusion(v_adv, nu_smag, DX, DY)
+                 + sub_dt * wind_nudge * (obs.v - v_adv))
 
         div = grad_x(u_new, DX) + grad_y(v_new, DY)
         h_new = (h_adv - sub_dt * cfg.BASE_H * div

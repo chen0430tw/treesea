@@ -116,6 +116,7 @@ def worldline_to_branch_params(
         "nudging": nudging,
         "pg_scale": pg_scale,
         "wind_rot_deg": wind_rot,
+        "wind_nudge": nudging,   # same strength as T/q nudging (FDDA parity)
     }
 
 
