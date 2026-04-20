@@ -359,8 +359,10 @@ from tree_diagram.core.worldline_kernel import (
     unified_rollout as td_unified_rollout,
     prepare_candidate_arrays as td_prepare_candidate_arrays,
     encode_initial_state as td_encode_initial_state,
+    generate_candidates as td_generate_candidates,
     _DOMAIN_X as TD_DOMAIN_X, _DOMAIN_Y as TD_DOMAIN_Y,
 )
+from tree_diagram.core.background_inference import infer_problem_background as td_infer_bg
 
 # TD grid (matches CandidatePipeline defaults)
 _TD_NX, _TD_NY = 128, 96
@@ -369,24 +371,32 @@ _TD_DY = TD_DOMAIN_Y / (_TD_NY - 1)
 _TD_DT = 45.0
 _TD_STEPS_PER_DAY = int(round(86400.0 / _TD_DT))   # 1920
 
-# Build candidate list from TD's worldlines (or legacy DEFAULT_BRANCHES)
+# EvaluationResult.params only carries (n, rho, A, sigma). unified_step
+# needs the full param set (Kh/Kt/Kq/drag/humid_couple/nudging/pg_scale/
+# aim_coupling/marginal_decay) which are baked in at generate_candidates
+# time from _CANDIDATE_SPECS. Rebuild the full candidate list and filter
+# to the top-K worldlines identified by CandidatePipeline.
+_seed_for_cands = _weather_seed if (USE_TD_WORLDLINES and _td_top_results is not None) else \
+                   build_weather_seed(today_obs, climo_ref, obs_days, TODAY)
+_bg_for_cands = td_infer_bg(_seed_for_cands)
+_all_candidates = td_generate_candidates(_seed_for_cands, _bg_for_cands)
+
 if USE_TD_WORLDLINES and _td_top_results is not None:
-    _candidates = [
-        {"family": r.family, "template": r.template, "params": r.params}
-        for r in _td_top_results
-    ]
+    # Match top_results back to full candidates by (family, n, rho, A, sigma)
+    def _key(p, family):
+        return (family, int(p.get("n", 0)), round(float(p.get("rho", 0)), 4),
+                round(float(p.get("A", 0)), 4), round(float(p.get("sigma", 0)), 4))
+    _top_keys = {_key(r.params, r.family) for r in _td_top_results}
+    _candidates = [c for c in _all_candidates if _key(c["params"], c["family"]) in _top_keys]
+    print(f"  Filtered to {len(_candidates)} full candidates matching top-{len(_td_top_results)} worldlines")
 else:
-    # Legacy path: synthesise candidate dicts from DEFAULT_BRANCHES, using
-    # n=20000 (UMDST fixed point) so the unified_step gain modifier is unbiased.
-    _candidates = [
-        {"family": f["name"], "template": f["name"],
-         "params": {"n": 20000.0, "rho": 1.0, "A": 0.7, "sigma": 0.03}}
-        for f in forecast_branches
-    ]
+    # Legacy path: use full candidate pool (acceptable because screening
+    # happens later via phase scoring during unified_rollout).
+    _candidates = _all_candidates
+    print(f"  Legacy: running all {len(_candidates)} candidates")
 
 _carr = td_prepare_candidate_arrays(_candidates)
-_td_state = td_encode_initial_state(_td_top_results and _weather_seed or build_weather_seed(today_obs, climo_ref, obs_days, TODAY),
-                                     _candidates, _TD_NX, _TD_NY)
+_td_state = td_encode_initial_state(_seed_for_cands, _candidates, _TD_NX, _TD_NY)
 
 # Inject Taipei-specific obs fields into UnifiedState (override TD's abstract obs)
 def _taipei_obs_on_td_grid(ref_obs):
