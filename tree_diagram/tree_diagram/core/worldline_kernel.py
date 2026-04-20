@@ -258,14 +258,22 @@ def _umdst_batched_step(
     if spatial_het is not None:
         instability_up = instability_up + 0.005 * spatial_het.clamp(0.0, 1.0)
 
-    # step_scale normalises per-step rate magnitudes so the cumulative
-    # phase/stress/instab trajectory is consistent across rollout lengths.
-    # step_scale=1.0 matches the legacy 300-step calibration exactly.
+    # step_scale dampens per-step rates for long rollouts; clamped to [0,1]
+    # upstream so short rollouts (step_scale=1.0) are unchanged from legacy.
+    #
+    # Long-only proportional decay: decay_coef = 1.0 - step_scale. At short
+    # rollout (step_scale=1) decay_coef=0 → zero extra decay, legacy preserved.
+    # At long rollout (step_scale≪1) decay_coef→1 → −0.020·state term bounds
+    # stress/instab equilibria away from 1.0 so phase is not collapsed by
+    # indefinite growth of (0.012·A + 0.010·σ + …) over 10⁴ steps.
+    decay_coef = (1.0 - step_scale)
     new_phase  = (phase  + step_scale * (gain
                   + 0.20 * precision_gain + 0.16 * coupling_gain
                   - 0.05 * instab - 0.04 * stress)).clamp(0.0, 1.0)
-    new_stress = (stress + step_scale * (stress_up - stress_down)).clamp(0.0, 1.0)
-    new_instab = (instab + step_scale * (instability_up - instability_down)).clamp(0.0, 1.0)
+    new_stress = (stress + step_scale * (stress_up - stress_down
+                  - 0.020 * decay_coef * stress)).clamp(0.0, 1.0)
+    new_instab = (instab + step_scale * (instability_up - instability_down
+                  - 0.020 * decay_coef * instab)).clamp(0.0, 1.0)
     return new_phase, new_stress, new_instab
 
 
@@ -709,7 +717,10 @@ def unified_step(
     spatial_het = np.clip(0.40*h_std + 0.30*T_std + 0.20*q_std + 0.10*wind_rms, 0.0, 1.0)
 
     # UMDST — per-family coefficients + per-family gain modifier
-    step_scale = float(_UMDST_REF_STEPS / total_steps) if total_steps else 1.0
+    # step_scale clamped to [0, 1]: only damp LONGER rollouts; short rollouts
+    # (total_steps ≤ _UMDST_REF_STEPS) keep legacy rate exactly.
+    step_scale = (float(min(1.0, _UMDST_REF_STEPS / total_steps))
+                   if total_steps else 1.0)
     new_phase  = np.empty_like(phase)
     new_stress = np.empty_like(stress)
     new_instab = np.empty_like(instab)
@@ -762,11 +773,15 @@ def unified_step(
         iu  = 0.012 * A_i + 0.010 * sigma_i + 0.014 * stress_i + 0.005 * het_i
         id_ = 0.008 * lt_i
 
+        # Long-only proportional decay on stress/instab (see batched version).
+        decay_coef = 1.0 - step_scale
         new_phase[i]  = max(0.0, min(1.0,
             ph_i + step_scale * (
                 gain_i + 0.20*prec_g + 0.16*coup_g - 0.05*ins_i - 0.04*stress_i)))
-        new_stress[i] = max(0.0, min(1.0, stress_i + step_scale * (su - sd)))
-        new_instab[i] = max(0.0, min(1.0, ins_i + step_scale * (iu - id_)))
+        new_stress[i] = max(0.0, min(1.0,
+            stress_i + step_scale * (su - sd - 0.020 * decay_coef * stress_i)))
+        new_instab[i] = max(0.0, min(1.0,
+            ins_i + step_scale * (iu - id_ - 0.020 * decay_coef * ins_i)))
 
     return UnifiedState(
         h=new_h, T=new_T, q=new_q, u=new_u, v=new_v,
@@ -864,7 +879,9 @@ def _torch_unified_step(
 
     op  = (new_h.mean(dim=(-2,-1)) / BASE_H).clamp(0.0, 1.2)
     lt  = (new_q.mean(dim=(-2,-1)) / 0.030).clamp(0.0, 1.2)
-    step_scale = float(_UMDST_REF_STEPS / total_steps) if total_steps else 1.0
+    # Clamp step_scale to [0, 1] so short rollouts are unaffected.
+    step_scale = (float(min(1.0, _UMDST_REF_STEPS / total_steps))
+                   if total_steps else 1.0)
     new_phase, new_stress, new_instab = _umdst_batched_step(
         op, lt, ac, stress, phase, md, instab, A, rho, sigma, carr["n"],
         carr["g_gain"], carr["g_prec"], carr["g_coup"], carr["g_stress"],
@@ -1242,18 +1259,29 @@ def evaluate_worldline(seed, field, w):
     results, _ = run_tree_diagram(seed, bg, NX=8, NY=8, steps=1, top_k=1)
     return results[0] if results else None
 
-def attach_weather_alignment(results, weather_scores):
-    """Attach per-worldline weather scores and derived alignments to results.
+def attach_weather_alignment(results, weather_scores_or_state):
+    """Attach per-worldline weather evidence and derived alignments to results.
 
-    Called after run_tree_diagram(seed, bg) + weather_bridge.run_worldlines_batched
-    (or the serial run_worldline_weather loop). Mutates each EvaluationResult
-    in place:
+    Two modes:
+      1. weather_scores_or_state is a UnifiedState → compute evidence
+         internally via forecast_evidence(state). This is the TD-native path:
+         weather rollout produces evidence directly from physics, no external
+         scoring function needed.
+      2. weather_scores_or_state is a sequence of floats → legacy path,
+         caller computed scores externally.
+
+    Mutates each EvaluationResult in place:
       - result.weather_score       ← raw score in [0, 1]
-      - result.weather_alignment   ← normalized alignment in [-0.15, +0.10]
+      - result.weather_alignment   ← normalised alignment in [-0.15, +0.10]
       - result.final_balanced_score ← balanced_score + weather_alignment
 
-    Length mismatch raises ValueError. Score list order must match results order.
+    Length mismatch (mode 2) raises ValueError.
     """
+    if isinstance(weather_scores_or_state, UnifiedState):
+        weather_scores = forecast_evidence(weather_scores_or_state)
+    else:
+        weather_scores = weather_scores_or_state
+
     if len(weather_scores) != len(results):
         raise ValueError(
             f"weather_scores length {len(weather_scores)} != results length {len(results)}"
