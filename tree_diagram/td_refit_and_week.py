@@ -171,6 +171,53 @@ def _surface_from_internal(
     }
 
 
+def _diurnal_deviation(hour_local: float) -> float:
+    """Dimensionless diurnal deviation ∈ [-1, +1] at a given local solar hour.
+
+    Peak +1 at 14:00, trough -1 at 05:00. Piecewise cosines so heating
+    (05→14, 9 h) and cooling (14→05, 15 h) have distinct timescales —
+    reproduces the typical subtropical mid-day max / pre-dawn min offset
+    better than a symmetric sinusoid.
+
+    This is a surface 2-m diagnostic only; the TD internal state does not
+    see it. Amplitude modulation (RH/wind) is applied by _apply_diurnal_t2m.
+    """
+    h = hour_local % 24.0
+    if 5.0 <= h <= 14.0:
+        t = (h - 5.0) / 9.0
+        return -math.cos(math.pi * t)
+    if h > 14.0:
+        t = (h - 14.0) / 15.0
+    else:
+        t = (h + 10.0) / 15.0
+    return math.cos(math.pi * t)
+
+
+def _apply_diurnal_t2m(surface: dict, hour_local: float) -> dict:
+    """Add a diurnal T2m deviation to a surface diagnostic dict.
+
+    Applies only to `temperature_2m_C`; all other fields untouched.
+    Amplitude modulation:
+      - base 8 K (clear-sky subtropical spring typical)
+      - scaled by (1 − 0.008·RH) — moist/cloudy atmospheres dampen diurnal
+      - scaled by 1/(1+0.15·wind10) — turbulent mixing dampens diurnal
+    Hard floors (0.2 × base, 0.3 × base) prevent amplitude collapsing to 0.
+    The TD internal state h/T/q/u/v is NOT modified.
+    """
+    rh = float(surface.get("relative_humidity_pct", 75.0))
+    ws = float(surface.get("wind_speed_10m_ms", 0.0))
+    base_amplitude = 8.0
+    rh_factor   = max(0.2, 1.0 - 0.008 * rh)
+    wind_factor = max(0.3, 1.0 / (1.0 + 0.15 * ws))
+    amplitude = base_amplitude * rh_factor * wind_factor
+    delta_T = amplitude * _diurnal_deviation(hour_local)
+    out = dict(surface)
+    out["temperature_2m_C"] = surface["temperature_2m_C"] + delta_T
+    out["diurnal_delta_K"]  = float(delta_T)
+    out["diurnal_amplitude_K"] = float(amplitude)
+    return out
+
+
 def _physical_summary_from_centers(
     centers: np.ndarray,
     surface_elevation_m: float,
@@ -516,27 +563,37 @@ def main() -> int:
         if day_idx == 0:
             day1_alignment_state = _state_to_numpy(alignment_state)
 
-        # Day-end snapshot summary (kept as _end auxiliary columns, and used
-        # for ensemble_spread since spread is most physical at day boundary).
-        end_centers = day_samples[-1]
-        end_summary = _physical_summary_from_centers(
-            end_centers,
-            TAIPEI_STATION_ELEV_M,
-            pressure_anchor_h_mid_m,
-            pressure_anchor_surface_hpa,
-        )
-
         # Per-sample per-candidate surface diagnostics.
         # Shape: (TD_SAMPLES_PER_DAY, n_candidates, surface_dict_fields).
-        per_sample_per_cand = [
-            _candidate_surface_diagnostics(
+        # Each sample corresponds to a local solar hour (3h stride, midpoints
+        # at 1.5, 4.5, 7.5, 10.5, 13.5, 16.5, 19.5, 22.5). The TD rollout has
+        # no diurnal forcing, so T2m from the mid-level→surface conversion is
+        # nearly constant across the day. We add a surface-diagnostic-only
+        # diurnal modulation to T2m (amplitude scaled by RH / wind), leaving
+        # TD internal state untouched.
+        per_sample_per_cand = []
+        for sample_idx, sample_centers in enumerate(day_samples):
+            hour_local = sample_idx * 3.0 + 1.5
+            per_cand = _candidate_surface_diagnostics(
                 sample_centers,
                 TAIPEI_STATION_ELEV_M,
                 pressure_anchor_h_mid_m,
                 pressure_anchor_surface_hpa,
             )
-            for sample_centers in day_samples
-        ]
+            per_cand = [_apply_diurnal_t2m(s, hour_local) for s in per_cand]
+            per_sample_per_cand.append(per_cand)
+
+        # Day-end snapshot summary (kept as _end auxiliary columns). The last
+        # sample is at hour 22.5 — apply diurnal so T2m_end is self-consistent
+        # with the time-series samples used for T2m_mean/min/max.
+        end_centers = day_samples[-1]
+        end_summary_base = _physical_summary_from_centers(
+            end_centers,
+            TAIPEI_STATION_ELEV_M,
+            pressure_anchor_h_mid_m,
+            pressure_anchor_surface_hpa,
+        )
+        end_summary = _apply_diurnal_t2m(end_summary_base, TD_SAMPLES_PER_DAY * 3.0 - 1.5)
 
         n_cand = len(candidates)
         # Per-candidate time-series (shape: n_cand × TD_SAMPLES_PER_DAY).
