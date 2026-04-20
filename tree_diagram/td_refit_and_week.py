@@ -1,529 +1,710 @@
-"""Re-fit B-calibration at current physics + run 7-day forecast.
-Portable: uses Path(__file__) relative paths so it runs local (numpy) or cluster (cupy)."""
+"""Run a 7-day Taipei forecast with TD worldline selection + physical surface diagnostics.
+
+This script keeps two layers separate:
+1. TD native judgment / governance:
+   CandidatePipeline -> top worldlines -> hydro / oracle / phase diagnostics
+2. Weather diagnostics:
+   unified_rollout internal state (h, T, q, u, v at the TD mid-level reference)
+   -> physical surface conversion (2 m T / RH / surface pressure / 10 m wind)
+
+No MOS / Theil-Sen / WeatherCalibration regression is used here.
+"""
 from __future__ import annotations
-import sys, time, json, math
+
+import json
+import math
+import sys
+import time
 from datetime import date, timedelta
 from pathlib import Path
+
 import numpy as np
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from tree_diagram.numerics.forcing import GridConfig, build_grid, build_topography
-from tree_diagram.numerics.ensemble import DEFAULT_BRANCHES, _rotate_wind_inplace
-from tree_diagram.numerics.weather_state import WeatherState
-from tree_diagram.numerics.dynamics_batched import (
-    batched_branch_step, stack_families, unstack_families
-)
-from tree_diagram.numerics.ranking import score_state
-from tree_diagram.numerics.weather_contract import WeatherCalibration
-from tree_diagram.numerics._xp import has_cupy
-from tree_diagram.numerics.weather_bridge import (
-    worldline_to_branch_params, weather_scores_to_alignments,
-    OMEGA_EARTH, TAIPEI_LAT_DEG, TAIPEI_F_CORIOLIS, N_OPT_DEFAULT,
-)
+from td_taipei_forecast import ReferenceObs, build_taipei_state
+from tree_diagram.core.background_inference import infer_problem_background as td_infer_bg
 from tree_diagram.core.problem_seed import ProblemSeed
-from tree_diagram.core.worldline_kernel import attach_weather_alignment
+from tree_diagram.core.worldline_kernel import (
+    _TORCH_OK,
+    _DOMAIN_X as TD_DOMAIN_X,
+    _DOMAIN_Y as TD_DOMAIN_Y,
+    _carr_to_torch,
+    _state_to_numpy,
+    _state_to_torch,
+    _torch_rollout,
+    attach_weather_alignment,
+    encode_initial_state as td_encode_initial_state,
+    forecast_evidence,
+    generate_candidates as td_generate_candidates,
+    prepare_candidate_arrays as td_prepare_candidate_arrays,
+    unified_rollout as td_unified_rollout,
+)
+from tree_diagram.numerics.forcing import GridConfig, build_grid, build_topography
+from tree_diagram.numerics.weather_bridge import (
+    CP_AIR,
+    GRAVITY_STD,
+    LV_VAPORIZATION,
+    P_MID_HPA,
+    R_DRY_AIR,
+    R_WATER_VAPOR,
+)
 from tree_diagram.pipeline.candidate_pipeline import CandidatePipeline
-from td_taipei_forecast import build_taipei_state, ReferenceObs
-from calibration.fit_calibration_b import fit_two_param, fit_scale_through_origin, invert_q_to_rh_ratio
+
+try:
+    import torch
+except Exception:  # pragma: no cover - torch is optional locally
+    torch = None
 
 OBS_PATH = HERE / "calibration" / "taipei_obs_daily.json"
-CAL_OUT  = HERE / "calibration" / "taipei_calibration_b.json"
-TAU_PERSIST_DAYS = 2.0
 TODAY = date(2026, 4, 19)
+TAU_PERSIST_DAYS = 2.0
+EPSILON = R_DRY_AIR / R_WATER_VAPOR
+Z0_URBAN_M = 1.0
+TAIPEI_STATION_ELEV_M = 9.0
+PRESSURE_ENCODER_M_PER_HPA = 8.0
 
-# Forecast-mode families: zero rotation (rotation was only useful for OOS
-# ensemble-ranking diversity; for point forecast the uniform-rotation creates
-# advective contamination from rotated background and ends up fusing to
-# climatological wind direction regardless of today's obs).
-def _forecast_families():
-    return [dict(f, wind_rot_deg=0.0) for f in DEFAULT_BRANCHES]
-
-cfg_fit = GridConfig(NX=256, NY=192, DX=6000.0, DY=6000.0, DT=60.0, STEPS=120)
-cfg_day = GridConfig(NX=256, NY=192, DX=6000.0, DY=6000.0, DT=60.0, STEPS=1440)
-XX, YY, _, _ = build_grid(cfg_fit)
-topo = build_topography(XX, YY)
-cy = int(np.argmin(np.abs(YY[:, 0])))
-cx = int(np.argmin(np.abs(XX[0, :])))
-
-if has_cupy():
-    import cupy as cp
-    topo_g = cp.asarray(topo)
-    print("Using cupy (GPU)")
-else:
-    topo_g = topo
-    print("Using numpy (CPU)")
-
-def _gpu(s): return s.to_gpu() if has_cupy() else s
+TD_NX = 128
+TD_NY = 96
+TD_DX = TD_DOMAIN_X / (TD_NX - 1)
+TD_DY = TD_DOMAIN_Y / (TD_NY - 1)
+TD_DT = 45.0
+TD_STEPS_PER_DAY = int(round(86400.0 / TD_DT))   # 1920 substeps @ dt=45s
+TD_SAMPLE_STRIDE = 240                             # 8 samples/day (every 3 h)
+TD_SAMPLES_PER_DAY = TD_STEPS_PER_DAY // TD_SAMPLE_STRIDE
+TD_CFG = GridConfig(NX=TD_NX, NY=TD_NY, DX=TD_DX, DY=TD_DY, DT=TD_DT, STEPS=TD_STEPS_PER_DAY)
+TD_XX, TD_YY, _, _ = build_grid(TD_CFG)
+TD_TOPO = build_topography(TD_XX, TD_YY).astype(np.float32)
+TD_CY, TD_CX = TD_NY // 2, TD_NX // 2
 
 
-def fit_day(obs_ref):
-    init = _gpu(build_taipei_state(XX, YY, topo, cfg_fit, perturbation=-1.0, obs_ref=obs_ref))
-    obs_state = _gpu(build_taipei_state(XX, YY, topo, cfg_fit, perturbation=0.0, obs_ref=obs_ref))
-    rotated = [_rotate_wind_inplace(init, f["wind_rot_deg"]) for f in DEFAULT_BRANCHES]
-    state_b = stack_families(rotated)
-    params = {k: [f[k] for f in DEFAULT_BRANCHES] for k in ["drag","humid_couple","nudging","pg_scale","wind_nudge"]}
-    # Training consistency: enable h-nudging during fit so training h_ctr
-    # reflects obs_ref.P_hPa. Without this, slope(P vs h) fit would still
-    # see h_ctr near-constant → collapsed h2p.
-    params["h_nudge"] = [1.16e-5 for _ in DEFAULT_BRANCHES]
-    bud = None
-    for _ in range(cfg_fit.STEPS):
-        state_b, bud = batched_branch_step(state_b, params, obs_state, topo_g, cfg_fit, bud)
-    states = unstack_families(state_b)
-    scored = [(float(score_state(st, obs_state, cfg_fit)["score"]), st) for st in states]
-    scored.sort(key=lambda x: -x[0])
-    top = scored[0][1]
-    u, v = float(top.u[cy,cx]), float(top.v[cy,cx])
-    wd_td = (math.degrees(math.atan2(-u, -v)) + 360.0) % 360.0
-    return dict(T_int=float(top.T[cy,cx]), h_ctr=float(top.h[cy,cx]),
-                q_int=float(top.q[cy,cx]), u=u, v=v, wd_td=wd_td)
-
-
-print(f"Fitting B-calibration on 30 days ({'GPU batched' if has_cupy() else 'CPU numpy'})...")
-t0 = time.time()
-obs_days = json.loads(OBS_PATH.read_text())["days"]
-rows = []
-for d in obs_days:
-    obs_ref = ReferenceObs(T_avg_C=d["T_mean_C"], RH_pct=d["RH_mean_pct"],
-                           P_hPa=d["P_mean_hPa"], ws_ms=d["ws_mean_ms"], wd_deg=d["wd_vec_deg"])
-    rows.append({"obs": d, "td": fit_day(obs_ref)})
-print(f"Fit done in {time.time()-t0:.1f}s")
-
-T_int = np.array([r["td"]["T_int"] for r in rows])
-T_real = np.array([r["obs"]["T_mean_C"] + 273.15 for r in rows])
-q_int = np.array([r["td"]["q_int"] for r in rows])
-h_ctr = np.array([r["td"]["h_ctr"] for r in rows])
-win_int = np.array([math.sqrt(r["td"]["u"]**2 + r["td"]["v"]**2) for r in rows])
-win_real = np.array([r["obs"]["ws_mean_ms"] for r in rows])
-RH_real = np.array([r["obs"]["RH_mean_pct"] for r in rows])
-P_real = np.array([r["obs"]["P_mean_hPa"] for r in rows])
-
-Tf = fit_two_param(T_int, T_real); wf = fit_scale_through_origin(win_int, win_real)
-T_2m_C_ts = Tf["theilsen"]["slope"] * T_int + Tf["theilsen"]["intercept"] - 273.15
-q_rh = float(np.median(invert_q_to_rh_ratio(q_int, T_2m_C_ts, RH_real)))
-# Theil-Sen slope of P vs h around training-data center of mass (not ratio
-# through forced baseline=5700, which swamped the slope when BASE_H=5400).
-# h_to_pressure_k = -slope(P vs h); baselines stored so map_pressure uses
-# them instead of hardcoded (5700, 1013).
-_slopes_Ph = []
-for i in range(len(P_real)):
-    for j in range(i + 1, len(P_real)):
-        _dh = h_ctr[i] - h_ctr[j]
-        if abs(_dh) > 0.1:
-            _slopes_Ph.append((P_real[i] - P_real[j]) / _dh)
-slope_P_h = float(np.median(_slopes_Ph)) if _slopes_Ph else 0.0
-h2p = -slope_P_h   # map_pressure: P = p_base - h2p*(h - h_base)
-h_baseline_fit = float(np.mean(h_ctr))
-p_baseline_fit = float(np.mean(P_real))
-print(f"Pressure fit: slope(P vs h)={slope_P_h:+.5f} hPa/m  "
-      f"h_baseline={h_baseline_fit:.1f}m  p_baseline={p_baseline_fit:.2f}hPa")
-
-# Fit wind-direction offset: circular median of (obs_wd - td_wd) across training days.
-# Wraps each diff to [-180, 180]; simple median is robust if diffs cluster.
-wd_diffs = []
-for r in rows:
-    obs_wd = r["obs"]["wd_vec_deg"]
-    td_wd = r["td"]["wd_td"]
-    d = (obs_wd - td_wd + 540.0) % 360.0 - 180.0
-    wd_diffs.append(d)
-wd_offset = float(np.median(wd_diffs))
-print(f"Wind-dir offset: circular-median(obs - td) = {wd_offset:+.1f}° (n={len(wd_diffs)})")
-
-cal = WeatherCalibration(
-    location_name="Taipei (256×192+τ_cond+Kessler+wd_offset)",
-    fitted_date="2026-04-19 (finer grid + τ_condense + Kessler precip + wd Coriolis-offset)",
-    T_offset_K=Tf["theilsen"]["intercept"], T_scale=Tf["theilsen"]["slope"],
-    h_to_pressure_k=h2p, q_to_rh_ratio=q_rh,
-    wind_scale=wf["theilsen_median"]["scale"],
-    wind_dir_offset_deg=wd_offset,
-    h_baseline_m=h_baseline_fit,
-    p_baseline_hPa=p_baseline_fit,
-)
-print(f"Calibration: T_scale={cal.T_scale:.4f} T_offset_K={cal.T_offset_K:+.3f} "
-      f"q_to_rh={cal.q_to_rh_ratio:.3f} wind_scale={cal.wind_scale:.3f} h2p={cal.h_to_pressure_k:+.5f}")
-
-CAL_OUT.write_text(json.dumps({
-    "scheme": "B (256×192, τ_condense=600, Kessler precip, wind_nudge decay, wd offset, P-baselines)",
-    "calibration": {
-        "location_name": cal.location_name, "fitted_date": cal.fitted_date,
-        "T_offset_K": cal.T_offset_K, "T_scale": cal.T_scale,
-        "h_to_pressure_k": cal.h_to_pressure_k,
-        "q_to_rh_ratio": cal.q_to_rh_ratio, "wind_scale": cal.wind_scale,
-        "wind_dir_offset_deg": cal.wind_dir_offset_deg,
-        "h_baseline_m": cal.h_baseline_m,
-        "p_baseline_hPa": cal.p_baseline_hPa,
-    }}, indent=2))
-
-# Build climatology obs (for days 2-7 to relax toward instead of today's pinned values)
-climo_T  = float(np.mean([d["T_mean_C"]    for d in obs_days]))
-climo_RH = float(np.mean([d["RH_mean_pct"] for d in obs_days]))
-climo_P  = float(np.mean([d["P_mean_hPa"]  for d in obs_days]))
-climo_ws = float(np.mean([d["ws_mean_ms"]  for d in obs_days]))
-u_s = sum(d["ws_mean_ms"] * math.sin(math.radians(d["wd_vec_deg"])) for d in obs_days)
-v_s = sum(d["ws_mean_ms"] * math.cos(math.radians(d["wd_vec_deg"])) for d in obs_days)
-climo_wd = (math.degrees(math.atan2(u_s, v_s)) + 360.0) % 360.0
-climo_ref = ReferenceObs(T_avg_C=climo_T, RH_pct=climo_RH, P_hPa=climo_P,
-                          ws_ms=climo_ws, wd_deg=climo_wd)
-print(f"Climatology obs for free days: T={climo_T:.1f}°C  RH={climo_RH:.1f}%  "
-      f"P={climo_P:.1f}hPa  wind={climo_ws:.2f} m/s @ {climo_wd:.0f}°")
-
-# Week forecast
-print("\nWeek forecast (zero wind_rot, climo obs days 2-7, wind_nudge decay τ=2d)...")
-# 2026-04-19 actual daily-mean from Open-Meteo/ECMWF (verified 2026-04-20).
-# Previous hardcoded 24.0/82.5/1009/3.6@270 was wrong — wind direction
-# especially (270° W vs actual 44° NE) poisoned day-1 DA output.
-today_obs = ReferenceObs(T_avg_C=23.8, RH_pct=75.0, P_hPa=1012.3, ws_ms=1.69, wd_deg=44.0)
-# Init wind uniform at today value (not Gaussian-blended) — prevents advection
-# from far-field climo-direction cells polluting the center.
-_init_base = build_taipei_state(XX, YY, topo, cfg_day, perturbation=-1.0, obs_ref=today_obs)
-_today_wd_rad = math.radians(today_obs.wd_deg)
-_u_today = -today_obs.ws_ms * math.sin(_today_wd_rad)
-_v_today = -today_obs.ws_ms * math.cos(_today_wd_rad)
-init = _gpu(WeatherState(
-    h=_init_base.h, T=_init_base.T, q=_init_base.q,
-    u=np.full_like(_init_base.u, _u_today),
-    v=np.full_like(_init_base.v, _v_today),
-))
-def _make_uniform_wind_obs(obs_ref, base_fn):
-    """Build obs state with UNIFORM (u,v) = obs wind value everywhere, while
-    keeping h/T/q spatial structure from build_taipei_state. Spectral-nudging
-    style: large-scale wind forcing baked into obs target across full grid,
-    not Gaussian-localized at center (which advection dilutes on fine grids)."""
-    base = base_fn(XX, YY, topo, cfg_day, perturbation=0.0, obs_ref=obs_ref)
-    wd_rad = math.radians(obs_ref.wd_deg)
-    u_uniform = -obs_ref.ws_ms * math.sin(wd_rad)
-    v_uniform = -obs_ref.ws_ms * math.cos(wd_rad)
-    return WeatherState(
-        h=base.h, T=base.T, q=base.q,
-        u=np.full_like(base.u, u_uniform),
-        v=np.full_like(base.v, v_uniform),
+def _candidate_key(params: dict, family: str) -> tuple:
+    return (
+        family,
+        int(params.get("n", 0)),
+        round(float(params.get("rho", 0.0)), 4),
+        round(float(params.get("A", 0.0)), 4),
+        round(float(params.get("sigma", 0.0)), 4),
     )
 
-# =====================================================================
-# Forecast source — TD CandidatePipeline (default) vs legacy 6-family
-# =====================================================================
-# Default (USE_TD_WORLDLINES=True): build a weather ProblemSeed from today's
-# conditions + 30-day climo stats, let CandidatePipeline generate & rank
-# worldline candidates via UMDST scoring (batch-anchored by design — see
-# §11.17), then translate each top-K worldline into branch physics params
-# via weather_bridge.worldline_to_branch_params and run the same 7-day
-# rollout pipeline we used for the 6 hardcoded families.
-#
-# This is the proper TD interface: TD chooses the parameter manifold points,
-# weather_bridge maps them to physics, shallow-water dynamics integrate.
-# TD's top-K convergence to batch/n=20000 is a calibration feature, not a bug.
-#
-# USE_TD_WORLDLINES=False: legacy 6-family hardcoded branches.
-# USE_ANALOG_ENSEMBLE=True: legacy-legacy analog sampling for days 2-7.
-USE_TD_WORLDLINES = True
-USE_ANALOG_ENSEMBLE = False
 
-obs_today_gpu = _gpu(_make_uniform_wind_obs(today_obs, build_taipei_state))
-# Climo obs — T/q Held-Suarez relaxation target on free days.
-obs_climo_gpu = _gpu(_make_uniform_wind_obs(climo_ref, build_taipei_state))
+def _saturation_vapor_pressure_hpa(T_k: float) -> float:
+    T_c = T_k - 273.15
+    return 6.112 * math.exp(17.67 * T_c / (T_c + 243.5))
 
-if USE_ANALOG_ENSEMBLE:
-    _rng = np.random.default_rng(seed=20260420)   # reproducible
-    _analog_day_idxs = _rng.choice(len(obs_days), size=6, replace=False)
-    _analog_obs_gpu = []
-    for _idx in _analog_day_idxs:
-        d = obs_days[int(_idx)]
-        aref = ReferenceObs(T_avg_C=d["T_mean_C"], RH_pct=d["RH_mean_pct"],
-                             P_hPa=d["P_mean_hPa"], ws_ms=d["ws_mean_ms"],
-                             wd_deg=d["wd_vec_deg"])
-        _analog_obs_gpu.append(_gpu(_make_uniform_wind_obs(aref, build_taipei_state)))
-    print(f"[legacy] analog days chosen: {[obs_days[int(i)]['date'] for i in _analog_day_idxs]}")
-else:
-    _analog_obs_gpu = None
 
-# ---------------------------------------------------------------------
-# TD WORLDLINE PATH — build weather seed, call CandidatePipeline
-# ---------------------------------------------------------------------
-def build_weather_seed(today_obs_, climo_ref_, obs_days_, today_date) -> ProblemSeed:
-    """Honest ProblemSeed for the forecast task — no copied-template fields.
+def _saturation_mixing_ratio(T_k: float, p_pa: float) -> float:
+    e_sat_pa = 100.0 * _saturation_vapor_pressure_hpa(T_k)
+    return EPSILON * e_sat_pa / max(1.0, p_pa - e_sat_pa)
 
-    subject[8D] describes the FORECAST SYSTEM's capability, not the atmosphere:
-      output_power      = forcing-amplitude adequacy (normalised wind speed)
-      control_precision = DA/anchor accuracy (today_obs quality)
-      load_tolerance    = numerical stability headroom (high post-CFL-fix)
-      aim_coupling      = obs↔model alignment under nudging
-      stress_level      = synoptic activity (today's deviation from climo)
-      phase_proximity   = how near a regime transition (mid-horizon)
-      marginal_decay    = per-day skill erosion (~22%/day after day 3)
-      instability_sensitivity = chaos exposure (rises with lead time)
 
-    environment.phase_instability is measured from obs variance over the
-    30-day window, so TD sees *actual* synoptic activity, not a guess.
+def _moist_adiabatic_lapse_rate(T_k: float, p_pa: float) -> float:
+    rs = max(0.0, min(0.5, _saturation_mixing_ratio(T_k, p_pa)))
+    numerator = GRAVITY_STD * (1.0 + LV_VAPORIZATION * rs / (R_DRY_AIR * T_k))
+    denominator = CP_AIR + (LV_VAPORIZATION**2 * rs * EPSILON) / (R_DRY_AIR * T_k**2)
+    return numerator / denominator
+
+
+def _relative_humidity_midlevel_pct(T_mid_k: float, q_mid: float, p_mid_hpa: float = P_MID_HPA) -> float:
+    """Decode RH from the model's mid-level moisture state.
+
+    build_taipei_state() encodes the surface humidity signal into a 500 hPa-layer
+    specific humidity using Tetens at the internal mid-level reference. The most
+    self-consistent inverse for this one-layer model is therefore to recover RH at
+    the same mid-level, then carry that RH marker down to the surface diagnostics.
     """
+    q_mid = max(1.0e-6, min(0.03, q_mid))
+    e_actual_hpa = q_mid * p_mid_hpa / (EPSILON + (1.0 - EPSILON) * q_mid)
+    e_sat_mid_hpa = _saturation_vapor_pressure_hpa(T_mid_k)
+    return float(np.clip(100.0 * e_actual_hpa / max(1.0e-6, e_sat_mid_hpa), 0.0, 100.0))
+
+
+def _surface_from_internal(
+    *,
+    h_mid_m: float,
+    T_mid_k: float,
+    q_mid: float,
+    u_mid: float,
+    v_mid: float,
+    surface_elevation_m: float,
+    pressure_anchor_h_mid_m: float,
+    pressure_anchor_surface_hpa: float,
+) -> dict:
+    """Convert TD mid-level state (~500 hPa) to surface diagnostics."""
+    z_mid = max(h_mid_m, surface_elevation_m + 50.0)
+    z_2m = surface_elevation_m + 2.0
+    z_10m = surface_elevation_m + 10.0
+    dz_to_2m = max(0.0, z_mid - z_2m)
+    dz_ref = max(50.0, z_mid - surface_elevation_m)
+
+    p_mid_pa = P_MID_HPA * 100.0
+    gamma_m = _moist_adiabatic_lapse_rate(T_mid_k, p_mid_pa)
+    T_2m_k = T_mid_k + gamma_m * dz_to_2m
+
+    q_mid = max(1.0e-6, min(0.03, q_mid))
+    rh_mid_pct = _relative_humidity_midlevel_pct(T_mid_k, q_mid, P_MID_HPA)
+    Tv_mid = T_mid_k * (1.0 + 0.61 * q_mid)
+    Tv_2m = T_2m_k * (1.0 + 0.61 * q_mid)
+    Tv_bar = max(180.0, 0.5 * (Tv_mid + Tv_2m))
+    p_surface_pa_hypsometric = p_mid_pa * math.exp(GRAVITY_STD * dz_to_2m / (R_DRY_AIR * Tv_bar))
+    p_surface_hpa_hypsometric = p_surface_pa_hypsometric / 100.0
+    p_surface_hpa = pressure_anchor_surface_hpa + (
+        h_mid_m - pressure_anchor_h_mid_m
+    ) / PRESSURE_ENCODER_M_PER_HPA
+
+    wind_mid_ms = math.hypot(u_mid, v_mid)
+    log_num = math.log((z_10m - surface_elevation_m + Z0_URBAN_M) / Z0_URBAN_M)
+    log_den = math.log((dz_ref + Z0_URBAN_M) / Z0_URBAN_M)
+    wind_10m_ms = wind_mid_ms * log_num / max(1.0e-6, log_den)
+    wind_dir_deg = (math.degrees(math.atan2(-u_mid, -v_mid)) + 360.0) % 360.0
+
+    return {
+        "temperature_2m_C": T_2m_k - 273.15,
+        "relative_humidity_pct": rh_mid_pct,
+        "surface_pressure_hpa": float(np.clip(p_surface_hpa, 870.0, 1085.0)),
+        "surface_pressure_hpa_hypsometric": p_surface_hpa_hypsometric,
+        "wind_speed_10m_ms": wind_10m_ms,
+        "wind_direction_deg": wind_dir_deg,
+        "gamma_m_K_per_km": gamma_m * 1000.0,
+        "relative_humidity_mid_pct": rh_mid_pct,
+    }
+
+
+def _physical_summary_from_centers(
+    centers: np.ndarray,
+    surface_elevation_m: float,
+    pressure_anchor_h_mid_m: float,
+    pressure_anchor_surface_hpa: float,
+) -> dict:
+    T_mid = float(np.median(centers[:, 0]))
+    h_mid = float(np.median(centers[:, 1]))
+    q_mid = float(np.median(centers[:, 2]))
+    u_mid = float(np.median(centers[:, 3]))
+    v_mid = float(np.median(centers[:, 4]))
+    surface = _surface_from_internal(
+        h_mid_m=h_mid,
+        T_mid_k=T_mid,
+        q_mid=q_mid,
+        u_mid=u_mid,
+        v_mid=v_mid,
+        surface_elevation_m=surface_elevation_m,
+        pressure_anchor_h_mid_m=pressure_anchor_h_mid_m,
+        pressure_anchor_surface_hpa=pressure_anchor_surface_hpa,
+    )
+    surface["ensemble_spread"] = {
+        "T_mid_std_K": float(np.std(centers[:, 0])),
+        "h_mid_std_m": float(np.std(centers[:, 1])),
+        "q_mid_std": float(np.std(centers[:, 2])),
+        "wind_mid_std_ms": float(np.std(np.hypot(centers[:, 3], centers[:, 4]))),
+    }
+    return surface
+
+
+def _wrap_angle_diff_deg(a: float, b: float) -> float:
+    return abs((a - b + 180.0) % 360.0 - 180.0)
+
+
+def _surface_score(surface: dict, target_obs: ReferenceObs) -> float:
+    """Higher is better. Score is intentionally relative, not calibrated."""
+    t_err = abs(surface["temperature_2m_C"] - target_obs.T_avg_C) / 4.0
+    rh_err = abs(surface["relative_humidity_pct"] - target_obs.RH_pct) / 20.0
+    p_err = abs(surface["surface_pressure_hpa"] - target_obs.P_hPa) / 4.0
+    ws_err = abs(surface["wind_speed_10m_ms"] - target_obs.ws_ms) / 3.0
+    wd_err = _wrap_angle_diff_deg(surface["wind_direction_deg"], target_obs.wd_deg) / 60.0
+    weighted = 0.30 * t_err + 0.20 * rh_err + 0.25 * p_err + 0.15 * ws_err + 0.10 * wd_err
+    return float(max(-4.0, 1.0 - weighted))
+
+
+def _candidate_surface_diagnostics(
+    centers: np.ndarray,
+    surface_elevation_m: float,
+    pressure_anchor_h_mid_m: float,
+    pressure_anchor_surface_hpa: float,
+) -> list[dict]:
+    out: list[dict] = []
+    for row in centers:
+        out.append(
+            _surface_from_internal(
+                h_mid_m=float(row[1]),
+                T_mid_k=float(row[0]),
+                q_mid=float(row[2]),
+                u_mid=float(row[3]),
+                v_mid=float(row[4]),
+                surface_elevation_m=surface_elevation_m,
+                pressure_anchor_h_mid_m=pressure_anchor_h_mid_m,
+                pressure_anchor_surface_hpa=pressure_anchor_surface_hpa,
+            )
+        )
+    return out
+
+
+def _norm_spread(arr: np.ndarray) -> np.ndarray:
+    lo = float(arr.min())
+    hi = float(arr.max())
+    if hi - lo < 1.0e-12:
+        return np.zeros_like(arr, dtype=np.float64)
+    return (arr - lo) / (hi - lo)
+
+
+def _field_fit_scores(
+    h: np.ndarray,
+    T: np.ndarray,
+    q: np.ndarray,
+    u: np.ndarray,
+    v: np.ndarray,
+    obs_fields: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+) -> np.ndarray:
+    obs_h, obs_T, obs_q, obs_u, obs_v = obs_fields
+    h_err = ((h - obs_h[None]) ** 2).mean(axis=(1, 2))
+    T_err = ((T - obs_T[None]) ** 2).mean(axis=(1, 2))
+    q_err = ((q - obs_q[None]) ** 2).mean(axis=(1, 2))
+    w_err = ((u - obs_u[None]) ** 2 + (v - obs_v[None]) ** 2).mean(axis=(1, 2))
+    composite = (
+        0.35 * _norm_spread(h_err)
+        + 0.30 * _norm_spread(T_err)
+        + 0.20 * _norm_spread(q_err)
+        + 0.15 * _norm_spread(w_err)
+    )
+    return 1.0 - composite
+
+
+def _build_weather_seed(today_obs_: ReferenceObs, climo_ref_: ReferenceObs, obs_days_: list[dict], today_date: date) -> ProblemSeed:
     T_std = float(np.std([d["T_mean_C"] for d in obs_days_]))
     P_std = float(np.std([d["P_mean_hPa"] for d in obs_days_]))
-    # Normalise to [0,1]: 3°C std + 5 hPa std are typical April mid-lat values.
     phase_instab = min(1.0, 0.55 * (T_std / 3.0) + 0.45 * (P_std / 5.0))
-    # Stress: today's deviation from climo
+
     T_dev = abs(today_obs_.T_avg_C - climo_ref_.T_avg_C)
     P_dev = abs(today_obs_.P_hPa - climo_ref_.P_hPa)
     stress = min(1.0, 0.6 * (T_dev / 3.0) + 0.4 * (P_dev / 5.0))
-    # Output power: wind amplitude vs a 5 m/s reference
     out_pow = min(1.0, max(0.2, today_obs_.ws_ms / 5.0))
 
     return ProblemSeed(
-        title=f"Taipei 7-day surface weather forecast ({today_date} → +7d)",
+        title=f"Taipei 7-day surface weather forecast ({today_date} -> +7d)",
         target=(
             "Forecast daily-mean T/RH/P/wind at Taipei (25.03N, 121.56E) for "
-            "7 days. Day 1 anchored to today's obs (DA); days 2-7 free "
-            "integration with decaying obs nudge and climo relaxation."
+            "7 days. Day 1 anchored to 2026-04-19 observations; days 2-7 relax "
+            "toward climatology with exponential persistence decay."
         ),
         constraints=[
             "1-layer shallow water (no baroclinic structure)",
-            "256x192 grid DX=DY=6km DT=60s (gravity-wave CFL satisfied)",
-            "30-day training climatology ending 2026-04-19 (Open-Meteo ECMWF)",
-            "single-point verification at Taipei grid center",
+            "128x96 TD grid, dt=45 s for unified_rollout",
+            "30-day climatology ending 2026-04-19",
+            "point diagnostic at Taipei grid center",
         ],
         resources={
-            "budget":              0.85,  # GPU batched, H100 accessible
-            "infrastructure":      0.90,  # CuPy + torch ready
-            "data_coverage":       0.72,  # 30 days daily means only
-            "population_coupling": 0.55,  # single-station obs
+            "budget": 0.85,
+            "infrastructure": 0.90,
+            "data_coverage": 0.72,
+            "population_coupling": 0.55,
         },
         environment={
-            "field_noise":         0.30,            # clean daily-mean obs
-            "phase_instability":   phase_instab,    # from 30-day variance
-            "social_pressure":     0.20,
+            "field_noise": 0.30,
+            "phase_instability": phase_instab,
+            "social_pressure": 0.20,
             "regulatory_friction": 0.20,
-            "network_density":     0.40,
+            "network_density": 0.40,
         },
         subject={
-            "output_power":            out_pow,
-            "control_precision":       0.62,
-            "load_tolerance":          0.85,   # post-CFL-fix
-            "aim_coupling":            0.58,
-            "stress_level":            stress,
-            "phase_proximity":         0.50,
-            "marginal_decay":          0.22,   # skill ~22%/day after d3
+            "output_power": out_pow,
+            "control_precision": 0.62,
+            "load_tolerance": 0.85,
+            "aim_coupling": 0.58,
+            "stress_level": stress,
+            "phase_proximity": 0.50,
+            "marginal_decay": 0.22,
             "instability_sensitivity": 0.48,
         },
     )
 
 
-if USE_TD_WORLDLINES:
-    print("\n" + "=" * 68)
-    print("TD CandidatePipeline — building weather ProblemSeed")
-    print("=" * 68)
-    _weather_seed = build_weather_seed(today_obs, climo_ref, obs_days, TODAY)
-    print(f"  phase_instability (from 30-day T/P variance): "
-          f"{_weather_seed.environment['phase_instability']:.3f}")
-    print(f"  stress_level (today deviation from climo):    "
-          f"{_weather_seed.subject['stress_level']:.3f}")
-    print(f"  output_power (today wind / 5 m/s):            "
-          f"{_weather_seed.subject['output_power']:.3f}")
-    _td_t0 = time.time()
-    _pipeline = CandidatePipeline(
-        seed=_weather_seed, top_k=12,
-        NX=128, NY=96, steps=300, dt=45.0,
+def _state_to_fields(state) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    return (
+        state.h.astype(np.float32),
+        state.T.astype(np.float32),
+        state.q.astype(np.float32),
+        state.u.astype(np.float32),
+        state.v.astype(np.float32),
     )
-    _td_top_results, _td_hydro, _td_oracle = _pipeline.run()
-    print(f"  CandidatePipeline.run(): {time.time() - _td_t0:.1f}s "
-          f"(alive={_td_hydro.get('alive_count')} pruned={_td_hydro.get('pruned_count')})")
-    print(f"  Top-{min(5, len(_td_top_results))} worldlines (TD judgment layer):")
-    for _i, _r in enumerate(_td_top_results[:5]):
-        _p = _r.params
-        print(f"    #{_i+1} {_r.family:<13} "
-              f"n={int(_p.get('n', 0)):>5} rho={_p.get('rho', 0):.2f} "
-              f"A={_p.get('A', 0):.2f} sigma={_p.get('sigma', 0):.3f} | "
-              f"score={_r.balanced_score:+.3f} feas={_r.feasibility:.2f} "
-              f"status={_r.branch_status}")
-    # Translate TD worldlines to physics branch params
-    forecast_branches = [worldline_to_branch_params(_r, _weather_seed) for _r in _td_top_results]
-    print(f"  Translated to {len(forecast_branches)} physics branches via weather_bridge")
-else:
-    forecast_branches = _forecast_families()   # legacy 6-family wind_rot=0
-    _td_top_results = None
-    _td_hydro = None
-    _td_oracle = None
-    print("[legacy] 6-family hardcoded branches (USE_TD_WORLDLINES=False)")
 
-# =====================================================================
-# 7-day rollout via TD's unified_rollout (UMDST-coupled physics)
-# =====================================================================
-# Replaces the previous batched_branch_step loop (vanilla 1-layer SW).
-# unified_step couples shallow-water physics with UMDST phase/stress/
-# instability dynamics — spatial_het and wind_rms feed back into gain,
-# preventing the asymptotic wind collapse we saw in the pure-SW rollout.
-#
-# Per-day checkpointing: 1 forecast day = 86400 s. TD default dt=45 s →
-# 1920 substeps/day. 7 days = 13440 substeps total.
 
-from tree_diagram.core.worldline_kernel import (
-    unified_rollout as td_unified_rollout,
-    prepare_candidate_arrays as td_prepare_candidate_arrays,
-    encode_initial_state as td_encode_initial_state,
-    generate_candidates as td_generate_candidates,
-    _DOMAIN_X as TD_DOMAIN_X, _DOMAIN_Y as TD_DOMAIN_Y,
-)
-from tree_diagram.core.background_inference import infer_problem_background as td_infer_bg
+def _blend_fields(a: tuple[np.ndarray, ...], b: tuple[np.ndarray, ...], w: float) -> tuple[np.ndarray, ...]:
+    return tuple((w * ax + (1.0 - w) * bx).astype(np.float32) for ax, bx in zip(a, b))
 
-# TD grid (matches CandidatePipeline defaults)
-_TD_NX, _TD_NY = 128, 96
-_TD_DX = TD_DOMAIN_X / (_TD_NX - 1)
-_TD_DY = TD_DOMAIN_Y / (_TD_NY - 1)
-_TD_DT = 45.0
-_TD_STEPS_PER_DAY = int(round(86400.0 / _TD_DT))   # 1920
 
-# EvaluationResult.params only carries (n, rho, A, sigma). unified_step
-# needs the full param set (Kh/Kt/Kq/drag/humid_couple/nudging/pg_scale/
-# aim_coupling/marginal_decay) which are baked in at generate_candidates
-# time from _CANDIDATE_SPECS. Rebuild the full candidate list and filter
-# to the top-K worldlines identified by CandidatePipeline.
-_seed_for_cands = _weather_seed if (USE_TD_WORLDLINES and _td_top_results is not None) else \
-                   build_weather_seed(today_obs, climo_ref, obs_days, TODAY)
-_bg_for_cands = td_infer_bg(_seed_for_cands)
-_all_candidates = td_generate_candidates(_seed_for_cands, _bg_for_cands)
+def _select_device() -> str:
+    if _TORCH_OK and torch is not None and torch.cuda.is_available():
+        return "cuda"
+    return "cpu"
 
-if USE_TD_WORLDLINES and _td_top_results is not None:
-    # Match top_results back to full candidates by (family, n, rho, A, sigma)
-    def _key(p, family):
-        return (family, int(p.get("n", 0)), round(float(p.get("rho", 0)), 4),
-                round(float(p.get("A", 0)), 4), round(float(p.get("sigma", 0)), 4))
-    _top_keys = {_key(r.params, r.family) for r in _td_top_results}
-    _candidates = [c for c in _all_candidates if _key(c["params"], c["family"]) in _top_keys]
-    print(f"  Filtered to {len(_candidates)} full candidates matching top-{len(_td_top_results)} worldlines")
-else:
-    # Legacy path: use full candidate pool (acceptable because screening
-    # happens later via phase scoring during unified_rollout).
-    _candidates = _all_candidates
-    print(f"  Legacy: running all {len(_candidates)} candidates")
 
-_carr = td_prepare_candidate_arrays(_candidates)
-_td_state = td_encode_initial_state(_seed_for_cands, _candidates, _TD_NX, _TD_NY)
+def main() -> int:
+    device = _select_device()
+    obs_days = json.loads(OBS_PATH.read_text(encoding="utf-8"))["days"]
 
-# Inject Taipei-specific obs fields into UnifiedState (override TD's abstract obs)
-def _taipei_obs_on_td_grid(ref_obs):
-    """Build (NY, NX) obs fields for TD's domain from a Taipei ReferenceObs."""
-    _cfg_td = GridConfig(NX=_TD_NX, NY=_TD_NY, DX=_TD_DX, DY=_TD_DY,
-                          DT=_TD_DT, STEPS=_TD_STEPS_PER_DAY)
-    _XX, _YY, _, _ = build_grid(_cfg_td)
-    _topo = build_topography(_XX, _YY)
-    # Rebuild at TD grid (not cfg_day's 256x192)
-    _base = build_taipei_state(_XX, _YY, _topo, _cfg_td, perturbation=0.0, obs_ref=ref_obs)
-    wd_rad = math.radians(ref_obs.wd_deg)
-    u_uni = -ref_obs.ws_ms * math.sin(wd_rad)
-    v_uni = -ref_obs.ws_ms * math.cos(wd_rad)
-    return (_base.h.astype(np.float32), _base.T.astype(np.float32),
-            _base.q.astype(np.float32),
-            np.full_like(_base.u, u_uni, dtype=np.float32),
-            np.full_like(_base.v, v_uni, dtype=np.float32),
-            _topo.astype(np.float32))
+    climo_T = float(np.mean([d["T_mean_C"] for d in obs_days]))
+    climo_RH = float(np.mean([d["RH_mean_pct"] for d in obs_days]))
+    climo_P = float(np.mean([d["P_mean_hPa"] for d in obs_days]))
+    climo_ws = float(np.mean([d["ws_mean_ms"] for d in obs_days]))
+    u_sum = sum(d["ws_mean_ms"] * math.sin(math.radians(d["wd_vec_deg"])) for d in obs_days)
+    v_sum = sum(d["ws_mean_ms"] * math.cos(math.radians(d["wd_vec_deg"])) for d in obs_days)
+    climo_wd = (math.degrees(math.atan2(u_sum, v_sum)) + 360.0) % 360.0
+    climo_ref = ReferenceObs(
+        T_avg_C=climo_T,
+        RH_pct=climo_RH,
+        P_hPa=climo_P,
+        ws_ms=climo_ws,
+        wd_deg=climo_wd,
+    )
 
-_today_obs_h, _today_obs_T, _today_obs_q, _today_obs_u, _today_obs_v, _taipei_topo = \
-    _taipei_obs_on_td_grid(today_obs)
-_climo_obs_h, _climo_obs_T, _climo_obs_q, _climo_obs_u, _climo_obs_v, _ = \
-    _taipei_obs_on_td_grid(climo_ref)
+    today_obs = ReferenceObs(T_avg_C=23.8, RH_pct=75.0, P_hPa=1012.3, ws_ms=1.69, wd_deg=44.0)
 
-# Override TD's synthetic obs with Taipei-specific ones + real topography
-_td_state.obs_h = _today_obs_h
-_td_state.obs_T = _today_obs_T
-_td_state.obs_q = _today_obs_q
-_td_state.obs_u = _today_obs_u
-_td_state.obs_v = _today_obs_v
-_td_state.topography = _taipei_topo
+    print("=" * 68)
+    print("TD CandidatePipeline - weather worldline selection")
+    print("=" * 68)
+    weather_seed = _build_weather_seed(today_obs, climo_ref, obs_days, TODAY)
+    print(f"  device:            {device}")
+    print(f"  phase_instability: {weather_seed.environment['phase_instability']:.3f}")
+    print(f"  stress_level:      {weather_seed.subject['stress_level']:.3f}")
+    print(f"  output_power:      {weather_seed.subject['output_power']:.3f}")
 
-# Grid center on TD's 128x96
-_td_cy, _td_cx = _TD_NY // 2, _TD_NX // 2
+    t0 = time.time()
+    pipeline = CandidatePipeline(
+        seed=weather_seed,
+        top_k=12,
+        NX=TD_NX,
+        NY=TD_NY,
+        steps=300,
+        dt=TD_DT,
+        device=device,
+    )
+    td_top_results, td_hydro, td_oracle = pipeline.run()
+    print(f"  CandidatePipeline.run(): {time.time() - t0:.1f}s")
+    print(f"  alive={td_hydro.get('alive_count')} pruned={td_hydro.get('pruned_count')}")
+    print(f"  Top-{min(5, len(td_top_results))} worldlines:")
+    for idx, result in enumerate(td_top_results[:5], start=1):
+        params = result.params
+        print(
+            f"    #{idx} {result.family:<13} "
+            f"n={int(params.get('n', 0)):>5} rho={params.get('rho', 0):.2f} "
+            f"A={params.get('A', 0):.2f} sigma={params.get('sigma', 0):.3f} | "
+            f"score={result.balanced_score:+.3f} feas={result.feasibility:.2f} "
+            f"status={result.branch_status}"
+        )
 
-t0 = time.time()
-daily = []
-print(f"\nTD unified_rollout 7-day forecast ({_TD_NX}x{_TD_NY}, dt={_TD_DT}s, "
-      f"{_TD_STEPS_PER_DAY} substeps/day)")
-_total_steps = 7 * _TD_STEPS_PER_DAY
-_step_offset = 0
-for d_idx in range(7):
-    # Switch obs target: day 1 anchors today_obs, day 2-7 relax toward climo
-    if d_idx == 0:
-        _td_state.obs_h = _today_obs_h
-        _td_state.obs_T = _today_obs_T
-        _td_state.obs_q = _today_obs_q
-        _td_state.obs_u = _today_obs_u
-        _td_state.obs_v = _today_obs_v
+    bg = td_infer_bg(weather_seed)
+    all_candidates = td_generate_candidates(weather_seed, bg)
+    candidate_lookup = {_candidate_key(c["params"], c["family"]): c for c in all_candidates}
+    top_keys = [_candidate_key(r.params, r.family) for r in td_top_results]
+    missing = [k for k in top_keys if k not in candidate_lookup]
+    if missing:
+        raise KeyError(f"Missing full candidate specs for {len(missing)} TD top results")
+    candidates = [candidate_lookup[k] for k in top_keys]
+    carr = td_prepare_candidate_arrays(candidates)
+
+    today_init_state = build_taipei_state(TD_XX, TD_YY, TD_TOPO, TD_CFG, perturbation=-1.0, obs_ref=today_obs)
+    today_obs_state = build_taipei_state(TD_XX, TD_YY, TD_TOPO, TD_CFG, perturbation=0.0, obs_ref=today_obs)
+    climo_obs_state = build_taipei_state(TD_XX, TD_YY, TD_TOPO, TD_CFG, perturbation=0.0, obs_ref=climo_ref)
+    today_fields = _state_to_fields(today_obs_state)
+    climo_fields = _state_to_fields(climo_obs_state)
+    init_fields = _state_to_fields(today_init_state)
+    pressure_anchor_h_mid_m = float(climo_obs_state.h[TD_CY, TD_CX])
+    pressure_anchor_surface_hpa = float(climo_ref.P_hPa)
+
+    td_state = td_encode_initial_state(weather_seed, candidates, TD_NX, TD_NY)
+    td_state.topography = TD_TOPO
+    td_state.obs_h, td_state.obs_T, td_state.obs_q, td_state.obs_u, td_state.obs_v = today_fields
+    td_state.h = np.repeat(init_fields[0][None], len(candidates), axis=0).astype(np.float32)
+    td_state.T = np.repeat(init_fields[1][None], len(candidates), axis=0).astype(np.float32)
+    td_state.q = np.repeat(init_fields[2][None], len(candidates), axis=0).astype(np.float32)
+    td_state.u = np.repeat(init_fields[3][None], len(candidates), axis=0).astype(np.float32)
+    td_state.v = np.repeat(init_fields[4][None], len(candidates), axis=0).astype(np.float32)
+    use_torch_rollout = device.startswith("cuda")
+    if use_torch_rollout:
+        carr_dev = _carr_to_torch(carr, device)
+        td_state_dev = _state_to_torch(td_state, device)
     else:
-        _td_state.obs_h = _climo_obs_h
-        _td_state.obs_T = _climo_obs_T
-        _td_state.obs_q = _climo_obs_q
-        _td_state.obs_u = _climo_obs_u
-        _td_state.obs_v = _climo_obs_v
+        carr_dev = None
+        td_state_dev = None
 
-    _td_state, _phase_seg = td_unified_rollout(
-        _td_state, _carr,
-        dt=_TD_DT, dx=_TD_DX, dy=_TD_DY,
-        steps=_TD_STEPS_PER_DAY,
-        step_offset=_step_offset, total_steps=_total_steps,
-    )
-    _step_offset += _TD_STEPS_PER_DAY
-
-    # Per-candidate center values
-    centers = []
-    for b in range(len(_candidates)):
-        centers.append((
-            float(_td_state.T[b, _td_cy, _td_cx]),
-            float(_td_state.h[b, _td_cy, _td_cx]),
-            float(_td_state.q[b, _td_cy, _td_cx]),
-            float(_td_state.u[b, _td_cy, _td_cx]),
-            float(_td_state.v[b, _td_cy, _td_cx]),
-        ))
-    # Score each candidate's field fit vs current day's obs (using phase proximity)
-    _day_scores = np.asarray(_td_state.phase, dtype=np.float64)
-    daily.append({"centers": centers, "scores": _day_scores})
-    print(f"  day {d_idx+1}: phase mean={float(_day_scores.mean()):.3f} "
-          f"T_center0={centers[0][0]:.1f}K h0={centers[0][1]:.1f} u0={centers[0][3]:+.2f} "
-          f"v0={centers[0][4]:+.2f}")
-print(f"Week done in {time.time()-t0:.1f}s")
-
-print(f"\n{'Date':<12} {'Mode':<5} {'decay':>6} {'T':>7} {'RH':>6} {'Wind':>14}  {'P':>8}")
-for d_idx in range(7):
-    date_str = (TODAY + timedelta(days=d_idx+1)).isoformat()
-    decay = math.exp(-d_idx / TAU_PERSIST_DAYS)
-    day = daily[d_idx]
-    # TEMP: uniform weights to match probe behavior and isolate physics
-    w_day = np.ones(len(day["centers"])) / len(day["centers"])
-    Ts = np.array([c[0] for c in day["centers"]]); qs = np.array([c[2] for c in day["centers"]])
-    hs = np.array([c[1] for c in day["centers"]])
-    us = np.array([c[3] for c in day["centers"]]); vs = np.array([c[4] for c in day["centers"]])
-    T_int = np.average(Ts, weights=w_day); q = np.average(qs, weights=w_day)
-    h = np.average(hs, weights=w_day); u = np.average(us, weights=w_day); v = np.average(vs, weights=w_day)
-    T_C = cal.T_scale * T_int + cal.T_offset_K - 273.15
-    RH = cal.map_humidity(q, T_C); ws = cal.map_wind(u, v)
-    wd_raw = (math.degrees(math.atan2(-u, -v)) + 360.0) % 360.0
-    wd = wd_raw   # TEMP: print RAW wd, offset disabled to see linear h_bg effect
-    P = cal.map_pressure(h)
-    mode = "DA" if d_idx == 0 else "free"
-    print(f"{date_str:<12} {mode:<5} {decay:>5.2f}  {T_C:>5.1f}°C {RH:>5.1f}% {ws:>4.1f} m/s @ {wd:>3.0f}° {P:>6.1f}hPa")
-
-
-# =====================================================================
-# Close the loop — feed day-1 physics scores back into TD worldlines
-# =====================================================================
-# CandidatePipeline produced TD's abstract ranking (feasibility/stability/risk).
-# The 7-day rollout just finished produced per-day physics scores. Fold them
-# back into EvaluationResult.weather_score / weather_alignment /
-# final_balanced_score so TD's judgment layer sees the physical evidence.
-# Day-1 scores are the cleanest signal (obs actually valid then); downstream
-# reporting layers can use final_balanced_score for re-ranking.
-
-if USE_TD_WORLDLINES and _td_top_results is not None:
-    _day1_scores = [float(s) for s in daily[0]["scores"]]
-    attach_weather_alignment(_td_top_results, _day1_scores)
-    print(f"\n" + "=" * 68)
-    print("TD JUDGMENT (post-physics attach_weather_alignment, re-ranked)")
+    print("\n" + "=" * 68)
+    print("TD unified_rollout - 7 day forecast")
     print("=" * 68)
-    _reranked = sorted(_td_top_results,
-                        key=lambda r: r.final_balanced_score or r.balanced_score,
-                        reverse=True)
-    print(f"  {'rank':<5} {'family':<13} {'n':>5} {'bal':>7} {'weather':>8} "
-          f"{'align':>7} {'final':>8}")
-    for _i, _r in enumerate(_reranked[:8]):
-        print(f"  #{_i+1:<4} {_r.family:<13} {int(_r.params['n']):>5} "
-              f"{_r.balanced_score:>+7.3f} "
-              f"{_r.weather_score:>8.4f} "
-              f"{_r.weather_alignment:>+7.3f} "
-              f"{_r.final_balanced_score:>+8.3f}")
+    print(f"  grid={TD_NX}x{TD_NY} dt={TD_DT}s substeps/day={TD_STEPS_PER_DAY} rollout_device={device}")
+
+    t0 = time.time()
+    total_steps = 7 * TD_STEPS_PER_DAY
+    step_offset = 0
+    daily: list[dict] = []
+    day1_alignment_state = None
+
+    def _read_centers_numpy(state):
+        return np.stack(
+            [
+                state.T[:, TD_CY, TD_CX],
+                state.h[:, TD_CY, TD_CX],
+                state.q[:, TD_CY, TD_CX],
+                state.u[:, TD_CY, TD_CX],
+                state.v[:, TD_CY, TD_CX],
+            ],
+            axis=1,
+        ).astype(np.float64)
+
+    def _read_centers_torch(state):
+        return torch.stack(
+            [
+                state.T[:, TD_CY, TD_CX],
+                state.h[:, TD_CY, TD_CX],
+                state.q[:, TD_CY, TD_CX],
+                state.u[:, TD_CY, TD_CX],
+                state.v[:, TD_CY, TD_CX],
+            ],
+            dim=1,
+        ).detach().cpu().numpy().astype(np.float64)
+
+    for day_idx in range(7):
+        decay = math.exp(-day_idx / TAU_PERSIST_DAYS)
+        blended_fields = _blend_fields(today_fields, climo_fields, decay)
+        if use_torch_rollout:
+            obs_tensors = tuple(torch.as_tensor(arr, dtype=torch.float32, device=device) for arr in blended_fields)
+            td_state_dev.obs_h, td_state_dev.obs_T, td_state_dev.obs_q, td_state_dev.obs_u, td_state_dev.obs_v = obs_tensors
+        else:
+            td_state.obs_h, td_state.obs_T, td_state.obs_q, td_state.obs_u, td_state.obs_v = blended_fields
+
+        # Chunked rollout: 8 chunks × 240 substeps. Sample centers at end of
+        # each chunk so we can build proper daily-mean diagnostics instead of
+        # only day-end snapshots.
+        day_samples: list[np.ndarray] = []
+        for _ in range(TD_SAMPLES_PER_DAY):
+            if use_torch_rollout:
+                td_state_dev, _ = _torch_rollout(
+                    td_state_dev, carr_dev,
+                    dt=TD_DT, dx=TD_DX, dy=TD_DY,
+                    steps=TD_SAMPLE_STRIDE,
+                    step_offset=step_offset, total_steps=total_steps,
+                )
+                day_samples.append(_read_centers_torch(td_state_dev))
+            else:
+                td_state, _ = td_unified_rollout(
+                    td_state, carr,
+                    dt=TD_DT, dx=TD_DX, dy=TD_DY,
+                    steps=TD_SAMPLE_STRIDE,
+                    step_offset=step_offset, total_steps=total_steps,
+                )
+                day_samples.append(_read_centers_numpy(td_state))
+            step_offset += TD_SAMPLE_STRIDE
+
+        # Day-end full state (last chunk result) — for phase / TD-native evidence
+        # / field-fit and the attach_weather_alignment anchor.
+        alignment_state = td_state_dev if use_torch_rollout else td_state
+        if use_torch_rollout:
+            phase_values = td_state_dev.phase.detach().cpu().numpy().astype(np.float64)
+            h_field = td_state_dev.h.detach().cpu().numpy().astype(np.float64)
+            T_field = td_state_dev.T.detach().cpu().numpy().astype(np.float64)
+            q_field = td_state_dev.q.detach().cpu().numpy().astype(np.float64)
+            u_field = td_state_dev.u.detach().cpu().numpy().astype(np.float64)
+            v_field = td_state_dev.v.detach().cpu().numpy().astype(np.float64)
+        else:
+            phase_values = np.asarray(td_state.phase, dtype=np.float64)
+            h_field = td_state.h.astype(np.float64)
+            T_field = td_state.T.astype(np.float64)
+            q_field = td_state.q.astype(np.float64)
+            u_field = td_state.u.astype(np.float64)
+            v_field = td_state.v.astype(np.float64)
+
+        td_native_scores = forecast_evidence(alignment_state)
+        if day_idx == 0:
+            day1_alignment_state = _state_to_numpy(alignment_state)
+
+        # Day-end snapshot summary (kept as _end auxiliary columns, and used
+        # for ensemble_spread since spread is most physical at day boundary).
+        end_centers = day_samples[-1]
+        end_summary = _physical_summary_from_centers(
+            end_centers,
+            TAIPEI_STATION_ELEV_M,
+            pressure_anchor_h_mid_m,
+            pressure_anchor_surface_hpa,
+        )
+
+        # Per-sample per-candidate surface diagnostics.
+        # Shape: (TD_SAMPLES_PER_DAY, n_candidates, surface_dict_fields).
+        per_sample_per_cand = [
+            _candidate_surface_diagnostics(
+                sample_centers,
+                TAIPEI_STATION_ELEV_M,
+                pressure_anchor_h_mid_m,
+                pressure_anchor_surface_hpa,
+            )
+            for sample_centers in day_samples
+        ]
+
+        n_cand = len(candidates)
+        # Per-candidate time-series (shape: n_cand × TD_SAMPLES_PER_DAY).
+        T2m_series = np.array(
+            [[per_sample_per_cand[s][c]["temperature_2m_C"] for s in range(TD_SAMPLES_PER_DAY)] for c in range(n_cand)]
+        )
+        RH_series = np.array(
+            [[per_sample_per_cand[s][c]["relative_humidity_pct"] for s in range(TD_SAMPLES_PER_DAY)] for c in range(n_cand)]
+        )
+        P_series = np.array(
+            [[per_sample_per_cand[s][c]["surface_pressure_hpa"] for s in range(TD_SAMPLES_PER_DAY)] for c in range(n_cand)]
+        )
+        ws_series = np.array(
+            [[per_sample_per_cand[s][c]["wind_speed_10m_ms"] for s in range(TD_SAMPLES_PER_DAY)] for c in range(n_cand)]
+        )
+        wd_u_series = np.array(
+            [[-math.sin(math.radians(per_sample_per_cand[s][c]["wind_direction_deg"])) * per_sample_per_cand[s][c]["wind_speed_10m_ms"]
+              for s in range(TD_SAMPLES_PER_DAY)] for c in range(n_cand)]
+        )
+        wd_v_series = np.array(
+            [[-math.cos(math.radians(per_sample_per_cand[s][c]["wind_direction_deg"])) * per_sample_per_cand[s][c]["wind_speed_10m_ms"]
+              for s in range(TD_SAMPLES_PER_DAY)] for c in range(n_cand)]
+        )
+
+        # Time-aggregate per candidate, then candidate-median for daily report.
+        T2m_cand_mean = T2m_series.mean(axis=1)
+        T2m_cand_min  = T2m_series.min(axis=1)
+        T2m_cand_max  = T2m_series.max(axis=1)
+        RH_cand_mean  = RH_series.mean(axis=1)
+        P_cand_mean   = P_series.mean(axis=1)
+        ws_cand_mean  = ws_series.mean(axis=1)
+        # Daily-mean wind direction via vector-averaging per candidate
+        u_cand_mean = wd_u_series.mean(axis=1)
+        v_cand_mean = wd_v_series.mean(axis=1)
+
+        summary: dict = {}
+        # Main daily (time-averaged) fields — candidate median
+        summary["T2m_mean"]       = float(np.median(T2m_cand_mean))
+        summary["T2m_min"]        = float(np.median(T2m_cand_min))
+        summary["T2m_max"]        = float(np.median(T2m_cand_max))
+        summary["RH_mean"]        = float(np.median(RH_cand_mean))
+        summary["P_mean"]         = float(np.median(P_cand_mean))
+        summary["wind10_mean"]    = float(np.median(ws_cand_mean))
+        _u_med = float(np.median(u_cand_mean))
+        _v_med = float(np.median(v_cand_mean))
+        summary["wind10_dir_mean"] = (math.degrees(math.atan2(-_u_med, -_v_med)) + 360.0) % 360.0
+        # Ensemble spread on the time-mean (across candidates)
+        summary["T2m_mean_cand_std"] = float(np.std(T2m_cand_mean))
+        summary["P_mean_cand_std"]   = float(np.std(P_cand_mean))
+
+        # Day-end auxiliary snapshots
+        summary["T2m_end"]         = end_summary["temperature_2m_C"]
+        summary["RH_end"]          = end_summary["relative_humidity_pct"]
+        summary["P_end"]           = end_summary["surface_pressure_hpa"]
+        summary["wind10_end"]      = end_summary["wind_speed_10m_ms"]
+        summary["wind10_dir_end"]  = end_summary["wind_direction_deg"]
+
+        # Phase / TD evidence — kept as day-end snapshot (not time-averaged)
+        summary["phase_mean"]  = float(np.mean(phase_values))
+        summary["phase_std"]   = float(np.std(phase_values))
+        summary["td_fit_mean"] = float(np.mean(td_native_scores))
+        summary["td_fit_std"]  = float(np.std(td_native_scores))
+
+        # Weather-alignment scores vs obs (for surface_score calculation, use
+        # the candidate's daily-MEAN surface — fair comparison to obs daily-mean)
+        score_target = today_obs if day_idx == 0 else climo_ref
+        candidate_mean_surfaces = [
+            {
+                "temperature_2m_C":      float(T2m_cand_mean[c]),
+                "relative_humidity_pct": float(RH_cand_mean[c]),
+                "surface_pressure_hpa":  float(P_cand_mean[c]),
+                "wind_speed_10m_ms":     float(ws_cand_mean[c]),
+                "wind_direction_deg":    (math.degrees(math.atan2(-float(u_cand_mean[c]), -float(v_cand_mean[c]))) + 360.0) % 360.0,
+            }
+            for c in range(n_cand)
+        ]
+        weather_scores = np.asarray(
+            [_surface_score(surface, score_target) for surface in candidate_mean_surfaces],
+            dtype=np.float64,
+        )
+        field_scores = _field_fit_scores(h_field, T_field, q_field, u_field, v_field, blended_fields)
+        summary["weather_fit_mean"] = float(np.mean(weather_scores))
+        summary["weather_fit_std"]  = float(np.std(weather_scores))
+        summary["field_fit_mean"]   = float(np.mean(field_scores))
+        summary["field_fit_std"]    = float(np.std(field_scores))
+
+        daily.append(
+            {
+                "date": (TODAY + timedelta(days=day_idx + 1)).isoformat(),
+                "mode": "DA" if day_idx == 0 else "relax",
+                "decay": decay,
+                "summary": summary,
+                "scores": phase_values.copy(),
+                "td_native_scores": td_native_scores.copy(),
+                "weather_scores": weather_scores,
+                "field_scores": field_scores,
+            }
+        )
+        print(
+            f"  day {day_idx+1}: phase={summary['phase_mean']:.3f}+-{summary['phase_std']:.3f} "
+            f"fit={summary['td_fit_mean']:.3f}+-{summary['td_fit_std']:.3f} "
+            f"T2m_mean={summary['T2m_mean']:.1f}C (min={summary['T2m_min']:.1f} max={summary['T2m_max']:.1f}) "
+            f"T2m_end={summary['T2m_end']:.1f}C "
+            f"wind10_mean={summary['wind10_mean']:.1f}m/s"
+        )
+    print(f"  week done in {time.time() - t0:.1f}s")
+    if use_torch_rollout:
+        td_state = _state_to_numpy(td_state_dev)
+
+    print("\n" + "=" * 68)
+    print("Physical Forecast — daily stats (8 samples/day, 3h stride)")
+    print("=" * 68)
+    print(f"{'Date':<12} {'Mode':<5} {'decay':>5} "
+          f"{'T2m_mean':>9} {'T2m_min':>8} {'T2m_max':>8} "
+          f"{'RH':>6} {'P':>8} {'Wind10':>14} {'phase':>11} {'fit':>7}")
+    for day in daily:
+        s = day["summary"]
+        print(
+            f"{day['date']:<12} {day['mode']:<5} {day['decay']:>5.2f} "
+            f"{s['T2m_mean']:>7.1f}C "
+            f"{s['T2m_min']:>6.1f}C "
+            f"{s['T2m_max']:>6.1f}C "
+            f"{s['RH_mean']:>4.1f}% "
+            f"{s['P_mean']:>6.1f}hPa "
+            f"{s['wind10_mean']:>4.1f}m/s@{s['wind10_dir_mean']:>3.0f} "
+            f"{s['phase_mean']:>5.2f}+-{s['phase_std']:<4.2f} "
+            f"{s['td_fit_mean']:>6.3f}"
+        )
+    print("\nAuxiliary — day-end snapshots:")
+    print(f"{'Date':<12} {'T2m_end':>8} {'RH_end':>7} {'P_end':>9} {'Wind10_end':>18}")
+    for day in daily:
+        s = day["summary"]
+        print(
+            f"{day['date']:<12} "
+            f"{s['T2m_end']:>6.1f}C "
+            f"{s['RH_end']:>5.1f}% "
+            f"{s['P_end']:>7.1f}hPa "
+            f"{s['wind10_end']:>4.1f}m/s@{s['wind10_dir_end']:>3.0f}"
+        )
+
+    if day1_alignment_state is None:
+        raise RuntimeError("missing day-1 rollout state for TD weather alignment")
+    attach_weather_alignment(td_top_results, day1_alignment_state)
+    reranked = sorted(
+        td_top_results,
+        key=lambda result: result.final_balanced_score or result.balanced_score,
+        reverse=True,
+    )
+
+    print("\n" + "=" * 68)
+    print("TD System Self-Eval")
+    print("=" * 68)
+    print(f"  hydro_state={td_hydro.get('utm_hydro_state')} pressure_balance={td_hydro.get('pressure_balance'):.3f}")
+    print(f"  background_emerged={td_oracle.get('background_naturally_emerged')}")
+    print(f"  inferred_goal={td_oracle.get('inferred_goal_axis')}")
+    print(f"  dominant_pressures={', '.join(td_oracle.get('dominant_pressures', [])[:3])}")
+    print(f"  {'rank':<5} {'family':<13} {'n':>5} {'bal':>7} {'weather':>8} {'align':>7} {'final':>8}")
+    for idx, result in enumerate(reranked[:8], start=1):
+        print(
+            f"  #{idx:<4} {result.family:<13} {int(result.params['n']):>5} "
+            f"{result.balanced_score:>+7.3f} "
+            f"{result.weather_score:>8.4f} "
+            f"{result.weather_alignment:>+7.3f} "
+            f"{result.final_balanced_score:>+8.3f}"
+        )
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
