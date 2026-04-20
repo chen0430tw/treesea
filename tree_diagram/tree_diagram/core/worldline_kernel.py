@@ -638,14 +638,28 @@ def _merge_states(base: UnifiedState, updated: UnifiedState, alive_idx, B: int) 
     """Overwrite base[alive_idx] with updated (len(alive_idx) candidates).
 
     Shared fields (obs_*, topography) are taken from base unchanged.
-    Both base and updated must be numpy UnifiedStates.
+    Handles BOTH numpy.ndarray and torch.Tensor batched fields — previously
+    only numpy branch worked; torch branch silently fell through to return
+    base unchanged, so chunked refinement on the GPU path never actually
+    propagated cohort updates back into the full-B state.
     """
-    idx = np.array(alive_idx)
+    idx_np = np.array(alive_idx)
+    idx_t  = None
+    if _TORCH_OK:
+        # Lazy; only build torch index if we encounter a torch tensor.
+        pass
 
     def merge(b, u):
+        # Torch tensors: index on same device
+        if _TORCH_OK and isinstance(b, torch.Tensor) and b.dim() >= 1 and b.shape[0] == B:
+            r = b.clone()
+            idx_for_t = torch.as_tensor(idx_np, dtype=torch.long, device=b.device)
+            r[idx_for_t] = u
+            return r
+        # NumPy arrays
         if isinstance(b, np.ndarray) and b.ndim >= 1 and b.shape[0] == B:
             r = b.copy()
-            r[idx] = u
+            r[idx_np] = u
             return r
         return b  # shared 2-D fields
 
