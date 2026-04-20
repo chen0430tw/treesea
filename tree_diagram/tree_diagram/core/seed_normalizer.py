@@ -123,6 +123,79 @@ SEMANTIC_ROUTES: list[tuple[str, Section, str]] = [
     ("coupling",         "resources", "population_coupling"),
     ("human_in_loop",    "resources", "population_coupling"),
     ("frequency",        "resources", "data_coverage"),
+
+    # ────────────────────────────────────────────────────────────────────
+    # Common English synonyms — non-domain-specific natural vocabulary users
+    # are likely to reach for when they don't know Tree Diagram's exact
+    # canonical names. Keep specifics above so they win by priority.
+    # ────────────────────────────────────────────────────────────────────
+    # Subject ────────────────────────────────────────────────────────
+    ("capability",       "subject", "output_power"),
+    ("capacity",         "subject", "output_power"),
+    ("throughput",       "subject", "output_power"),
+    ("strength",         "subject", "output_power"),
+    ("horsepower",       "subject", "output_power"),           # "my_model_horsepower"
+    ("accuracy",         "subject", "control_precision"),
+    ("fidelity",         "subject", "control_precision"),
+    ("rigor",            "subject", "control_precision"),
+    ("alignment",        "subject", "aim_coupling"),
+    ("coherence",        "subject", "aim_coupling"),
+    ("resilience",       "subject", "load_tolerance"),
+    ("robustness",       "subject", "load_tolerance"),
+    ("durability",       "subject", "load_tolerance"),
+    ("endurance",        "subject", "load_tolerance"),
+    ("burden",           "subject", "stress_level"),
+    ("load",             "subject", "stress_level"),           # "cognitive_load", "task_load"
+    ("strain",           "subject", "stress_level"),
+    ("workload",         "subject", "stress_level"),
+    ("progress",         "subject", "phase_proximity"),
+    ("maturity",         "subject", "phase_proximity"),
+    ("nearness",         "subject", "phase_proximity"),
+    ("proximity",        "subject", "phase_proximity"),
+    ("fatigue",          "subject", "marginal_decay"),
+    ("exhaustion",       "subject", "marginal_decay"),
+    ("erosion",          "subject", "marginal_decay"),
+    ("degradation",      "subject", "marginal_decay"),
+    ("aging",            "subject", "marginal_decay"),
+    ("fragility",        "subject", "instability_sensitivity"),
+    ("chaos",            "subject", "instability_sensitivity"),
+    ("volatility",       "subject", "instability_sensitivity"),
+    ("exposure",         "subject", "instability_sensitivity"),  # "chaos_exposure"
+
+    # Environment ────────────────────────────────────────────────────
+    ("turbulence",       "environment", "field_noise"),
+    ("uncertainty",      "environment", "field_noise"),
+    ("error_rate",       "environment", "field_noise"),
+    ("signal_quality",   "environment", "field_noise"),
+    ("scrutiny",         "environment", "social_pressure"),
+    ("oversight",        "environment", "social_pressure"),
+    ("observation_pressure", "environment", "social_pressure"),
+    ("compliance",       "environment", "regulatory_friction"),
+    ("regulation",       "environment", "regulatory_friction"),
+    ("rules",            "environment", "regulatory_friction"),
+    ("constraint",       "environment", "regulatory_friction"),
+    ("policy",           "environment", "regulatory_friction"),
+    ("connectivity",     "environment", "network_density"),
+    ("bandwidth",        "environment", "network_density"),
+    ("concentration",    "environment", "network_density"),
+    ("transition_rate",  "environment", "phase_instability"),
+
+    # Resources ──────────────────────────────────────────────────────
+    ("funding",          "resources", "budget"),
+    ("cash",             "resources", "budget"),
+    ("cost_cap",         "resources", "budget"),
+    ("hardware",         "resources", "infrastructure"),
+    ("compute",          "resources", "infrastructure"),       # "compute_horsepower", "compute_pool"
+    ("machinery",        "resources", "infrastructure"),
+    ("platform",         "resources", "infrastructure"),
+    ("telemetry",        "resources", "data_coverage"),
+    ("observation",      "resources", "data_coverage"),
+    ("sensor",           "resources", "data_coverage"),
+    ("instrumentation",  "resources", "data_coverage"),
+    ("engagement",       "resources", "population_coupling"),
+    ("adoption",         "resources", "population_coupling"),
+    ("penetration",      "resources", "population_coupling"),
+    ("community",        "resources", "population_coupling"),
 ]
 
 

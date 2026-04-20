@@ -33,6 +33,11 @@ class CandidatePipeline:
         steps: int = 300,
         dt: float = 45.0,
         device: Optional[str] = None,
+        # Seed-normalisation overrides (see tree_diagram/core/seed_normalizer.py)
+        field_aliases: Optional[dict] = None,
+        merge_policy: str = "mean",
+        fill_missing_with_neutral: bool = False,
+        neutral_value: float = 0.5,
         # Legacy params accepted but unused
         full_eval: bool = False,
         weather_cfg=None,
@@ -45,13 +50,30 @@ class CandidatePipeline:
         self.steps    = steps
         self.dt       = dt
         self.device   = device  # None = auto (cuda if available, else cpu)
+        # Seed-normalisation knobs. field_aliases supplies explicit
+        # {custom_name: (section, kernel_field)} when users don't want
+        # to rely on semantic routing.
+        self.field_aliases = field_aliases or {}
+        self.merge_policy  = merge_policy
+        self.fill_missing_with_neutral = fill_missing_with_neutral
+        self.neutral_value = neutral_value
 
     def run(self) -> Tuple[List[EvaluationResult], dict, dict]:
         # Seed normalisation — map any custom subject/environment/resource
         # fields the user passed into the canonical kernel schema before
         # background inference. Without this, novel field names (e.g.
         # "cognitive_load" instead of "stress_level") are silently ignored.
-        seed, seed_trace = normalize_seed(self.seed)
+        # Resolution order inside normalize_seed:
+        #   1. passthrough if name is already canonical
+        #   2. explicit alias from self.field_aliases
+        #   3. semantic keyword routing (SEMANTIC_ROUTES)
+        seed, seed_trace = normalize_seed(
+            self.seed,
+            field_aliases=self.field_aliases,
+            merge_policy=self.merge_policy,
+            fill_missing_with_neutral=self.fill_missing_with_neutral,
+            neutral_value=self.neutral_value,
+        )
         bg    = infer_problem_background(seed)
         field = encode_group_field(seed)
 
