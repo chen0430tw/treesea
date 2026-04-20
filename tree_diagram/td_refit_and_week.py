@@ -344,107 +344,129 @@ else:
     _td_oracle = None
     print("[legacy] 6-family hardcoded branches (USE_TD_WORLDLINES=False)")
 
-# Stack init for all branches (same IC, divergence from param spread)
-state_b = stack_families([init] * len(forecast_branches))
-p_act = {k: [f[k] for f in forecast_branches] for k in
-         ["drag","humid_couple","nudging","pg_scale","wind_nudge"]}
-# h-nudge: 1/day timescale (~1.16e-5 /s). Without this, init h is locked
-# by today_obs.P and days 2-7 all output bit-exact pressure regardless
-# of analog obs P. Same decay schedule as wind_nudge (fades with forecast lead).
-H_NUDGE_BASE = 1.16e-5
-p_act["h_nudge"] = [H_NUDGE_BASE for _ in forecast_branches]
+# =====================================================================
+# 7-day rollout via TD's unified_rollout (UMDST-coupled physics)
+# =====================================================================
+# Replaces the previous batched_branch_step loop (vanilla 1-layer SW).
+# unified_step couples shallow-water physics with UMDST phase/stress/
+# instability dynamics — spatial_het and wind_rms feed back into gain,
+# preventing the asymptotic wind collapse we saw in the pure-SW rollout.
+#
+# Per-day checkpointing: 1 forecast day = 86400 s. TD default dt=45 s →
+# 1920 substeps/day. 7 days = 13440 substeps total.
 
-t0 = time.time(); daily = []; budget = None
-CLIMO_WIND_BOOST = 3.0   # spectral-nudging-style: amplify wind_nudge on climo days to override PGF
+from tree_diagram.core.worldline_kernel import (
+    unified_rollout as td_unified_rollout,
+    prepare_candidate_arrays as td_prepare_candidate_arrays,
+    encode_initial_state as td_encode_initial_state,
+    _DOMAIN_X as TD_DOMAIN_X, _DOMAIN_Y as TD_DOMAIN_Y,
+)
+
+# TD grid (matches CandidatePipeline defaults)
+_TD_NX, _TD_NY = 128, 96
+_TD_DX = TD_DOMAIN_X / (_TD_NX - 1)
+_TD_DY = TD_DOMAIN_Y / (_TD_NY - 1)
+_TD_DT = 45.0
+_TD_STEPS_PER_DAY = int(round(86400.0 / _TD_DT))   # 1920
+
+# Build candidate list from TD's worldlines (or legacy DEFAULT_BRANCHES)
+if USE_TD_WORLDLINES and _td_top_results is not None:
+    _candidates = [
+        {"family": r.family, "template": r.template, "params": r.params}
+        for r in _td_top_results
+    ]
+else:
+    # Legacy path: synthesise candidate dicts from DEFAULT_BRANCHES, using
+    # n=20000 (UMDST fixed point) so the unified_step gain modifier is unbiased.
+    _candidates = [
+        {"family": f["name"], "template": f["name"],
+         "params": {"n": 20000.0, "rho": 1.0, "A": 0.7, "sigma": 0.03}}
+        for f in forecast_branches
+    ]
+
+_carr = td_prepare_candidate_arrays(_candidates)
+_td_state = td_encode_initial_state(_td_top_results and _weather_seed or build_weather_seed(today_obs, climo_ref, obs_days, TODAY),
+                                     _candidates, _TD_NX, _TD_NY)
+
+# Inject Taipei-specific obs fields into UnifiedState (override TD's abstract obs)
+def _taipei_obs_on_td_grid(ref_obs):
+    """Build (NY, NX) obs fields for TD's domain from a Taipei ReferenceObs."""
+    _cfg_td = GridConfig(NX=_TD_NX, NY=_TD_NY, DX=_TD_DX, DY=_TD_DY,
+                          DT=_TD_DT, STEPS=_TD_STEPS_PER_DAY)
+    _XX, _YY, _, _ = build_grid(_cfg_td)
+    _topo = build_topography(_XX, _YY)
+    # Rebuild at TD grid (not cfg_day's 256x192)
+    _base = build_taipei_state(_XX, _YY, _topo, _cfg_td, perturbation=0.0, obs_ref=ref_obs)
+    wd_rad = math.radians(ref_obs.wd_deg)
+    u_uni = -ref_obs.ws_ms * math.sin(wd_rad)
+    v_uni = -ref_obs.ws_ms * math.cos(wd_rad)
+    return (_base.h.astype(np.float32), _base.T.astype(np.float32),
+            _base.q.astype(np.float32),
+            np.full_like(_base.u, u_uni, dtype=np.float32),
+            np.full_like(_base.v, v_uni, dtype=np.float32),
+            _topo.astype(np.float32))
+
+_today_obs_h, _today_obs_T, _today_obs_q, _today_obs_u, _today_obs_v, _taipei_topo = \
+    _taipei_obs_on_td_grid(today_obs)
+_climo_obs_h, _climo_obs_T, _climo_obs_q, _climo_obs_u, _climo_obs_v, _ = \
+    _taipei_obs_on_td_grid(climo_ref)
+
+# Override TD's synthetic obs with Taipei-specific ones + real topography
+_td_state.obs_h = _today_obs_h
+_td_state.obs_T = _today_obs_T
+_td_state.obs_q = _today_obs_q
+_td_state.obs_u = _today_obs_u
+_td_state.obs_v = _today_obs_v
+_td_state.topography = _taipei_topo
+
+# Grid center on TD's 128x96
+_td_cy, _td_cx = _TD_NY // 2, _TD_NX // 2
+
+t0 = time.time()
+daily = []
+print(f"\nTD unified_rollout 7-day forecast ({_TD_NX}x{_TD_NY}, dt={_TD_DT}s, "
+      f"{_TD_STEPS_PER_DAY} substeps/day)")
+_total_steps = 7 * _TD_STEPS_PER_DAY
+_step_offset = 0
 for d_idx in range(7):
+    # Switch obs target: day 1 anchors today_obs, day 2-7 relax toward climo
     if d_idx == 0:
-        # Day 1 DA: full nudging to today_obs
-        decay = 1.0
-        wind_boost = 1.0
-        obs_for_day = obs_today_gpu
-    elif USE_ANALOG_ENSEMBLE:
-        # Legacy: nudge hard toward sampled historical analog day
-        decay = 1.0
-        wind_boost = CLIMO_WIND_BOOST
-        obs_for_day = _analog_obs_gpu[d_idx - 1]
+        _td_state.obs_h = _today_obs_h
+        _td_state.obs_T = _today_obs_T
+        _td_state.obs_q = _today_obs_q
+        _td_state.obs_u = _today_obs_u
+        _td_state.obs_v = _today_obs_v
     else:
-        # TD native: decay=0 zeros all FDDA. Pure physics free-integration.
-        # Held-Suarez T_relax/q_relax toward obs_climo still active inside
-        # dynamics.py (TAU_T_SEC/TAU_Q_SEC, 5-day scale) — that's the only
-        # long-term anchor, and it's physically correct.
-        decay = 0.0
-        wind_boost = 1.0
-        obs_for_day = obs_climo_gpu
-    pb = {
-        "drag": p_act["drag"], "humid_couple": p_act["humid_couple"],
-        "pg_scale": p_act["pg_scale"],
-        "nudging":    [n * decay for n in p_act["nudging"]],
-        "wind_nudge": [w * decay * wind_boost for w in p_act["wind_nudge"]],
-        "h_nudge":    [h * decay for h in p_act["h_nudge"]],
-    }
-    # ==================================================================
-    # DIAGNOSTIC: what does TD see / compute each day?
-    # ==================================================================
-    _to_np = lambda a: a.get() if hasattr(a, "get") else np.asarray(a)
+        _td_state.obs_h = _climo_obs_h
+        _td_state.obs_T = _climo_obs_T
+        _td_state.obs_q = _climo_obs_q
+        _td_state.obs_u = _climo_obs_u
+        _td_state.obs_v = _climo_obs_v
 
-    def _stats(name, arr):
-        a = _to_np(arr)
-        return (f"{name}: min={float(a.min()):+.3e} max={float(a.max()):+.3e} "
-                f"mean={float(a.mean()):+.3e} std={float(a.std()):.3e}")
+    _td_state, _phase_seg = td_unified_rollout(
+        _td_state, _carr,
+        dt=_TD_DT, dx=_TD_DX, dy=_TD_DY,
+        steps=_TD_STEPS_PER_DAY,
+        step_offset=_step_offset, total_steps=_total_steps,
+    )
+    _step_offset += _TD_STEPS_PER_DAY
 
-    # State at START of day (first family)
-    print(f"\n  === Day {d_idx+1} START (fam0) ===")
-    print("    " + _stats("h   ", state_b.h[0]))
-    print("    " + _stats("u   ", state_b.u[0]))
-    print("    " + _stats("v   ", state_b.v[0]))
-    print("    " + _stats("T   ", state_b.T[0]))
-    print("    " + _stats("q   ", state_b.q[0]))
-    # What obs target is being fed to nudging (even if decay=0)?
-    print(f"  === Day {d_idx+1} obs target (fed to branch_step, nudge strength={pb['wind_nudge'][0]:.2e}) ===")
-    print("    " + _stats("obs.h", obs_for_day.h))
-    print("    " + _stats("obs.u", obs_for_day.u))
-    print("    " + _stats("obs.v", obs_for_day.v))
-    print("    " + _stats("obs.T", obs_for_day.T))
-    # Per-family params being used — adapts to TD top-K (12) or legacy 6
-    if USE_TD_WORLDLINES and _td_top_results is not None:
-        _branch_names = [f"{r.family}/{r.template}" for r in _td_top_results]
-    else:
-        _branch_names = ["weak_mix","balanced","high_mix","humid_bias","strong_pg","terrain_lock"]
-    print(f"  === Day {d_idx+1} params (per-family, {len(forecast_branches)} branches) ===")
-    for _i, _name in enumerate(_branch_names[:len(forecast_branches)]):
-        print(f"    fam{_i:>2} {_name:<20}: drag={pb['drag'][_i]:.2e} "
-              f"humid_couple={pb['humid_couple'][_i]:.3f} pg_scale={pb['pg_scale'][_i]:.3f} "
-              f"nudging={pb['nudging'][_i]:.2e} wind_nudge={pb['wind_nudge'][_i]:.2e} "
-              f"h_nudge={pb['h_nudge'][_i]:.2e}")
-
-    for _ in range(1440):
-        state_b, budget = batched_branch_step(state_b, pb, obs_for_day, topo_g, cfg_day, budget)
-    fam_states = unstack_families(state_b)
-
-    # State at END of day — all branches (to see divergence)
-    print(f"  === Day {d_idx+1} END ({len(forecast_branches)} branches, center cell) ===")
-    for _i, _st in enumerate(fam_states):
-        _h_c = float(_to_np(_st.h)[cy, cx])
-        _u_c = float(_to_np(_st.u)[cy, cx])
-        _v_c = float(_to_np(_st.v)[cy, cx])
-        _T_c = float(_to_np(_st.T)[cy, cx])
-        _q_c = float(_to_np(_st.q)[cy, cx])
-        print(f"    fam{_i}: h={_h_c:7.1f}  u={_u_c:+5.2f}  v={_v_c:+5.2f}  "
-              f"T={_T_c:6.2f}K  q={_q_c:.4e}")
-    # Spatial variance check (is the field still spatially structured or flat?)
-    print(f"  === Day {d_idx+1} END spatial stats (fam0) ===")
-    print("    " + _stats("h   ", state_b.h[0]))
-    print("    " + _stats("u   ", state_b.u[0]))
-    print("    " + _stats("v   ", state_b.v[0]))
-    print("    " + _stats("T   ", state_b.T[0]))
-    print("    " + _stats("q   ", state_b.q[0]))
-    # Per-day fusion weights: score each family against the day's obs target
-    day_scores = np.array([float(score_state(st, obs_for_day, cfg_day)["score"]) for st in fam_states])
-    daily.append({
-        "centers": [(float(st.T[cy,cx]), float(st.h[cy,cx]), float(st.q[cy,cx]),
-                     float(st.u[cy,cx]), float(st.v[cy,cx])) for st in fam_states],
-        "scores": day_scores,
-    })
+    # Per-candidate center values
+    centers = []
+    for b in range(len(_candidates)):
+        centers.append((
+            float(_td_state.T[b, _td_cy, _td_cx]),
+            float(_td_state.h[b, _td_cy, _td_cx]),
+            float(_td_state.q[b, _td_cy, _td_cx]),
+            float(_td_state.u[b, _td_cy, _td_cx]),
+            float(_td_state.v[b, _td_cy, _td_cx]),
+        ))
+    # Score each candidate's field fit vs current day's obs (using phase proximity)
+    _day_scores = np.asarray(_td_state.phase, dtype=np.float64)
+    daily.append({"centers": centers, "scores": _day_scores})
+    print(f"  day {d_idx+1}: phase mean={float(_day_scores.mean()):.3f} "
+          f"T_center0={centers[0][0]:.1f}K h0={centers[0][1]:.1f} u0={centers[0][3]:+.2f} "
+          f"v0={centers[0][4]:+.2f}")
 print(f"Week done in {time.time()-t0:.1f}s")
 
 print(f"\n{'Date':<12} {'Mode':<5} {'decay':>6} {'T':>7} {'RH':>6} {'Wind':>14}  {'P':>8}")
@@ -487,8 +509,8 @@ if USE_TD_WORLDLINES and _td_top_results is not None:
     _reranked = sorted(_td_top_results,
                         key=lambda r: r.final_balanced_score or r.balanced_score,
                         reverse=True)
-    print(f"  {'rank':<5} {'family':<13} {'n':>5} {'bal':>+7} {'weather':>8} "
-          f"{'align':>7} {'final':>+8}")
+    print(f"  {'rank':<5} {'family':<13} {'n':>5} {'bal':>7} {'weather':>8} "
+          f"{'align':>7} {'final':>8}")
     for _i, _r in enumerate(_reranked[:8]):
         print(f"  #{_i+1:<4} {_r.family:<13} {int(_r.params['n']):>5} "
               f"{_r.balanced_score:>+7.3f} "
