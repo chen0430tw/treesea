@@ -954,18 +954,46 @@ def _torch_rollout(
 # ---------------------------------------------------------------------------
 # Scoring — UMDST evaluate_score aligned
 # ---------------------------------------------------------------------------
-def score_candidates(
+@dataclass
+class ScoreBreakdown:
+    """Structured output from score_candidate_breakdown.
+
+    Each field is a (B,) numpy array of per-candidate values. `score` is
+    the final composite; the other fields are the primary components that
+    went into it. Downstream layers (EvaluationResult assembly, IPL, CBF,
+    UTM, vein rerank) should consume these directly rather than surrogates
+    like `0.40*phase + 0.35*score + 0.25*A`.
+    """
+    score:          np.ndarray
+    field_fit:      np.ndarray   # [0, 1] obs match — higher = closer to obs
+    p_blow:         np.ndarray   # [0, 1] blow-up risk — higher = dangerous
+    repeatability:  np.ndarray   # [0, 1] — higher = more stable
+    variance_proxy: np.ndarray
+    disagree_proxy: np.ndarray
+    ood_proxy:      np.ndarray
+    phase_max:      np.ndarray
+    phase_final:    np.ndarray
+    e_cons:         np.ndarray
+    n_penalty:      np.ndarray
+    family:         np.ndarray   # object array of family names
+
+
+def score_candidate_breakdown(
     final: UnifiedState,
     phase_series: np.ndarray,   # (B, steps) numpy
     carr: dict,
     seed: ProblemSeed,
-) -> np.ndarray:
-    """Score candidates using the UMDST evaluate_score formula.
+) -> ScoreBreakdown:
+    """Score candidates and return the full component breakdown.
 
     Replaces ad-hoc MSE+phase combination with:
-      score = 1.80*phase_max - 1.35*p_blow - 0.55*n_penalty - 0.80*U + 0.50*repeatability
+      score = 1.80*phase_max + 0.70*field_fit - 1.35*p_blow
+              - 0.55*n_penalty - 0.80*U + 0.50*repeatability
     where U = variance_proxy + disagree_proxy + ood_proxy,
     and p_blow is estimated from field error (E_cons proxy) + state indicators.
+
+    score_candidates(...) is kept as a thin wrapper that returns only the
+    final score array, for callers that don't need the breakdown.
     """
     phase_max      = phase_series.max(axis=1)          # (B,)
     phase_final    = phase_series[:, -1]                # (B,)
@@ -1014,18 +1042,55 @@ def score_candidates(
 
     U = variance_proxy + disagree_proxy + ood_proxy
     score = (1.80 * phase_max
-             + 0.70 * field_fit        # NEW: direct forecast-evidence weight
+             + 0.70 * field_fit        # direct forecast-evidence weight
              - 1.35 * p_blow
              - 0.55 * n_penalty
              - 0.80 * U
              + 0.50 * repeatability)
 
-    # Family bonus (batch family gets +0.08 per umdst_v03)
-    for i, fam in enumerate(carr["family"]):
+    # Family anchor prior — batch gets a small reality-anchor bonus so TD
+    # doesn't drift purely into abstract-phase configurations, but the bonus
+    # is halved (+0.04 vs legacy +0.08) and family-size-normalised so large
+    # candidate pools don't let batch sink top-k alone. The remaining
+    # discrimination is done by the diversity gate in run_tree_diagram().
+    family_arr = np.asarray(carr["family"])
+    _, family_counts = np.unique(family_arr, return_counts=True)
+    min_family_count = int(family_counts.min()) if len(family_counts) else 1
+    for i, fam in enumerate(family_arr):
         if fam == "batch":
-            score[i] += 0.08
+            my_count = int(np.sum(family_arr == fam))
+            # Scale down bonus if batch is over-represented in the pool.
+            scale = (min_family_count / max(1, my_count)) ** 0.5
+            score[i] += 0.04 * scale
 
-    return score
+    return ScoreBreakdown(
+        score=score,
+        field_fit=field_fit,
+        p_blow=p_blow,
+        repeatability=repeatability,
+        variance_proxy=variance_proxy,
+        disagree_proxy=disagree_proxy,
+        ood_proxy=ood_proxy,
+        phase_max=phase_max,
+        phase_final=phase_final,
+        e_cons=e_cons,
+        n_penalty=n_penalty,
+        family=family_arr,
+    )
+
+
+def score_candidates(
+    final: UnifiedState,
+    phase_series: np.ndarray,
+    carr: dict,
+    seed: ProblemSeed,
+) -> np.ndarray:
+    """Backwards-compatible wrapper returning only the score array.
+
+    Prefer score_candidate_breakdown() when the per-component breakdown
+    is needed (EvaluationResult assembly, downstream layers).
+    """
+    return score_candidate_breakdown(final, phase_series, carr, seed).score
 
 
 def classify_relative(scores: np.ndarray) -> List[str]:
@@ -1120,34 +1185,105 @@ def run_tree_diagram(
     ctrl = AngioResourceController(total_steps=max(1, refine_steps))
     flow = ctrl.allocate(statuses1)
 
-    # ---- Phase 2: refinement on alive subset only ----
+    # ---- Phase 2: chunked cohort refinement ----
+    # Each branch's steps_budget (from AngioResourceController) controls how
+    # far into refinement it can go. Split refinement into _REFINE_CHUNKS
+    # equal chunks. At each chunk boundary, only candidates with enough
+    # remaining budget are advanced; others freeze at their state.
+    #
+    # This makes reflow_bonus actually matter — active branches keep rolling
+    # longer than starved/restricted ones, matching the Angio-whitepaper
+    # intent rather than being a no-op log.
+    _REFINE_CHUNKS = 4
     if alive_idx and refine_steps > 0:
-        if use_torch:
-            state_alive = _subset_state(final1_t, alive_idx)
-            carr_alive  = _subset_carr(carr_t, alive_idx, B)
-            final2_t, phase2_t = _torch_rollout(
-                state_alive, carr_alive, dt, DX, DY, refine_steps,
-                step_offset=screen_steps, total_steps=steps)
-            final2 = _state_to_numpy(final2_t)
-            phase2 = phase2_t.cpu().numpy()
-        else:
-            state_alive = _subset_state(final1, alive_idx)
-            carr_alive  = _subset_carr(carr_np, alive_idx, B)
-            final2, phase2 = unified_rollout(
-                state_alive, carr_alive, dt, DX, DY, refine_steps,
-                step_offset=screen_steps, total_steps=steps)
+        chunk_size = max(1, refine_steps // _REFINE_CHUNKS)
+        n_chunks = max(1, refine_steps // chunk_size)
+        # Per-candidate total budget for the refinement phase (from Angio).
+        # For withered candidates this is 0, so they stay at final1.
+        per_cand_budget = np.zeros(B, dtype=np.int32)
+        for res in flow.resources:
+            per_cand_budget[res.index] = res.steps_budget
 
-        # Reconstruct full (B, steps) phase_series
-        idx_np       = np.array(alive_idx)
+        # Start state/phase from screening results.
         phase_series = np.zeros((B, steps), dtype=np.float32)
         phase_series[:, :screen_steps] = phase1
-        phase_series[idx_np, screen_steps:] = phase2
-        # Withered candidates hold their last screening phase value
-        for i in pruned_idx:
-            phase_series[i, screen_steps:] = phase1[i, -1]
+        # Running phase tail; will be written progressively per chunk.
+        refine_phase = np.zeros((B, n_chunks * chunk_size), dtype=np.float32)
 
-        # Reconstruct full B-dim final state (withered keep final1 values)
-        final = _merge_states(final1, final2, alive_idx, B)
+        if use_torch:
+            cur_state_t = final1_t   # full (B, ...) — keep everyone present
+            cur_state_np = None
+        else:
+            cur_state_np = final1    # full (B, ...)
+            cur_state_t = None
+
+        steps_done_at_end = 0
+        last_phase_per_cand = phase1[:, -1].copy()   # carry-forward for frozen
+
+        for chunk_idx in range(n_chunks):
+            chunk_start_step = chunk_idx * chunk_size
+            chunk_end_step = chunk_start_step + chunk_size
+            # Cohort = alive candidates with remaining budget ≥ next chunk's
+            # minimum steps (we require steps_budget to cover up to the END
+            # of this chunk, so refine candidates drop out gracefully).
+            cohort = [
+                i for i in alive_idx
+                if per_cand_budget[i] >= chunk_end_step
+            ]
+            if not cohort:
+                # Fill remaining refine_phase with carry-forward for everyone
+                for i in range(B):
+                    refine_phase[i, chunk_start_step:] = last_phase_per_cand[i]
+                break
+
+            if use_torch:
+                state_cohort = _subset_state(cur_state_t, cohort)
+                carr_cohort  = _subset_carr(carr_t, cohort, B)
+                state_cohort_new, phase_chunk_t = _torch_rollout(
+                    state_cohort, carr_cohort, dt, DX, DY, chunk_size,
+                    step_offset=screen_steps + chunk_start_step,
+                    total_steps=steps,
+                )
+                phase_chunk = phase_chunk_t.cpu().numpy()
+                # Merge cohort back into full B-dim state
+                cur_state_t = _merge_states(cur_state_t, state_cohort_new, cohort, B)
+            else:
+                state_cohort = _subset_state(cur_state_np, cohort)
+                carr_cohort  = _subset_carr(carr_np, cohort, B)
+                state_cohort_new, phase_chunk = unified_rollout(
+                    state_cohort, carr_cohort, dt, DX, DY, chunk_size,
+                    step_offset=screen_steps + chunk_start_step,
+                    total_steps=steps,
+                )
+                cur_state_np = _merge_states(cur_state_np, state_cohort_new, cohort, B)
+
+            # Fill in per-step phase for cohort members; carry-forward for others
+            for k, cand_idx in enumerate(cohort):
+                refine_phase[cand_idx, chunk_start_step:chunk_end_step] = phase_chunk[k]
+                last_phase_per_cand[cand_idx] = phase_chunk[k, -1]
+            for i in range(B):
+                if i in cohort:
+                    continue
+                refine_phase[i, chunk_start_step:chunk_end_step] = last_phase_per_cand[i]
+
+            steps_done_at_end = chunk_end_step
+
+        # If we ended before filling all n_chunks*chunk_size, carry-forward remainder
+        if steps_done_at_end < n_chunks * chunk_size:
+            for i in range(B):
+                refine_phase[i, steps_done_at_end:] = last_phase_per_cand[i]
+
+        # Trim phase_series refinement segment to the configured refine_steps
+        tail = refine_phase[:, :refine_steps] if n_chunks * chunk_size >= refine_steps \
+            else np.pad(refine_phase, ((0, 0), (0, refine_steps - n_chunks * chunk_size)),
+                         mode="edge")
+        phase_series[:, screen_steps:] = tail
+
+        # Final state: whatever was merged up to the last executed chunk.
+        if use_torch:
+            final = _state_to_numpy(cur_state_t)
+        else:
+            final = cur_state_np
     else:
         # No alive branches or no refinement steps — pad phase_series to full width
         pad = np.zeros((B, refine_steps), dtype=np.float32)
@@ -1156,34 +1292,54 @@ def run_tree_diagram(
         phase_series = np.concatenate([phase1, pad], axis=1)
         final = final1
 
-    scores   = score_candidates(final, phase_series, carr, seed)
+    breakdown = score_candidate_breakdown(final, phase_series, carr, seed)
+    scores   = breakdown.score
     statuses = classify_relative(scores)
     hydro    = td_hydro_control(scores)
     hydro["pruned_count"] = len(pruned_idx)
     hydro["reflow_bonus"] = float(flow.reflow_bonus)
     hydro["alive_count"]  = len(alive_idx)
 
-    top_idx = np.argsort(scores)[::-1][:top_k]
+    # Diversity gate: per (family, n) keep only the best representative,
+    # then global top-k. Prevents a single family (typically batch, which
+    # carries the anchor prior + larger candidate count) from sinking all
+    # top-k slots. batch remains the reality anchor — it doesn't get
+    # deleted, it just stops being a ranking black hole.
+    group_best: Dict[tuple, int] = {}
+    for i, c in enumerate(candidates):
+        key = (c["family"], c["params"].get("n"))
+        if key not in group_best or scores[i] > scores[group_best[key]]:
+            group_best[key] = i
+    reduced_idx = sorted(group_best.values(),
+                          key=lambda j: scores[j], reverse=True)
+    top_idx = reduced_idx[:top_k]
+    hydro["diversity_groups_pre_gate"] = len(group_best)
+    hydro["top_k_family_counts"] = _family_counts([candidates[i]["family"] for i in top_idx])
+
     top_results: List[EvaluationResult] = []
     for i in top_idx:
         c = candidates[i]
         p = c["params"]
-        ph  = float(final.phase[i])
-        st  = float(final.stress[i])
-        ins = float(final.instability[i])
-        sc  = float(scores[i])
+        # Use the REAL score components, not reconstructed surrogates.
+        # balanced_score  = final composite score
+        # field_fit       = direct obs-match evidence in [0, 1]
+        # risk            = p_blow in [0, 1]
+        # stability       = repeatability in [0, 1]
+        # feasibility     = phase_final (how close to reaching target phase)
+        # nutrient_gain   = legacy — kept as simple A·rho·(1-σ) proxy
         sig = float(p["sigma"])
         rho = float(p["rho"])
         A   = float(p["A"])
 
-        feasibility = float(np.clip(
-            0.35*ph + 0.25*(1-st) + 0.20*A*(0.55+0.45*rho) + 0.20*(1-sig*10), 0, 1))
-        stability   = float(np.clip(
-            0.40*(1-ins) + 0.30*(1-st) + 0.30*(1-min(sig*5, 1.0)), 0, 1))
-        field_fit   = float(np.clip(0.40*ph + 0.35*sc + 0.25*A, 0, 1))
-        risk        = float(np.clip(0.45*st + 0.35*ins + 0.20*min(sig*5, 1.0), 0, 1))
-        nutrient    = float(np.clip(A * rho * (1 - sig), 0, 1))
+        feasibility = float(np.clip(breakdown.phase_final[i], 0.0, 1.0))
+        stability   = float(np.clip(breakdown.repeatability[i], 0.0, 1.0))
+        field_fit   = float(np.clip(breakdown.field_fit[i], 0.0, 1.0))
+        risk        = float(np.clip(breakdown.p_blow[i], 0.0, 1.0))
+        nutrient    = float(np.clip(A * rho * (1 - sig), 0.0, 1.0))
 
+        # weather_score / weather_alignment / final_balanced_score are
+        # populated only by attach_weather_alignment. Default None so
+        # downstream consumers can detect "not yet scored by physics".
         top_results.append(EvaluationResult(
             family=c["family"],
             template=c["template"],
@@ -1192,15 +1348,23 @@ def run_tree_diagram(
             stability=stability,
             field_fit=field_fit,
             risk=risk,
-            balanced_score=sc,
+            balanced_score=float(scores[i]),
             nutrient_gain=nutrient,
             branch_status=statuses[i],
-            weather_score=sc,
-            weather_alignment=ph,
-            final_balanced_score=sc,
+            weather_score=None,
+            weather_alignment=None,
+            final_balanced_score=None,
         ))
 
     return top_results, hydro
+
+
+def _family_counts(names) -> Dict[str, int]:
+    """Small helper — counts per family name (used by hydro diagnostics)."""
+    counts: Dict[str, int] = {}
+    for n in names:
+        counts[n] = counts.get(n, 0) + 1
+    return counts
 
 
 # ---------------------------------------------------------------------------

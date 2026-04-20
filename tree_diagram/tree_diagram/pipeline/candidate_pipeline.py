@@ -65,8 +65,15 @@ class CandidatePipeline:
         hydro["ipl_seed"] = ipl_seed
 
         # ── IPL Layer (Layer 2): post-eval index over evaluated candidates ───
-        # v2: pass stability + p_blow into meta so the multi-signal zone
-        # classifier (classify_phase_zone v2) can see all risk dimensions.
+        # EvaluationResult now carries REAL breakdown components after the
+        # worldline_kernel refactor (2026-04-20):
+        #   r.feasibility = phase_final      ∈ [0,1] high=good
+        #   r.stability   = repeatability    ∈ [0,1] high=good
+        #   r.field_fit   = 1/(1+e_cons)     ∈ [0,1] high=good
+        #   r.risk        = p_blow           ∈ [0,1] high=danger
+        # classify_phase_zone expects "high = danger" in phase_final/phase_max,
+        # so we invert the healthy metrics here (1 - feasibility etc.) and take
+        # the max with p_blow to get a composite danger signal.
         td_list = [
             TDOutputs(
                 riskfield=[r.risk],
@@ -74,23 +81,13 @@ class CandidatePipeline:
                 graph=[],
                 samples={},
                 meta={
-                    # GPT v5 fix: phase_final/phase_max must carry "high = danger"
-                    # semantics for downstream zone classifier. balanced_score /
-                    # field_fit are "high = healthy", so invert and take max with
-                    # risk to align monotonicity. balanced_score kept separately.
                     "balanced_score": r.balanced_score,
-                    "phase_final": max(
-                        float(r.risk),
-                        float(max(0.0, 1.0 - r.balanced_score)),
-                        float(max(0.0, 1.0 - r.stability)),
-                    ),
-                    "phase_max": max(
-                        float(r.risk),
-                        float(max(0.0, 1.0 - r.field_fit)),
-                        float(max(0.0, 1.0 - r.stability)),
-                    ),
-                    "stability":   r.stability,
-                    "p_blow":      r.risk,  # risk is the per-candidate blow-up proxy
+                    "phase_final":    max(float(r.risk),
+                                           1.0 - float(r.feasibility)),
+                    "phase_max":      max(float(r.risk),
+                                           1.0 - float(r.field_fit)),
+                    "stability":      r.stability,
+                    "p_blow":         r.risk,
                 },
             )
             for r in top_results
@@ -107,26 +104,22 @@ class CandidatePipeline:
         # ────────────────────────────────────────────────────────────────────
 
         # ── CBF Balance Layer (Layer 5): zero-net-drive balance ──────────────
+        # Same "high = danger" alignment as td_list. e_cons_mean now maps to
+        # (1 - field_fit): field_fit = 1/(1+e_cons) so (1-field_fit) is a
+        # monotone "high = bad-fit" signal bounded in [0, 1].
         cbf_metrics = [
             Metrics(
-                e_cons_mean    = r.risk,
+                e_cons_mean    = max(0.0, 1.0 - float(r.field_fit)),
                 impact_peak    = r.nutrient_gain,
-                variance_proxy = max(0.0, 1.0 - r.stability),
-                disagree_proxy = max(0.0, 1.0 - r.feasibility),
-                ood_proxy      = r.risk,
-                p_blow_max     = r.risk,
-                # GPT v5 fix: same "high = danger" alignment as td_list above.
-                phase_max      = max(
-                    float(r.risk),
-                    float(max(0.0, 1.0 - r.field_fit)),
-                    float(max(0.0, 1.0 - r.stability)),
-                ),
-                phase_final    = max(
-                    float(r.risk),
-                    float(max(0.0, 1.0 - r.balanced_score)),
-                    float(max(0.0, 1.0 - r.stability)),
-                ),
-                repeatability  = r.stability,
+                variance_proxy = max(0.0, 1.0 - float(r.stability)),
+                disagree_proxy = max(0.0, 1.0 - float(r.feasibility)),
+                ood_proxy      = float(r.risk),
+                p_blow_max     = float(r.risk),
+                phase_max      = max(float(r.risk),
+                                     1.0 - float(r.field_fit)),
+                phase_final    = max(float(r.risk),
+                                     1.0 - float(r.feasibility)),
+                repeatability  = float(r.stability),
             )
             for r in top_results
         ]
