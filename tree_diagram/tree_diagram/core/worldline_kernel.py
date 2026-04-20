@@ -1029,12 +1029,23 @@ def score_candidate_breakdown(
     # are dampened (e.g. long weather rollouts with step_scale < 1).
     field_fit = 1.0 / (1.0 + e_cons)
 
-    # p_blow: logistic blow-up risk (no prev trajectory → impact term = 0)
-    raw    = (2.2 * np.minimum(e_cons, 10.0)   # clip runaway e_cons
-              + 1.6 * final.stress
-              + 1.9 * final.instability
-              + 0.8 * variance_proxy * 8.0
-              + 0.6 * ood_proxy
+    # p_blow: logistic blow-up risk. Empirical diagnosis (Q1 seed):
+    #   e_cons         range 30-36  (huge — abstract task field-drift)
+    #   instability    saturates to 1.0 for high-instab_sens seeds
+    #   stress         saturates near 1 under high synoptic phase instability
+    #   variance_proxy 0.03-0.06     (narrow per-candidate range)
+    #
+    # A bounded normalisation on e_cons prevents it from dominating
+    # sigmoid saturation; low weights on already-saturated signals
+    # (stress/instab) avoid swallowing discrimination; variance_proxy
+    # keeps a moderate weight since it IS per-candidate distinguishing.
+    # Bias -1.5 shifts baseline so typical p_blow ≈ 0.4-0.6 band.
+    e_cons_norm = np.minimum(1.0, e_cons / 5.0)   # [0, 1] bounded
+    raw    = (0.8 * e_cons_norm
+              + 0.5 * final.stress
+              + 0.6 * final.instability
+              + 0.5 * variance_proxy * 8.0
+              + 0.3 * ood_proxy
               - 1.8)
     p_blow = 1.0 / (1.0 + np.exp(-np.clip(raw, -20.0, 20.0)))
 
@@ -1188,13 +1199,18 @@ def run_tree_diagram(
     # ---- Phase 2: chunked cohort refinement ----
     # Each branch's steps_budget (from AngioResourceController) controls how
     # far into refinement it can go. Split refinement into _REFINE_CHUNKS
-    # equal chunks. At each chunk boundary, only candidates with enough
-    # remaining budget are advanced; others freeze at their state.
+    # equal chunks. Cohort gate uses chunk_START as threshold, not chunk_END,
+    # so a candidate with budget covering even the first step of a chunk gets
+    # to run that chunk entirely. Previous end-gate froze "starved" candidates
+    # (weight=0.2 → budget ≈ 20% of refine) before any refinement chunk if
+    # 20% < 1/_REFINE_CHUNKS, and in long weather rollouts it killed phase
+    # dynamics by freezing too many candidates too early.
     #
-    # This makes reflow_bonus actually matter — active branches keep rolling
-    # longer than starved/restricted ones, matching the Angio-whitepaper
-    # intent rather than being a no-op log.
-    _REFINE_CHUNKS = 4
+    # Using 8 chunks (was 4) makes the budget resolution finer: restricted
+    # (0.6 weight) gets ~5 chunks, starved (0.2) gets ~2 chunks, active
+    # with reflow gets 8+. Matches the Angio-whitepaper intent of graded
+    # resource decline rather than cliff.
+    _REFINE_CHUNKS = 8
     if alive_idx and refine_steps > 0:
         chunk_size = max(1, refine_steps // _REFINE_CHUNKS)
         n_chunks = max(1, refine_steps // chunk_size)
@@ -1223,12 +1239,15 @@ def run_tree_diagram(
         for chunk_idx in range(n_chunks):
             chunk_start_step = chunk_idx * chunk_size
             chunk_end_step = chunk_start_step + chunk_size
-            # Cohort = alive candidates with remaining budget ≥ next chunk's
-            # minimum steps (we require steps_budget to cover up to the END
-            # of this chunk, so refine candidates drop out gracefully).
+            # Soft-gate: cohort = alive candidates with ANY remaining budget
+            # above this chunk's start step. A candidate with budget=80 still
+            # runs a 100-step chunk starting at step 0 (just won't be eligible
+            # for the next chunk starting at 100). Prior hard-gate required
+            # budget ≥ chunk_end, which froze starved (20% budget) candidates
+            # before they could run ANY refinement if chunk_end > their budget.
             cohort = [
                 i for i in alive_idx
-                if per_cand_budget[i] >= chunk_end_step
+                if per_cand_budget[i] > chunk_start_step
             ]
             if not cohort:
                 # Fill remaining refine_phase with carry-forward for everyone
