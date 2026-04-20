@@ -64,6 +64,9 @@ EPSILON = R_DRY_AIR / R_WATER_VAPOR
 Z0_URBAN_M = 1.0
 TAIPEI_STATION_ELEV_M = 9.0
 PRESSURE_ENCODER_M_PER_HPA = 8.0
+BL_TOP_ABOVE_SURFACE_M = 1500.0   # subtropical boundary-layer top (AGL)
+BL_EFFECTIVE_LAPSE_K_PER_M = 3.0e-3  # stable subtropical BL lapse, see
+                                      # _surface_from_internal() docstring.
 
 TD_NX = 128
 TD_NY = 96
@@ -131,16 +134,37 @@ def _surface_from_internal(
     pressure_anchor_h_mid_m: float,
     pressure_anchor_surface_hpa: float,
 ) -> dict:
-    """Convert TD mid-level state (~500 hPa) to surface diagnostics."""
+    """Convert TD mid-level state (~500 hPa) to surface diagnostics.
+
+    Temperature: **two-layer lapse-rate conversion** from h_mid_m down to 2 m.
+    Single-layer moist-adiabatic lapse over the full 5400 m column over-warms
+    T_2m by ~3 K for subtropical coastal locations because the lower 1-2 km
+    is typically more stable than free-atmosphere moist adiabatic:
+      - Free atmosphere (h_mid_m → surface+BL_top): use moist adiabatic Γm
+        computed at (T_mid, p_mid). Small in cold / tropical regimes (~5 K/km).
+      - Boundary layer (surface+BL_top → 2 m): use a subtropical stable
+        lapse BL_EFFECTIVE_LAPSE_K_PER_M (~3 K/km), representing the
+        nighttime-inversion plus weak daytime mixing average over a day.
+    This reduces the total column lapse correction from ~29 K (single layer)
+    to ~25 K, aligning T_2m with observed climatology without any regression.
+    """
     z_mid = max(h_mid_m, surface_elevation_m + 50.0)
     z_2m = surface_elevation_m + 2.0
     z_10m = surface_elevation_m + 10.0
-    dz_to_2m = max(0.0, z_mid - z_2m)
+    z_BL_top = surface_elevation_m + BL_TOP_ABOVE_SURFACE_M
     dz_ref = max(50.0, z_mid - surface_elevation_m)
 
     p_mid_pa = P_MID_HPA * 100.0
     gamma_m = _moist_adiabatic_lapse_rate(T_mid_k, p_mid_pa)
-    T_2m_k = T_mid_k + gamma_m * dz_to_2m
+
+    # Free-atmosphere portion: moist adiabatic from h_mid_m down to BL top
+    dz_free = max(0.0, z_mid - z_BL_top)
+    T_at_BL_top_k = T_mid_k + gamma_m * dz_free
+    # Boundary-layer portion: stable subtropical lapse from BL top down to 2 m
+    dz_BL = max(0.0, z_BL_top - z_2m)
+    T_2m_k = T_at_BL_top_k + BL_EFFECTIVE_LAPSE_K_PER_M * dz_BL
+    # Retain dz_to_2m for downstream hypsometric pressure calc (uses full dz)
+    dz_to_2m = max(0.0, z_mid - z_2m)
 
     q_mid = max(1.0e-6, min(0.03, q_mid))
     rh_mid_pct = _relative_humidity_midlevel_pct(T_mid_k, q_mid, P_MID_HPA)
