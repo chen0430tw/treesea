@@ -113,7 +113,16 @@ class _GridEngine:
 
     def semi_lagrangian(self, field, u, v, dx, dy, dt):
         H, W = field.shape[-2], field.shape[-1]
-        jj, ii = np.meshgrid(np.arange(H), np.arange(W), indexing='ij')
+        # float32 index grid to match field.dtype and _TorchGridEngine's
+        # semi_lagrangian. np.arange(H) defaults to int64 which numpy
+        # auto-promotes to float64 when combined with float32 u/v — that
+        # silently turns the whole integrator mixed-precision and lets
+        # numpy and torch paths diverge by O(1e-2) in 300 steps.
+        jj, ii = np.meshgrid(
+            np.arange(H, dtype=field.dtype),
+            np.arange(W, dtype=field.dtype),
+            indexing='ij',
+        )
         dep_x = ii[None] - u*dt/dx
         dep_y = jj[None] - v*dt/dy
         return self.bilinear_sample(field, dep_x, dep_y)
@@ -417,13 +426,20 @@ def generate_candidates(seed: ProblemSeed, bg: ProblemBackground) -> list:
 
 
 def prepare_candidate_arrays(candidates: list) -> dict:
-    """Return numpy dict of per-candidate parameter arrays, including UMDST coefficients."""
+    """Return numpy dict of per-candidate parameter arrays, including UMDST coefficients.
+
+    All numeric arrays are float32 to keep the numpy integrator path bit-for-bit
+    consistent with _carr_to_torch's float32 tensors. Previously these were
+    float64, which silently up-promoted everything downstream (state + obs
+    are float32, but `dh += dt * Kh * lap(h)` became float64) and caused
+    numpy and torch paths to diverge by O(1e-2) after 300 steps.
+    """
     all_keys: set = set()
     for c in candidates:
         all_keys.update(c["params"].keys())
     carr: dict = {"family": np.array([c["family"] for c in candidates], dtype=object)}
     for k in sorted(all_keys):
-        carr[k] = np.array([c["params"].get(k, 0.0) for c in candidates], dtype=np.float64)
+        carr[k] = np.array([c["params"].get(k, 0.0) for c in candidates], dtype=np.float32)
 
     # Per-family UMDST coefficient arrays
     _dc = _FAMILY_COEFFS_DEFAULT
