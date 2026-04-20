@@ -1160,4 +1160,25 @@ def evaluate_worldline(seed, field, w):
     return results[0] if results else None
 
 def attach_weather_alignment(results, weather_scores):
+    """Attach per-worldline weather scores and derived alignments to results.
+
+    Called after run_tree_diagram(seed, bg) + weather_bridge.run_worldlines_batched
+    (or the serial run_worldline_weather loop). Mutates each EvaluationResult
+    in place:
+      - result.weather_score       ← raw score in [0, 1]
+      - result.weather_alignment   ← normalized alignment in [-0.15, +0.10]
+      - result.final_balanced_score ← balanced_score + weather_alignment
+
+    Length mismatch raises ValueError. Score list order must match results order.
+    """
+    if len(weather_scores) != len(results):
+        raise ValueError(
+            f"weather_scores length {len(weather_scores)} != results length {len(results)}"
+        )
+    from ..numerics.weather_bridge import weather_scores_to_alignments
+    alignments = weather_scores_to_alignments(list(weather_scores))
+    for r, s, a in zip(results, weather_scores, alignments):
+        r.weather_score        = float(s)
+        r.weather_alignment    = float(a)
+        r.final_balanced_score = round(float(r.balanced_score) + float(a), 6)
     return results
