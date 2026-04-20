@@ -346,3 +346,94 @@ for d_idx in range(7):
     P = cal.map_pressure(h)
     mode = "DA" if d_idx == 0 else "free"
     print(f"{date_str:<12} {mode:<5} {decay:>5.2f}  {T_C:>5.1f}°C {RH:>5.1f}% {ws:>4.1f} m/s @ {wd:>3.0f}° {P:>6.1f}hPa")
+
+
+# =====================================================================
+# TD worldline interface — the REAL TD entry point we'd been bypassing.
+# =====================================================================
+# Above we ran batched_branch_step directly (numerics layer). That skips
+# UMDST subject dynamics, worldline candidate generation, two-phase rollout,
+# and all scoring/governance. This block calls run_tree_diagram properly
+# with a Taipei-weather ProblemSeed so the full TD engine is exercised.
+
+def run_td_worldline_interface(today_obs, climo_ref_, cal_, cfg_):
+    """Call run_tree_diagram with a weather ProblemSeed. Returns top-K
+    worldlines + hydro-control dict. No data-assimilation cheating; the
+    seed + bg completely determine the simulation."""
+    from tree_diagram.core.problem_seed import ProblemSeed
+    from tree_diagram.core.background_inference import infer_problem_background
+    from tree_diagram.core.worldline_kernel import run_tree_diagram
+
+    seed = ProblemSeed(
+        title="Taipei 7-day surface weather forecast (2026-04-20 → 04-26)",
+        target=(
+            "Forecast daily-mean T/RH/P/wind at Taipei (25.03N, 121.56E) for "
+            "the next 7 days. Initial state anchored to 2026-04-19 observation; "
+            "long-term evolution relaxed toward 30-day climatology."
+        ),
+        constraints=[
+            "1-layer shallow water (no baroclinic structure — can't resolve fronts)",
+            f"grid NX=128 NY=96 DX=~11.8km (run_tree_diagram default)",
+            "30-day training climo ending 2026-04-19 (Open-Meteo/ECMWF)",
+            "single-point verification at Taipei grid center",
+            "gravity-wave CFL honored (dt=45s default)",
+        ],
+        resources={
+            "budget": 0.85,              # GPU batched, compute adequate
+            "infrastructure": 0.90,       # H100 class GPU, CuPy/Torch
+            "data_coverage": 0.72,        # 30-day daily means, no hourly
+            "population_coupling": 0.55,  # single-station obs, low density
+        },
+        environment={
+            "field_noise": 0.30,              # clean daily-mean obs
+            "phase_instability": 0.55,        # mid-April transitional regime
+            "social_pressure": 0.20,
+            "regulatory_friction": 0.20,
+            "network_density": 0.40,          # sparse obs network
+        },
+        subject={
+            "output_power": 0.72,             # shallow-water forcing adequate
+            "control_precision": 0.62,        # day-1 DA precision
+            "load_tolerance": 0.85,           # post-CFL-fix, numerically stable
+            "aim_coupling": 0.58,             # DA → free transition smoothness
+            "stress_level": 0.30,             # quiet synoptic state today
+            "phase_proximity": 0.50,          # mid-horizon forecast
+            "marginal_decay": 0.22,           # skill drops ~22%/day beyond day 3
+            "instability_sensitivity": 0.48,  # moderate chaos exposure
+        },
+    )
+    bg = infer_problem_background(seed)
+    top_results, hydro = run_tree_diagram(
+        seed, bg,
+        NX=128, NY=96,        # run_tree_diagram defaults
+        steps=300, top_k=12,
+        dt=45.0,
+    )
+    return seed, bg, top_results, hydro
+
+
+print("\n" + "=" * 68)
+print("TD WORLDLINE INTERFACE (run_tree_diagram — real TD engine)")
+print("=" * 68)
+try:
+    _t0_td = time.time()
+    _seed, _bg, _top, _hydro = run_td_worldline_interface(today_obs, climo_ref, cal, cfg_day)
+    print(f"TD run complete in {time.time() - _t0_td:.1f}s")
+    print(f"Hydro control: alive={_hydro.get('alive_count')} pruned={_hydro.get('pruned_count')} "
+          f"reflow_bonus={_hydro.get('reflow_bonus', 0.0):.3f}")
+    print(f"Inferred background contradiction: {_bg.core_contradiction}")
+    print(f"Dominant pressures: {_bg.dominant_pressures}")
+    print(f"\nTop {min(5, len(_top))} worldlines (of {len(_top)} evaluated):")
+    print(f"  {'#':<2} {'family':<13} {'n':>6} {'rho':>4} {'A':>4} {'sigma':>6} "
+          f"{'score':>7} {'feas':>5} {'stab':>5} {'risk':>5} {'status':<12}")
+    for _i, _r in enumerate(_top[:5]):
+        _p = _r.params
+        print(f"  #{_i+1:<1} {_r.family:<13} "
+              f"{_p.get('n', 0):>6.0f} {_p.get('rho', 0):>4.2f} {_p.get('A', 0):>4.2f} "
+              f"{_p.get('sigma', 0):>6.3f} "
+              f"{_r.balanced_score:>+7.3f} {_r.feasibility:>5.2f} "
+              f"{_r.stability:>5.2f} {_r.risk:>5.2f} {_r.branch_status:<12}")
+except Exception as _e:
+    import traceback
+    print(f"TD interface FAILED: {type(_e).__name__}: {_e}")
+    traceback.print_exc()
