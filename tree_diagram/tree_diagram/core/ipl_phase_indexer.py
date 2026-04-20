@@ -124,35 +124,42 @@ def classify_phase_zone(
             return "transition"
         return "critical"
 
-    # v2 multi-signal OR gate (critical first)
-    critical_hit = False
-    if risk is not None and risk >= CRITICAL_RISK_TH:
-        critical_hit = True
-    if feasibility is not None and feasibility <= CRITICAL_FEAS_TH:
-        critical_hit = True
-    if stability is not None and stability <= CRITICAL_STAB_TH:
-        critical_hit = True
-    if p_blow is not None and p_blow >= CRITICAL_PBLOW_TH:
-        critical_hit = True
-    # GPT v5 fix: do NOT let legacy phase_final directly escalate zones in
-    # multi-signal mode. phase_final carries inconsistent semantics across
-    # callers (pre-eval vs post-eval). Zone escalation here relies only on
-    # explicit risk signals (risk/feas/stab/p_blow) whose semantics are fixed.
-    if critical_hit:
+    # v2+ multi-signal OR gate, but with feasibility requiring a co-hit.
+    #
+    # Rationale: after the real-breakdown refactor (fa50cea, 2026-04-20),
+    # feasibility = phase_final directly. For chaos-sensitive seeds
+    # (td_ai_singularity Q1 etc.) instability saturates early in the
+    # short 300-step rollout and crushes phase to 0 → feasibility ≈ 0.
+    # Under legacy single-signal OR this alone tripped `critical`,
+    # producing "all 4 scenarios critical / crackdown=1.000" regardless
+    # of risk / stability health.
+    #
+    # Feasibility-alone doesn't mean crackdown-worthy. Require it to
+    # co-occur with at least one of (risk / stability / p_blow) crossing
+    # critical threshold. The other signals keep individual-trigger
+    # semantics (matching the WW4 civilisational-reset calibration).
+    def _nonfeas_crit() -> bool:
+        return (
+            (risk is not None and risk >= CRITICAL_RISK_TH)
+            or (stability is not None and stability <= CRITICAL_STAB_TH)
+            or (p_blow is not None and p_blow >= CRITICAL_PBLOW_TH)
+        )
+    def _nonfeas_trans() -> bool:
+        return (
+            (risk is not None and risk >= TRANSITION_RISK_TH)
+            or (stability is not None and stability <= TRANSITION_STAB_TH)
+            or (p_blow is not None and p_blow >= TRANSITION_PBLOW_TH)
+        )
+
+    feas_crit  = feasibility is not None and feasibility <= CRITICAL_FEAS_TH
+    feas_trans = feasibility is not None and feasibility <= TRANSITION_FEAS_TH
+
+    # Critical: any non-feas signal alone, OR feas + at least one non-feas
+    if _nonfeas_crit() or (feas_crit and _nonfeas_trans()):
         return "critical"
 
-    # Transition next
-    transition_hit = False
-    if risk is not None and risk >= TRANSITION_RISK_TH:
-        transition_hit = True
-    if feasibility is not None and feasibility <= TRANSITION_FEAS_TH:
-        transition_hit = True
-    if stability is not None and stability <= TRANSITION_STAB_TH:
-        transition_hit = True
-    if p_blow is not None and p_blow >= TRANSITION_PBLOW_TH:
-        transition_hit = True
-    # Same phase_final exclusion rationale as above for the transition gate.
-    if transition_hit:
+    # Transition: any non-feas signal alone, OR feas alone (soft escalation)
+    if _nonfeas_trans() or feas_trans:
         return "transition"
 
     return "stable"

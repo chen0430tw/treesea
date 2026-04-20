@@ -264,12 +264,21 @@ def _umdst_batched_step(
     # Long-only proportional decay: decay_coef = 1.0 - step_scale. At short
     # rollout (step_scale=1) decay_coef=0 → zero extra decay, legacy preserved.
     # At long rollout (step_scale≪1) decay_coef→1 → −0.020·state term bounds
-    # stress/instab equilibria away from 1.0 so phase is not collapsed by
-    # indefinite growth of (0.012·A + 0.010·σ + …) over 10⁴ steps.
+    # stress/instab equilibria away from 1.0.
+    #
+    # Phase-coupling attenuation: in long rollouts the -0.05·instab -
+    # 0.04·stress drag still outweighs gain when both stress and instab
+    # hover near their (bounded) equilibrium, crushing phase to 0 over
+    # 10⁴ steps. Attenuate the drag coefficients proportionally with
+    # step_scale so per-cumulative-rollout phase growth stays positive.
+    # Short rollouts see coef_atten=1.0 (no change). Long rollouts get
+    # coef_atten that scales -0.05 → -0.035 and -0.04 → -0.028.
     decay_coef = (1.0 - step_scale)
+    coef_atten = 0.5 + 0.5 * step_scale    # 1.0 when step_scale=1; 0.5 when ≪1
     new_phase  = (phase  + step_scale * (gain
                   + 0.20 * precision_gain + 0.16 * coupling_gain
-                  - 0.05 * instab - 0.04 * stress)).clamp(0.0, 1.0)
+                  - 0.05 * coef_atten * instab
+                  - 0.04 * coef_atten * stress)).clamp(0.0, 1.0)
     new_stress = (stress + step_scale * (stress_up - stress_down
                   - 0.020 * decay_coef * stress)).clamp(0.0, 1.0)
     new_instab = (instab + step_scale * (instability_up - instability_down
@@ -774,10 +783,15 @@ def unified_step(
         id_ = 0.008 * lt_i
 
         # Long-only proportional decay on stress/instab (see batched version).
+        # coef_atten: attenuate phase-drag coefficients in long rollouts
+        # (matches _umdst_batched_step) so -0.05·instab - 0.04·stress
+        # doesn't crush phase to 0 over 10⁴ steps.
         decay_coef = 1.0 - step_scale
+        coef_atten = 0.5 + 0.5 * step_scale
         new_phase[i]  = max(0.0, min(1.0,
             ph_i + step_scale * (
-                gain_i + 0.20*prec_g + 0.16*coup_g - 0.05*ins_i - 0.04*stress_i)))
+                gain_i + 0.20*prec_g + 0.16*coup_g
+                - 0.05*coef_atten*ins_i - 0.04*coef_atten*stress_i)))
         new_stress[i] = max(0.0, min(1.0,
             stress_i + step_scale * (su - sd - 0.020 * decay_coef * stress_i)))
         new_instab[i] = max(0.0, min(1.0,

@@ -101,15 +101,27 @@ class CandidatePipeline:
         hydro["ipl_seed"] = ipl_seed
 
         # ── IPL Layer (Layer 2): post-eval index over evaluated candidates ───
-        # EvaluationResult now carries REAL breakdown components after the
-        # worldline_kernel refactor (2026-04-20):
+        # EvaluationResult now carries REAL breakdown components:
         #   r.feasibility = phase_final      ∈ [0,1] high=good
         #   r.stability   = repeatability    ∈ [0,1] high=good
         #   r.field_fit   = 1/(1+e_cons)     ∈ [0,1] high=good
         #   r.risk        = p_blow           ∈ [0,1] high=danger
-        # classify_phase_zone expects "high = danger" in phase_final/phase_max,
-        # so we invert the healthy metrics here (1 - feasibility etc.) and take
-        # the max with p_blow to get a composite danger signal.
+        #
+        # danger composite: BLENDED weighted average, not max(). Previously
+        # `max(risk, 1-feas)` let any single high-danger component pin the
+        # whole signal to near-1, forcing every candidate in high-chaos
+        # abstract seeds to zone=critical regardless of overall health.
+        # Weighted mean gives smooth 0-1 output that distinguishes
+        # severe-all-dimensions vs severe-one-dimension.
+        #
+        # Rationale for weights:
+        #   phase_final: measures "outcome maturity shortfall" — weight
+        #     risk high (TD's native blow-up) + (1-stability) (trajectory
+        #     dispersion). Intentionally NOT inverting feasibility alone,
+        #     because chaos-sensitive seeds legitimately have low feas
+        #     without being in crackdown-level crisis.
+        #   phase_max: "peak danger" — same blend but weight (1-field_fit)
+        #     higher since obs-mismatch is the cleanest danger signal.
         td_list = [
             TDOutputs(
                 riskfield=[r.risk],
@@ -118,12 +130,18 @@ class CandidatePipeline:
                 samples={},
                 meta={
                     "balanced_score": r.balanced_score,
-                    "phase_final":    max(float(r.risk),
-                                           1.0 - float(r.feasibility)),
-                    "phase_max":      max(float(r.risk),
-                                           1.0 - float(r.field_fit)),
-                    "stability":      r.stability,
-                    "p_blow":         r.risk,
+                    "phase_final": (
+                        0.50 * float(r.risk)
+                        + 0.30 * max(0.0, 1.0 - float(r.stability))
+                        + 0.20 * max(0.0, 1.0 - float(r.feasibility))
+                    ),
+                    "phase_max": (
+                        0.40 * float(r.risk)
+                        + 0.40 * max(0.0, 1.0 - float(r.stability))
+                        + 0.20 * max(0.0, 1.0 - float(r.field_fit))
+                    ),
+                    "stability": r.stability,
+                    "p_blow":    r.risk,
                 },
             )
             for r in top_results
@@ -140,21 +158,32 @@ class CandidatePipeline:
         # ────────────────────────────────────────────────────────────────────
 
         # ── CBF Balance Layer (Layer 5): zero-net-drive balance ──────────────
-        # Same "high = danger" alignment as td_list. e_cons_mean now maps to
-        # (1 - field_fit): field_fit = 1/(1+e_cons) so (1-field_fit) is a
-        # monotone "high = bad-fit" signal bounded in [0, 1].
+        # Same blended-composite approach as the IPL td_list above. For
+        # abstract seeds every candidate typically has field_fit ≈ 0.03
+        # (state drifts far from obs), so (1-field_fit) near 1.0 can't be
+        # the sole danger driver or it pins everything to crackdown.
         cbf_metrics = [
             Metrics(
-                e_cons_mean    = max(0.0, 1.0 - float(r.field_fit)),
+                # Soft e_cons: blend (1-field_fit) with stability gap,
+                # clipped at 0.70 so field-drift alone can't force crackdown.
+                e_cons_mean    = min(0.70,
+                                     0.50 * max(0.0, 1.0 - float(r.field_fit))
+                                     + 0.50 * max(0.0, 1.0 - float(r.stability))),
                 impact_peak    = r.nutrient_gain,
                 variance_proxy = max(0.0, 1.0 - float(r.stability)),
                 disagree_proxy = max(0.0, 1.0 - float(r.feasibility)),
                 ood_proxy      = float(r.risk),
                 p_blow_max     = float(r.risk),
-                phase_max      = max(float(r.risk),
-                                     1.0 - float(r.field_fit)),
-                phase_final    = max(float(r.risk),
-                                     1.0 - float(r.feasibility)),
+                phase_max = (
+                    0.40 * float(r.risk)
+                    + 0.40 * max(0.0, 1.0 - float(r.stability))
+                    + 0.20 * max(0.0, 1.0 - float(r.field_fit))
+                ),
+                phase_final = (
+                    0.50 * float(r.risk)
+                    + 0.30 * max(0.0, 1.0 - float(r.stability))
+                    + 0.20 * max(0.0, 1.0 - float(r.feasibility))
+                ),
                 repeatability  = float(r.stability),
             )
             for r in top_results
