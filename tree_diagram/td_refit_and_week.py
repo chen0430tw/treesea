@@ -18,6 +18,13 @@ from tree_diagram.numerics.dynamics_batched import (
 from tree_diagram.numerics.ranking import score_state
 from tree_diagram.numerics.weather_contract import WeatherCalibration
 from tree_diagram.numerics._xp import has_cupy
+from tree_diagram.numerics.weather_bridge import (
+    worldline_to_branch_params, weather_scores_to_alignments,
+    OMEGA_EARTH, TAIPEI_LAT_DEG, TAIPEI_F_CORIOLIS, N_OPT_DEFAULT,
+)
+from tree_diagram.core.problem_seed import ProblemSeed
+from tree_diagram.core.worldline_kernel import attach_weather_alignment
+from tree_diagram.pipeline.candidate_pipeline import CandidatePipeline
 from td_taipei_forecast import build_taipei_state, ReferenceObs
 from calibration.fit_calibration_b import fit_two_param, fit_scale_through_origin, invert_q_to_rh_ratio
 
@@ -195,17 +202,22 @@ def _make_uniform_wind_obs(obs_ref, base_fn):
     )
 
 # =====================================================================
-# Forecast mode switch — TD native 6-family ensemble vs legacy analog
+# Forecast source — TD CandidatePipeline (default) vs legacy 6-family
 # =====================================================================
-# Default: native TD — day 2-7 free-integrate from day-1 DA state, 6 branch
-# families diverge via their own param spread (drag/pg_scale/humid_couple).
-# This is弹幕动力学's intended use: one IC, N parameter-diverse trajectories
-# form the forecast uncertainty cone. No obs pulling after day 1.
+# Default (USE_TD_WORLDLINES=True): build a weather ProblemSeed from today's
+# conditions + 30-day climo stats, let CandidatePipeline generate & rank
+# worldline candidates via UMDST scoring (batch-anchored by design — see
+# §11.17), then translate each top-K worldline into branch physics params
+# via weather_bridge.worldline_to_branch_params and run the same 7-day
+# rollout pipeline we used for the 6 hardcoded families.
 #
-# Legacy (USE_ANALOG_ENSEMBLE=True): each free day nudges toward a historical
-# analog sampled from the 30-day training set. Data-driven, not physics-driven.
-# Kept behind a switch because it may be useful for downscaling / bias-correction
-# workflows where you *want* to blend a historical template with live physics.
+# This is the proper TD interface: TD chooses the parameter manifold points,
+# weather_bridge maps them to physics, shallow-water dynamics integrate.
+# TD's top-K convergence to batch/n=20000 is a calibration feature, not a bug.
+#
+# USE_TD_WORLDLINES=False: legacy 6-family hardcoded branches.
+# USE_ANALOG_ENSEMBLE=True: legacy-legacy analog sampling for days 2-7.
+USE_TD_WORLDLINES = True
 USE_ANALOG_ENSEMBLE = False
 
 obs_today_gpu = _gpu(_make_uniform_wind_obs(today_obs, build_taipei_state))
@@ -225,10 +237,114 @@ if USE_ANALOG_ENSEMBLE:
     print(f"[legacy] analog days chosen: {[obs_days[int(i)]['date'] for i in _analog_day_idxs]}")
 else:
     _analog_obs_gpu = None
-    print("TD native ensemble: day 2-7 free integration, 6-family branch divergence")
 
-forecast_branches = _forecast_families()   # wind_rot=0 for all
-# No rotation needed — stack init directly
+# ---------------------------------------------------------------------
+# TD WORLDLINE PATH — build weather seed, call CandidatePipeline
+# ---------------------------------------------------------------------
+def build_weather_seed(today_obs_, climo_ref_, obs_days_, today_date) -> ProblemSeed:
+    """Honest ProblemSeed for the forecast task — no copied-template fields.
+
+    subject[8D] describes the FORECAST SYSTEM's capability, not the atmosphere:
+      output_power      = forcing-amplitude adequacy (normalised wind speed)
+      control_precision = DA/anchor accuracy (today_obs quality)
+      load_tolerance    = numerical stability headroom (high post-CFL-fix)
+      aim_coupling      = obs↔model alignment under nudging
+      stress_level      = synoptic activity (today's deviation from climo)
+      phase_proximity   = how near a regime transition (mid-horizon)
+      marginal_decay    = per-day skill erosion (~22%/day after day 3)
+      instability_sensitivity = chaos exposure (rises with lead time)
+
+    environment.phase_instability is measured from obs variance over the
+    30-day window, so TD sees *actual* synoptic activity, not a guess.
+    """
+    T_std = float(np.std([d["T_mean_C"] for d in obs_days_]))
+    P_std = float(np.std([d["P_mean_hPa"] for d in obs_days_]))
+    # Normalise to [0,1]: 3°C std + 5 hPa std are typical April mid-lat values.
+    phase_instab = min(1.0, 0.55 * (T_std / 3.0) + 0.45 * (P_std / 5.0))
+    # Stress: today's deviation from climo
+    T_dev = abs(today_obs_.T_avg_C - climo_ref_.T_avg_C)
+    P_dev = abs(today_obs_.P_hPa - climo_ref_.P_hPa)
+    stress = min(1.0, 0.6 * (T_dev / 3.0) + 0.4 * (P_dev / 5.0))
+    # Output power: wind amplitude vs a 5 m/s reference
+    out_pow = min(1.0, max(0.2, today_obs_.ws_ms / 5.0))
+
+    return ProblemSeed(
+        title=f"Taipei 7-day surface weather forecast ({today_date} → +7d)",
+        target=(
+            "Forecast daily-mean T/RH/P/wind at Taipei (25.03N, 121.56E) for "
+            "7 days. Day 1 anchored to today's obs (DA); days 2-7 free "
+            "integration with decaying obs nudge and climo relaxation."
+        ),
+        constraints=[
+            "1-layer shallow water (no baroclinic structure)",
+            "256x192 grid DX=DY=6km DT=60s (gravity-wave CFL satisfied)",
+            "30-day training climatology ending 2026-04-19 (Open-Meteo ECMWF)",
+            "single-point verification at Taipei grid center",
+        ],
+        resources={
+            "budget":              0.85,  # GPU batched, H100 accessible
+            "infrastructure":      0.90,  # CuPy + torch ready
+            "data_coverage":       0.72,  # 30 days daily means only
+            "population_coupling": 0.55,  # single-station obs
+        },
+        environment={
+            "field_noise":         0.30,            # clean daily-mean obs
+            "phase_instability":   phase_instab,    # from 30-day variance
+            "social_pressure":     0.20,
+            "regulatory_friction": 0.20,
+            "network_density":     0.40,
+        },
+        subject={
+            "output_power":            out_pow,
+            "control_precision":       0.62,
+            "load_tolerance":          0.85,   # post-CFL-fix
+            "aim_coupling":            0.58,
+            "stress_level":            stress,
+            "phase_proximity":         0.50,
+            "marginal_decay":          0.22,   # skill ~22%/day after d3
+            "instability_sensitivity": 0.48,
+        },
+    )
+
+
+if USE_TD_WORLDLINES:
+    print("\n" + "=" * 68)
+    print("TD CandidatePipeline — building weather ProblemSeed")
+    print("=" * 68)
+    _weather_seed = build_weather_seed(today_obs, climo_ref, obs_days, TODAY)
+    print(f"  phase_instability (from 30-day T/P variance): "
+          f"{_weather_seed.environment['phase_instability']:.3f}")
+    print(f"  stress_level (today deviation from climo):    "
+          f"{_weather_seed.subject['stress_level']:.3f}")
+    print(f"  output_power (today wind / 5 m/s):            "
+          f"{_weather_seed.subject['output_power']:.3f}")
+    _td_t0 = time.time()
+    _pipeline = CandidatePipeline(
+        seed=_weather_seed, top_k=12,
+        NX=128, NY=96, steps=300, dt=45.0,
+    )
+    _td_top_results, _td_hydro, _td_oracle = _pipeline.run()
+    print(f"  CandidatePipeline.run(): {time.time() - _td_t0:.1f}s "
+          f"(alive={_td_hydro.get('alive_count')} pruned={_td_hydro.get('pruned_count')})")
+    print(f"  Top-{min(5, len(_td_top_results))} worldlines (TD judgment layer):")
+    for _i, _r in enumerate(_td_top_results[:5]):
+        _p = _r.params
+        print(f"    #{_i+1} {_r.family:<13} "
+              f"n={int(_p.get('n', 0)):>5} rho={_p.get('rho', 0):.2f} "
+              f"A={_p.get('A', 0):.2f} sigma={_p.get('sigma', 0):.3f} | "
+              f"score={_r.balanced_score:+.3f} feas={_r.feasibility:.2f} "
+              f"status={_r.branch_status}")
+    # Translate TD worldlines to physics branch params
+    forecast_branches = [worldline_to_branch_params(_r, _weather_seed) for _r in _td_top_results]
+    print(f"  Translated to {len(forecast_branches)} physics branches via weather_bridge")
+else:
+    forecast_branches = _forecast_families()   # legacy 6-family wind_rot=0
+    _td_top_results = None
+    _td_hydro = None
+    _td_oracle = None
+    print("[legacy] 6-family hardcoded branches (USE_TD_WORLDLINES=False)")
+
+# Stack init for all branches (same IC, divergence from param spread)
 state_b = stack_families([init] * len(forecast_branches))
 p_act = {k: [f[k] for f in forecast_branches] for k in
          ["drag","humid_couple","nudging","pg_scale","wind_nudge"]}
@@ -289,10 +405,14 @@ for d_idx in range(7):
     print("    " + _stats("obs.u", obs_for_day.u))
     print("    " + _stats("obs.v", obs_for_day.v))
     print("    " + _stats("obs.T", obs_for_day.T))
-    # Per-family params being used
-    print(f"  === Day {d_idx+1} params (per-family) ===")
-    for _i, _name in enumerate(["weak_mix","balanced","high_mix","humid_bias","strong_pg","terrain_lock"]):
-        print(f"    fam{_i} {_name:<12}: drag={pb['drag'][_i]:.2e} "
+    # Per-family params being used — adapts to TD top-K (12) or legacy 6
+    if USE_TD_WORLDLINES and _td_top_results is not None:
+        _branch_names = [f"{r.family}/{r.template}" for r in _td_top_results]
+    else:
+        _branch_names = ["weak_mix","balanced","high_mix","humid_bias","strong_pg","terrain_lock"]
+    print(f"  === Day {d_idx+1} params (per-family, {len(forecast_branches)} branches) ===")
+    for _i, _name in enumerate(_branch_names[:len(forecast_branches)]):
+        print(f"    fam{_i:>2} {_name:<20}: drag={pb['drag'][_i]:.2e} "
               f"humid_couple={pb['humid_couple'][_i]:.3f} pg_scale={pb['pg_scale'][_i]:.3f} "
               f"nudging={pb['nudging'][_i]:.2e} wind_nudge={pb['wind_nudge'][_i]:.2e} "
               f"h_nudge={pb['h_nudge'][_i]:.2e}")
@@ -301,8 +421,8 @@ for d_idx in range(7):
         state_b, budget = batched_branch_step(state_b, pb, obs_for_day, topo_g, cfg_day, budget)
     fam_states = unstack_families(state_b)
 
-    # State at END of day — all 6 families (to see divergence)
-    print(f"  === Day {d_idx+1} END (all 6 families, center cell) ===")
+    # State at END of day — all branches (to see divergence)
+    print(f"  === Day {d_idx+1} END ({len(forecast_branches)} branches, center cell) ===")
     for _i, _st in enumerate(fam_states):
         _h_c = float(_to_np(_st.h)[cy, cx])
         _u_c = float(_to_np(_st.u)[cy, cx])
@@ -349,91 +469,29 @@ for d_idx in range(7):
 
 
 # =====================================================================
-# TD worldline interface — the REAL TD entry point we'd been bypassing.
+# Close the loop — feed day-1 physics scores back into TD worldlines
 # =====================================================================
-# Above we ran batched_branch_step directly (numerics layer). That skips
-# UMDST subject dynamics, worldline candidate generation, two-phase rollout,
-# and all scoring/governance. This block calls run_tree_diagram properly
-# with a Taipei-weather ProblemSeed so the full TD engine is exercised.
+# CandidatePipeline produced TD's abstract ranking (feasibility/stability/risk).
+# The 7-day rollout just finished produced per-day physics scores. Fold them
+# back into EvaluationResult.weather_score / weather_alignment /
+# final_balanced_score so TD's judgment layer sees the physical evidence.
+# Day-1 scores are the cleanest signal (obs actually valid then); downstream
+# reporting layers can use final_balanced_score for re-ranking.
 
-def run_td_worldline_interface(today_obs, climo_ref_, cal_, cfg_):
-    """Call run_tree_diagram with a weather ProblemSeed. Returns top-K
-    worldlines + hydro-control dict. No data-assimilation cheating; the
-    seed + bg completely determine the simulation."""
-    from tree_diagram.core.problem_seed import ProblemSeed
-    from tree_diagram.core.background_inference import infer_problem_background
-    from tree_diagram.core.worldline_kernel import run_tree_diagram
-
-    seed = ProblemSeed(
-        title="Taipei 7-day surface weather forecast (2026-04-20 → 04-26)",
-        target=(
-            "Forecast daily-mean T/RH/P/wind at Taipei (25.03N, 121.56E) for "
-            "the next 7 days. Initial state anchored to 2026-04-19 observation; "
-            "long-term evolution relaxed toward 30-day climatology."
-        ),
-        constraints=[
-            "1-layer shallow water (no baroclinic structure — can't resolve fronts)",
-            f"grid NX=128 NY=96 DX=~11.8km (run_tree_diagram default)",
-            "30-day training climo ending 2026-04-19 (Open-Meteo/ECMWF)",
-            "single-point verification at Taipei grid center",
-            "gravity-wave CFL honored (dt=45s default)",
-        ],
-        resources={
-            "budget": 0.85,              # GPU batched, compute adequate
-            "infrastructure": 0.90,       # H100 class GPU, CuPy/Torch
-            "data_coverage": 0.72,        # 30-day daily means, no hourly
-            "population_coupling": 0.55,  # single-station obs, low density
-        },
-        environment={
-            "field_noise": 0.30,              # clean daily-mean obs
-            "phase_instability": 0.55,        # mid-April transitional regime
-            "social_pressure": 0.20,
-            "regulatory_friction": 0.20,
-            "network_density": 0.40,          # sparse obs network
-        },
-        subject={
-            "output_power": 0.72,             # shallow-water forcing adequate
-            "control_precision": 0.62,        # day-1 DA precision
-            "load_tolerance": 0.85,           # post-CFL-fix, numerically stable
-            "aim_coupling": 0.58,             # DA → free transition smoothness
-            "stress_level": 0.30,             # quiet synoptic state today
-            "phase_proximity": 0.50,          # mid-horizon forecast
-            "marginal_decay": 0.22,           # skill drops ~22%/day beyond day 3
-            "instability_sensitivity": 0.48,  # moderate chaos exposure
-        },
-    )
-    bg = infer_problem_background(seed)
-    top_results, hydro = run_tree_diagram(
-        seed, bg,
-        NX=128, NY=96,        # run_tree_diagram defaults
-        steps=300, top_k=12,
-        dt=45.0,
-    )
-    return seed, bg, top_results, hydro
-
-
-print("\n" + "=" * 68)
-print("TD WORLDLINE INTERFACE (run_tree_diagram — real TD engine)")
-print("=" * 68)
-try:
-    _t0_td = time.time()
-    _seed, _bg, _top, _hydro = run_td_worldline_interface(today_obs, climo_ref, cal, cfg_day)
-    print(f"TD run complete in {time.time() - _t0_td:.1f}s")
-    print(f"Hydro control: alive={_hydro.get('alive_count')} pruned={_hydro.get('pruned_count')} "
-          f"reflow_bonus={_hydro.get('reflow_bonus', 0.0):.3f}")
-    print(f"Inferred background contradiction: {_bg.core_contradiction}")
-    print(f"Dominant pressures: {_bg.dominant_pressures}")
-    print(f"\nTop {min(5, len(_top))} worldlines (of {len(_top)} evaluated):")
-    print(f"  {'#':<2} {'family':<13} {'n':>6} {'rho':>4} {'A':>4} {'sigma':>6} "
-          f"{'score':>7} {'feas':>5} {'stab':>5} {'risk':>5} {'status':<12}")
-    for _i, _r in enumerate(_top[:5]):
-        _p = _r.params
-        print(f"  #{_i+1:<1} {_r.family:<13} "
-              f"{_p.get('n', 0):>6.0f} {_p.get('rho', 0):>4.2f} {_p.get('A', 0):>4.2f} "
-              f"{_p.get('sigma', 0):>6.3f} "
-              f"{_r.balanced_score:>+7.3f} {_r.feasibility:>5.2f} "
-              f"{_r.stability:>5.2f} {_r.risk:>5.2f} {_r.branch_status:<12}")
-except Exception as _e:
-    import traceback
-    print(f"TD interface FAILED: {type(_e).__name__}: {_e}")
-    traceback.print_exc()
+if USE_TD_WORLDLINES and _td_top_results is not None:
+    _day1_scores = [float(s) for s in daily[0]["scores"]]
+    attach_weather_alignment(_td_top_results, _day1_scores)
+    print(f"\n" + "=" * 68)
+    print("TD JUDGMENT (post-physics attach_weather_alignment, re-ranked)")
+    print("=" * 68)
+    _reranked = sorted(_td_top_results,
+                        key=lambda r: r.final_balanced_score or r.balanced_score,
+                        reverse=True)
+    print(f"  {'rank':<5} {'family':<13} {'n':>5} {'bal':>+7} {'weather':>8} "
+          f"{'align':>7} {'final':>+8}")
+    for _i, _r in enumerate(_reranked[:8]):
+        print(f"  #{_i+1:<4} {_r.family:<13} {int(_r.params['n']):>5} "
+              f"{_r.balanced_score:>+7.3f} "
+              f"{_r.weather_score:>8.4f} "
+              f"{_r.weather_alignment:>+7.3f} "
+              f"{_r.final_balanced_score:>+8.3f}")
