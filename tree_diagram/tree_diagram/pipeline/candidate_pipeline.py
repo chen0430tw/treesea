@@ -7,6 +7,7 @@ from ..core.background_inference import ProblemBackground, infer_problem_backgro
 from ..core.group_field import encode_group_field
 from ..core.worldline_kernel import EvaluationResult, run_tree_diagram
 from ..core.oracle_output import oracle_summary_abstract
+from ..core.seed_normalizer import normalize_seed
 from ..core.umdst_kernel import Metrics, TDOutputs
 from ..core.cbf_balancer import aggregate_cbf
 from ..core.ipl_phase_indexer import (
@@ -46,7 +47,11 @@ class CandidatePipeline:
         self.device   = device  # None = auto (cuda if available, else cpu)
 
     def run(self) -> Tuple[List[EvaluationResult], dict, dict]:
-        seed  = self.seed
+        # Seed normalisation — map any custom subject/environment/resource
+        # fields the user passed into the canonical kernel schema before
+        # background inference. Without this, novel field names (e.g.
+        # "cognitive_load" instead of "stress_level") are silently ignored.
+        seed, seed_trace = normalize_seed(self.seed)
         bg    = infer_problem_background(seed)
         field = encode_group_field(seed)
 
@@ -60,6 +65,15 @@ class CandidatePipeline:
             steps=self.steps, top_k=self.top_k, dt=self.dt,
             device=self.device,
         )
+
+        # Expose normalisation trace so callers can audit which custom
+        # seed fields were routed / aliased / unmatched.
+        hydro["seed_normalisation"] = {
+            "preserved":  seed_trace.preserved,
+            "aliased":    seed_trace.aliased,
+            "routed":     seed_trace.routed,
+            "unmatched":  seed_trace.unmatched,
+        }
 
         # Add seed IPL to hydro (routing context for oracle/report consumers)
         hydro["ipl_seed"] = ipl_seed
