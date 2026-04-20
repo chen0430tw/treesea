@@ -681,7 +681,10 @@ def unified_step(
 
     # Resolution-adaptive diffusivity: Kh scales as (dx/_DX_REF)^2 so that the
     # diffusion CFL number Kh*dt/dx^2 is constant regardless of grid spacing.
-    _res_scale = (dx / _DX_REF) ** 2
+    # Cast _res_scale to float32 to prevent numpy from promoting the Kh/Kt/Kq
+    # float32 arrays to float64 via scalar multiplication (mixed-precision
+    # divergence vs the torch path, which keeps tensor dtype).
+    _res_scale = np.float32((dx / _DX_REF) ** 2)
     Kh    = carr["Kh"]   [:,None,None] * _res_scale
     Kt    = carr["Kt"]   [:,None,None] * _res_scale
     Kq    = carr["Kq"]   [:,None,None] * _res_scale
@@ -727,11 +730,17 @@ def unified_step(
     du += dt * nu * (state.obs_u[None] - u_a)
     dv += dt * nu * (state.obs_v[None] - v_a)
 
-    new_h = np.clip(_ENG.smooth(h_a + dh, 0.06), BASE_H-500.0, BASE_H+500.0)
-    new_T = np.clip(_ENG.smooth(T_a + dT, 0.05), 250.0, 320.0)
-    new_q = np.clip(_ENG.smooth(q_a + dq, 0.05), 1e-5,  0.030)
-    new_u = np.clip(_ENG.smooth(u_a + du, 0.04), -40.0, 40.0)
-    new_v = np.clip(_ENG.smooth(v_a + dv, 0.04), -40.0, 40.0)
+    # Each dh/dT/dq/du/dv accumulator picks up float64 from Python-scalar
+    # multiplications (dt, 0.55, BASE_H, …) regardless of the input float32
+    # arrays. Force back to float32 at each state-update boundary so the
+    # numpy path's compound precision stays aligned with _torch_unified_step,
+    # which preserves tensor dtype through scalar ops natively. Without
+    # this, numpy and torch diverge by O(1e-2) after 300 steps.
+    new_h = np.clip(_ENG.smooth(h_a + dh, 0.06), BASE_H-500.0, BASE_H+500.0).astype(np.float32)
+    new_T = np.clip(_ENG.smooth(T_a + dT, 0.05), 250.0, 320.0).astype(np.float32)
+    new_q = np.clip(_ENG.smooth(q_a + dq, 0.05), 1e-5,  0.030).astype(np.float32)
+    new_u = np.clip(_ENG.smooth(u_a + du, 0.04), -40.0, 40.0).astype(np.float32)
+    new_v = np.clip(_ENG.smooth(v_a + dv, 0.04), -40.0, 40.0).astype(np.float32)
 
     # Spatial statistics — feed back into UMDST to couple field diversity to dynamics
     h_std    = np.std(new_h, axis=(-2, -1)) / BASE_H          # (B,) normalised
