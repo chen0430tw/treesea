@@ -72,6 +72,13 @@ _FAMILY_MOD_GROUP: Dict[str, int] = {
 _UMDST_N_BASELINE = 183.0   # steps for n=15000, rho=0.7 (neutral point)
 _N_OPT            = 20000.0  # alignment fixed point
 _N_SIGMA          = 5000.0   # Gaussian half-width for n_scale envelope
+_UMDST_REF_STEPS  = 300.0    # reference rollout length the UMDST rates were
+                              # calibrated for (td_ai_singularity etc. use ~300).
+                              # Longer rollouts (weather 7-day ≈ 13440 steps)
+                              # need step_scale = _UMDST_REF_STEPS / total_steps
+                              # so phase/stress/instab traverse a consistent
+                              # cumulative range; otherwise instability saturates
+                              # within ~140 steps and phase collapses to 0.
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +202,7 @@ def _umdst_batched_step(
     mod_group,        # (B,) int tensor, 0–5
     spatial_het=None, # (B,) combined spatial heterogeneity signal [0,1]
     wind_rms=None,    # (B,) normalised RMS wind speed [0,2]
+    step_scale: float = 1.0,  # NEW: per-step rate scaling, see _UMDST_REF_STEPS
 ):
     """Vectorised UMDST 1-step. Returns (new_phase, new_stress, new_instab).
 
@@ -250,11 +258,14 @@ def _umdst_batched_step(
     if spatial_het is not None:
         instability_up = instability_up + 0.005 * spatial_het.clamp(0.0, 1.0)
 
-    new_phase  = (phase  + gain
+    # step_scale normalises per-step rate magnitudes so the cumulative
+    # phase/stress/instab trajectory is consistent across rollout lengths.
+    # step_scale=1.0 matches the legacy 300-step calibration exactly.
+    new_phase  = (phase  + step_scale * (gain
                   + 0.20 * precision_gain + 0.16 * coupling_gain
-                  - 0.05 * instab - 0.04 * stress).clamp(0.0, 1.0)
-    new_stress = (stress + stress_up - stress_down).clamp(0.0, 1.0)
-    new_instab = (instab + instability_up - instability_down).clamp(0.0, 1.0)
+                  - 0.05 * instab - 0.04 * stress)).clamp(0.0, 1.0)
+    new_stress = (stress + step_scale * (stress_up - stress_down)).clamp(0.0, 1.0)
+    new_instab = (instab + step_scale * (instability_up - instability_down)).clamp(0.0, 1.0)
     return new_phase, new_stress, new_instab
 
 
@@ -622,8 +633,15 @@ def unified_step(
     dx: float,
     dy: float,
     progress: float = 0.5,
+    total_steps: Optional[int] = None,
 ) -> UnifiedState:
-    """One unified step on CPU numpy. All B candidates simultaneously."""
+    """One unified step on CPU numpy. All B candidates simultaneously.
+
+    total_steps: full rollout length. Used to derive step_scale so UMDST
+    phase/stress/instab rate updates stay consistent across short TD
+    judgment rollouts (~300 steps) and long weather rollouts (>10⁴ steps).
+    None → legacy behaviour (step_scale=1.0).
+    """
     h, T, q, u, v = state.h, state.T, state.q, state.u, state.v
     phase, stress, instab = state.phase, state.stress, state.instability
     topo = state.topography[None]
@@ -691,6 +709,7 @@ def unified_step(
     spatial_het = np.clip(0.40*h_std + 0.30*T_std + 0.20*q_std + 0.10*wind_rms, 0.0, 1.0)
 
     # UMDST — per-family coefficients + per-family gain modifier
+    step_scale = float(_UMDST_REF_STEPS / total_steps) if total_steps else 1.0
     new_phase  = np.empty_like(phase)
     new_stress = np.empty_like(stress)
     new_instab = np.empty_like(instab)
@@ -744,9 +763,10 @@ def unified_step(
         id_ = 0.008 * lt_i
 
         new_phase[i]  = max(0.0, min(1.0,
-            ph_i + gain_i + 0.20*prec_g + 0.16*coup_g - 0.05*ins_i - 0.04*stress_i))
-        new_stress[i] = max(0.0, min(1.0, stress_i + su - sd))
-        new_instab[i] = max(0.0, min(1.0, ins_i + iu - id_))
+            ph_i + step_scale * (
+                gain_i + 0.20*prec_g + 0.16*coup_g - 0.05*ins_i - 0.04*stress_i)))
+        new_stress[i] = max(0.0, min(1.0, stress_i + step_scale * (su - sd)))
+        new_instab[i] = max(0.0, min(1.0, ins_i + step_scale * (iu - id_)))
 
     return UnifiedState(
         h=new_h, T=new_T, q=new_q, u=new_u, v=new_v,
@@ -766,8 +786,13 @@ def _torch_unified_step(
     dx: float,
     dy: float,
     progress: float = 0.5,
+    total_steps: Optional[int] = None,
 ) -> UnifiedState:
-    """One unified step on GPU. All B candidates simultaneously."""
+    """One unified step on GPU. All B candidates simultaneously.
+
+    total_steps: see unified_step docstring. Passed through to
+    _umdst_batched_step as step_scale = _UMDST_REF_STEPS / total_steps.
+    """
     eng = _TORCH_ENG
     h, T, q, u, v = state.h, state.T, state.q, state.u, state.v
     phase, stress, instab = state.phase, state.stress, state.instability
@@ -839,11 +864,13 @@ def _torch_unified_step(
 
     op  = (new_h.mean(dim=(-2,-1)) / BASE_H).clamp(0.0, 1.2)
     lt  = (new_q.mean(dim=(-2,-1)) / 0.030).clamp(0.0, 1.2)
+    step_scale = float(_UMDST_REF_STEPS / total_steps) if total_steps else 1.0
     new_phase, new_stress, new_instab = _umdst_batched_step(
         op, lt, ac, stress, phase, md, instab, A, rho, sigma, carr["n"],
         carr["g_gain"], carr["g_prec"], carr["g_coup"], carr["g_stress"],
         progress=progress, mod_group=carr["mod_group"],
         spatial_het=spatial_het, wind_rms=wind_rms,
+        step_scale=step_scale,
     )
 
     return UnifiedState(
@@ -877,7 +904,8 @@ def unified_rollout(
     phase_list = []
     for s in range(steps):
         progress = min(1.0, (step_offset + s + 1) / total_steps)
-        state = unified_step(state, carr, dt, dx, dy, progress=progress)
+        state = unified_step(state, carr, dt, dx, dy,
+                              progress=progress, total_steps=total_steps)
         phase_list.append(state.phase.copy())
     phase_series = np.stack(phase_list, axis=1)   # (B, steps)
     return state, phase_series
@@ -899,7 +927,8 @@ def _torch_rollout(
     phase_list = []
     for s in range(steps):
         progress = min(1.0, (step_offset + s + 1) / total_steps)
-        state = _torch_unified_step(state, carr, dt, dx, dy, progress=progress)
+        state = _torch_unified_step(state, carr, dt, dx, dy,
+                                     progress=progress, total_steps=total_steps)
         phase_list.append(state.phase)
     phase_series = torch.stack(phase_list, dim=1)  # (B, steps)
     return state, phase_series
@@ -930,22 +959,33 @@ def score_candidates(
                       + np.maximum(0.0, final.instability - 0.8))
     repeatability  = np.maximum(0.0, 1.0 - (variance_proxy + 0.5 * final.instability))
 
-    # E_cons proxy: per-component normalised field error (same idea as before
-    # but now feeding into p_blow rather than directly into the score).
-    def _norm(x):
-        lo, hi = x.min(), x.max()
-        return (x - lo) / (hi - lo + 1e-12)
+    # Field error — use ABSOLUTE obs-relative normalisation (not min-max over
+    # the batch). Min-max amplifies ε-noise into [0,1] when candidates all
+    # converge, producing false discrimination signal. Absolute normalisation
+    # against obs RMS gives a physically meaningful magnitude.
+    def _abs_norm(err, ref_var):
+        return err / (ref_var + 1e-12)
 
     h_err = ((final.h - final.obs_h[None])**2).mean(axis=(1, 2))
     T_err = ((final.T - final.obs_T[None])**2).mean(axis=(1, 2))
     q_err = ((final.q - final.obs_q[None])**2).mean(axis=(1, 2))
     w_err = ((final.u - final.obs_u[None])**2
              + (final.v - final.obs_v[None])**2).mean(axis=(1, 2))
-    e_cons = (_norm(h_err)*0.35 + _norm(T_err)*0.30
-              + _norm(q_err)*0.20 + _norm(w_err)*0.15)
+    h_ref = float(final.obs_h.var())
+    T_ref = float(final.obs_T.var())
+    q_ref = float(final.obs_q.var())
+    w_ref = float((final.obs_u**2 + final.obs_v**2).mean())
+    e_cons = (_abs_norm(h_err, h_ref)*0.35 + _abs_norm(T_err, T_ref)*0.30
+              + _abs_norm(q_err, q_ref)*0.20 + _abs_norm(w_err, w_ref)*0.15)
+
+    # Direct field-fit evidence in [0, 1] — candidates whose final state
+    # matches obs score higher. Unlike phase_max (UMDST-abstract), this is
+    # a physics-grounded signal that stays sharp even when phase dynamics
+    # are dampened (e.g. long weather rollouts with step_scale < 1).
+    field_fit = 1.0 / (1.0 + e_cons)
 
     # p_blow: logistic blow-up risk (no prev trajectory → impact term = 0)
-    raw    = (2.2 * e_cons
+    raw    = (2.2 * np.minimum(e_cons, 10.0)   # clip runaway e_cons
               + 1.6 * final.stress
               + 1.9 * final.instability
               + 0.8 * variance_proxy * 8.0
@@ -957,6 +997,7 @@ def score_candidates(
 
     U = variance_proxy + disagree_proxy + ood_proxy
     score = (1.80 * phase_max
+             + 0.70 * field_fit        # NEW: direct forecast-evidence weight
              - 1.35 * p_blow
              - 0.55 * n_penalty
              - 0.80 * U
@@ -1143,6 +1184,48 @@ def run_tree_diagram(
         ))
 
     return top_results, hydro
+
+
+# ---------------------------------------------------------------------------
+# Forecast-evidence interface — internal replacement for the outer-script
+# day-1 score_state loop that previously computed weather_alignment inputs.
+# ---------------------------------------------------------------------------
+def forecast_evidence(state: UnifiedState) -> np.ndarray:
+    """Per-candidate forecast-skill evidence in [0, 1].
+
+    Computed from the field-wise RMS error relative to state.obs_*,
+    normalised by the obs field's own amplitude (absolute, not min-max
+    batch-relative). Higher = better fit.
+
+    Used by attach_weather_alignment to derive weather_score /
+    weather_alignment / final_balanced_score from a post-rollout
+    UnifiedState directly — no dependence on the caller computing
+    their own scoring function.
+    """
+    def _np(x):
+        return x.cpu().numpy() if hasattr(x, "cpu") else np.asarray(x)
+
+    h    = _np(state.h);     obs_h = _np(state.obs_h)
+    T    = _np(state.T);     obs_T = _np(state.obs_T)
+    q    = _np(state.q);     obs_q = _np(state.obs_q)
+    u    = _np(state.u);     obs_u = _np(state.obs_u)
+    v    = _np(state.v);     obs_v = _np(state.obs_v)
+
+    h_err = np.sqrt(((h - obs_h[None]) ** 2).mean(axis=(-2, -1)))
+    T_err = np.sqrt(((T - obs_T[None]) ** 2).mean(axis=(-2, -1)))
+    q_err = np.sqrt(((q - obs_q[None]) ** 2).mean(axis=(-2, -1)))
+    w_err = np.sqrt(((u - obs_u[None]) ** 2
+                     + (v - obs_v[None]) ** 2).mean(axis=(-2, -1)))
+
+    h_amp = float(np.std(obs_h)) + 1e-6
+    T_amp = float(np.std(obs_T)) + 1e-6
+    q_amp = float(np.std(obs_q)) + 1e-9
+    w_amp = float(np.sqrt(np.mean(obs_u ** 2 + obs_v ** 2))) + 1e-3
+
+    total = (0.35 * (h_err / h_amp) + 0.30 * (T_err / T_amp)
+             + 0.20 * (q_err / q_amp) + 0.15 * (w_err / w_amp))
+    evidence = 1.0 / (1.0 + total)
+    return np.asarray(evidence, dtype=np.float64)
 
 
 # ---------------------------------------------------------------------------
