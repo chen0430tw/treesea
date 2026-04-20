@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from tree_diagram.pipeline.candidate_pipeline import CandidatePipeline
 from tree_diagram.core.problem_seed import ProblemSeed
-from tree_diagram.core.seed_normalizer import normalize_seed
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -108,25 +107,21 @@ def run_normalized(label: str, raw_seed: ProblemSeed):
     print(f"[{label}] normalize({raw_seed.title})")
     print(f"{'=' * 70}")
 
-    normalized, trace = normalize_seed(raw_seed)
-
-    print(f"Normalization trace:")
-    print(f"  preserved: {sum(len(v) for v in trace.preserved.values())} fields")
-    print(f"  aliased:   {len(trace.aliased)}")
-    print(f"  routed:    {len(trace.routed)}")
-    print(f"  unmatched: {len(trace.unmatched)}  {trace.unmatched if trace.unmatched else ''}")
-    print(f"  merged:    {trace.merged_fields}")
-    print()
-    print(f"Post-normalize kernel-field values:")
-    for sec in ("subject", "environment", "resources"):
-        vals = getattr(normalized, sec)
-        if vals:
-            print(f"  {sec}: {dict(sorted(vals.items()))}")
-
+    # CandidatePipeline now runs normalize_seed() internally at entry
+    # (see pipeline/candidate_pipeline.py:53). Pass the raw custom-field
+    # seed directly — the trace is exposed via hydro["seed_normalisation"].
     pipe = CandidatePipeline(
-        seed=normalized, top_k=5, NX=32, NY=24, steps=60, dt=45.0, n_workers=1,
+        seed=raw_seed, top_k=5, NX=32, NY=24, steps=60, dt=45.0, n_workers=1,
     )
     top, hydro, oracle = pipe.run()
+
+    trace = hydro.get("seed_normalisation", {})
+    print(f"Normalization trace (from CandidatePipeline):")
+    print(f"  preserved: {sum(len(v) for v in trace.get('preserved', {}).values())} fields")
+    print(f"  aliased:   {len(trace.get('aliased', []))}")
+    print(f"  routed:    {len(trace.get('routed', []))}")
+    unmatched = trace.get('unmatched', [])
+    print(f"  unmatched: {len(unmatched)}  {unmatched if unmatched else ''}")
 
     s0 = top[0]
     score0 = float(getattr(s0, 'final_balanced_score', s0.balanced_score))
