@@ -1,6 +1,7 @@
 from __future__ import annotations
 import itertools
 import math
+import os
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 import numpy as np
@@ -22,6 +23,114 @@ G      = 9.81
 F0     = 8.0e-5
 CP     = 1004.0
 LV     = 2.5e6
+# Mid-level reference pressure and subsaturation cloud-closure threshold
+# (Sundqvist-style RH_crit). Generic kernel parameters — NOT tied to any
+# specific locale's climatology. The rollout condenses when grid-mean q
+# exceeds `q_ref = q_sat(T) * RH_crit`, i.e. cloud onset at a fractional
+# RH rather than full saturation.
+#
+# Two closures are available, selected via `TD_RH_CRIT_MODE` env var:
+#   "fixed"    (default): _MID_RH_CRIT_PCT regardless of T. Simplest
+#              closure, matches the §11.22 baseline.
+#   "variable": RH_crit(T) — smooth monotone tanh ramp, higher at cold
+#              temperatures (air closer to saturation, cloud forms
+#              earlier) and lower at warm (subsidence/mixing headroom).
+#              No spatial dependence in this round (Codex defers
+#              RH_crit(x, y, T) until RH_crit(T) is shown to be strictly
+#              better than constant).
+#
+# Both paths feed the same `_q_ref_mid_500hpa` helper so CPU and torch
+# branches stay identical.
+_P_MID_HPA         = 500.0
+_MID_RH_CRIT_PCT   = 75.0
+
+# RH_crit(T) tanh profile — smooth, monotone decreasing in T, self-bounded
+# between _RH_CRIT_WARM_PCT and _RH_CRIT_COLD_PCT (no clip needed).
+#   At T = _T_MID_CRIT_K:                 rh_crit = (cold + warm) / 2 = 79.0%
+#   At T = _T_MID_CRIT_K - _SCALE_K:      rh_crit ≈ 87.4%   (88% up the ramp)
+#   At T = _T_MID_CRIT_K + _SCALE_K:      rh_crit ≈ 70.6%   (12% up the ramp)
+# Updated 2026-04-21 — third-pass "warm-side-aware" tuning. Previous
+# param set (271.5 / 6 / 92 / 62) tried to be more aggressive by pushing
+# the midpoint cold and widening the asymptote spread, but Taipei's
+# rollout T_a lands around 272-274 K which is on the WARM arm of that
+# curve. Result: warm=62 pulled RH down instead of up (74.4-76.5% vs
+# the conservative 77.1-77.9%). Diagnosis: the lever isn't "colder and
+# steeper", it's "move midpoint to the warm side + lift warm asymptote".
+# So:
+#   - T_MID moved to 273.0 (Taipei T_a 272-274 K now sits near centre)
+#   - warm=68 (was 62): one-notch drying floor, not a cliff
+#   - cold=90 (was 92): bold but not as saturating as 95
+#   - scale=6 retained for sharper response than the 10 K conservative
+#
+# If this overshoots, step back one notch — do NOT revert to the
+# conservative (272.5 / 10 / 85 / 70) or the cold-moved (271.5 / 6 / 92 /
+# 62) sets. Both are known-suboptimal on this rollout.
+_T_MID_CRIT_K          = 273.0
+_RH_CRIT_T_SCALE_K     = 6.0
+_RH_CRIT_COLD_PCT      = 90.0   # asymptote T → cold
+_RH_CRIT_WARM_PCT      = 68.0   # asymptote T → warm
+
+# Module-level mode selector. Read once at import; override via env var
+# for A/B comparison without touching downstream call sites.
+_RH_CRIT_MODE = os.environ.get("TD_RH_CRIT_MODE", "fixed").lower()
+
+
+def _mid_rh_crit_pct(T_K, *, xp, mode: Optional[str] = None):
+    """Return RH_crit (in percent) for the cloud closure at temperature T_K.
+
+    mode:
+      "fixed"    → returns the scalar constant `_MID_RH_CRIT_PCT`.
+      "variable" → returns a smooth tanh ramp in T (same shape as T_K),
+                   bounded in [_RH_CRIT_WARM_PCT, _RH_CRIT_COLD_PCT].
+      None       → uses module-level `_RH_CRIT_MODE` (env-controlled).
+
+    Having `mode` as an explicit parameter means tests can pin a specific
+    closure without monkey-patching the module-level state.
+    """
+    m = (mode or _RH_CRIT_MODE).lower()
+    if m == "variable":
+        z = (T_K - _T_MID_CRIT_K) / _RH_CRIT_T_SCALE_K
+        return _RH_CRIT_WARM_PCT + (_RH_CRIT_COLD_PCT - _RH_CRIT_WARM_PCT) * 0.5 * (1.0 - xp.tanh(z))
+    return _MID_RH_CRIT_PCT
+
+
+def _q_ref_mid_500hpa(T_K, *, xp, rh_pct=None, mode: Optional[str] = None):
+    """Tetens-based reference specific humidity at 500 hPa.
+
+    Composition (matches the three-step encoding used when initial states
+    are built from surface-anchored obs, e.g. td_taipei_forecast lines
+    96-99, but the formula itself is generic):
+
+        e_sat = 6.11 * exp(17.27 * T_C / (T_C + 237.3))   # Tetens (hPa)
+        e     = e_sat * rh_pct / 100                      # apply RH_crit
+        q_ref = 0.622 * e / (P - e)
+
+    Naming note — this is NOT the saturation specific humidity. It is the
+    reference q at a subsaturation threshold. Previous implementation used
+    an ad-hoc `0.0045 * exp(0.060 * (T - 273.15) / 10)` proxy which gave
+    ~63% of q_sat_tetens at T_mid ≈ 272 K, pinning equilibrium RH at
+    ~60-65%. A first-attempt Tetens rewrite that omitted the rh_pct
+    multiplier (i.e. used q_sat directly) overshot equilibrium RH to
+    ~100% because q_src + advection push q up to the condensation
+    threshold and `threshold = q_sat` ⇒ `RH = 100%` by definition.
+
+    Parameters
+    ----------
+    rh_pct : scalar or array, optional
+        Override the RH_crit closure. If None, `_mid_rh_crit_pct(T_K, xp, mode)`
+        is used — which honours either the explicit `mode` arg or the
+        module-level `_RH_CRIT_MODE` env switch.
+    mode : "fixed" | "variable" | None
+        Closure selection (see `_mid_rh_crit_pct`). Ignored when `rh_pct`
+        is supplied directly.
+    xp : np or torch — provides .exp / .tanh and dtype-preserving arithmetic.
+    """
+    if rh_pct is None:
+        rh_pct = _mid_rh_crit_pct(T_K, xp=xp, mode=mode)
+    T_C       = T_K - 273.15
+    e_sat_hPa = 6.11 * xp.exp(17.27 * T_C / (T_C + 237.3))
+    e_hPa     = e_sat_hPa * rh_pct / 100.0
+    return 0.622 * e_hPa / (_P_MID_HPA - e_hPa)
 # Physical domain (fixed geographic extent — resolution set by NX/NY)
 _DOMAIN_X  = 1_500_000.0   # 1 500 km east-west  (metres)
 _DOMAIN_Y  = 1_100_000.0   #  1 100 km north-south (metres)
@@ -734,7 +843,7 @@ def unified_step(
     du += dt * Kh        * _ENG.lap(u_a, dx, dy)
     dv += dt * Kh        * _ENG.lap(v_a, dx, dy)
 
-    sat    = 0.0045 * np.exp(0.060 * (T_a - 273.15) / 10.0)
+    sat    = _q_ref_mid_500hpa(T_a, xp=np)
     excess = np.maximum(q_a - sat, 0.0)
     cond   = 0.20 * excess * hc
     T_eq   = 286.5 - 0.0032 * topo
@@ -908,7 +1017,7 @@ def _torch_unified_step(
     du += dt * Kh        * eng.lap(u_a, dx, dy)
     dv += dt * Kh        * eng.lap(v_a, dx, dy)
 
-    sat    = 0.0045 * torch.exp(0.060 * (T_a - 273.15) / 10.0)
+    sat    = _q_ref_mid_500hpa(T_a, xp=torch)
     excess = torch.clamp(q_a - sat, min=0.0)
     cond   = 0.20 * excess * hc
     T_eq   = 286.5 - 0.0032 * topo

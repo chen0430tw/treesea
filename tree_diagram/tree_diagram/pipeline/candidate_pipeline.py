@@ -22,6 +22,12 @@ from ..oracle.report_builder import ReportBuilder
 from ..llm_bridge.explanation_layer import ExplanationLayer
 
 
+# Pool floor for Vein rerank. Picked so that typical diversity-gated
+# pools (~12–20 survivors after run_tree_diagram's (family, n) gate)
+# are fully reranked before slicing back to the caller's top_k.
+_VEIN_POOL_MIN = 12
+
+
 class CandidatePipeline:
     def __init__(
         self,
@@ -81,10 +87,19 @@ class CandidatePipeline:
         ipl_seed = IPLPhaseIndexer(seed, bg).build_index()
         # ────────────────────────────────────────────────────────────────────
 
+        # Pool >= user top_k so the Vein rerank below sees a stable set
+        # regardless of what the caller requested. Without this, slicing
+        # by balanced_score to `self.top_k` before rerank lets top_k=3
+        # vs top_k=5 enter the expert ensemble with different subsets
+        # and flip top[0] non-physically (VeinletExpert.score is per-
+        # candidate, so the instability is selection-set, not scoring).
+        # Post-rerank we slice back down to self.top_k — prefix-consistent
+        # because the rerank ordering is identical across top_k values.
+        pool_k = max(self.top_k, _VEIN_POOL_MIN)
         top_results, hydro = run_tree_diagram(
             seed, bg,
             NX=self.NX, NY=self.NY,
-            steps=self.steps, top_k=self.top_k, dt=self.dt,
+            steps=self.steps, top_k=pool_k, dt=self.dt,
             device=self.device,
         )
 
@@ -99,6 +114,27 @@ class CandidatePipeline:
 
         # Add seed IPL to hydro (routing context for oracle/report consumers)
         hydro["ipl_seed"] = ipl_seed
+
+        # ── Vein rerank on the full pool, then slice to user top_k ──────────
+        # Moved here (before IPL/CBF/UTM) so every downstream layer sees the
+        # same `top_results` the caller will see. Previously rerank ran after
+        # IPL/CBF with the already-sliced list, which made both (a) IPL/CBF
+        # outputs depend on whether rerank would later promote something and
+        # (b) top[0] depend on slice size. Now the invariants are clean:
+        #   * rerank ordering is a pure function of the pool (top_k-free)
+        #   * IPL / CBF / backbone / UTM all see the final rerank order
+        pool_tri_scores    = compute_tri_vein_batch(top_results)
+        pool_expert_scores = VeinletEnsemble().score_all(pool_tri_scores)
+        paired_pool = sorted(
+            zip(top_results, pool_expert_scores),
+            key=lambda x: x[1].adjusted,
+            reverse=True,
+        )
+        top_results   = [r  for r, _  in paired_pool][:self.top_k]
+        sliced_expert = [es for _, es in paired_pool][:self.top_k]
+        for r, es in zip(top_results, sliced_expert):
+            r.final_balanced_score = round(es.adjusted, 6)
+        # ────────────────────────────────────────────────────────────────────
 
         # ── IPL Layer (Layer 2): post-eval index over evaluated candidates ───
         # EvaluationResult now carries REAL breakdown components:
@@ -191,24 +227,12 @@ class CandidatePipeline:
         hydro["cbf_allocation"] = aggregate_cbf(cbf_metrics, {})
         # ────────────────────────────────────────────────────────────────────
 
-        # ── Vein layer: tri-channel scoring + family-expert re-ranking ──────
-        tri_scores    = compute_tri_vein_batch(top_results)
-        ensemble      = VeinletEnsemble()
-        expert_scores = ensemble.score_all(tri_scores)
-
-        # Re-rank by expert-adjusted composite score
-        paired = sorted(
-            zip(top_results, expert_scores),
-            key=lambda x: x[1].adjusted,
-            reverse=True,
-        )
-        top_results = [r for r, _ in paired]
-
-        # Write expert-adjusted score back into final_balanced_score
-        for r, es in zip(top_results, [e for _, e in paired]):
-            r.final_balanced_score = round(es.adjusted, 6)
-
-        # Backbone: low-rank diversity-aware branch summary
+        # ── Vein layer: diagnostics on the post-rerank top-K slice ──────────
+        # Actual rerank happened upstream on the wider pool (pool_k), so
+        # here we only compute per-candidate tri scores over the final
+        # top-K for backbone / stats / pareto diagnostics. These are
+        # per-candidate absolute metrics; no further reordering happens.
+        tri_scores = compute_tri_vein_batch(top_results)
         backbone = VeinBackbone.from_results(top_results, top_k=min(8, len(top_results)))
         hydro["vein_backbone"] = backbone.to_dict()
         hydro["vein_stats"]    = tri_vein_stats(tri_scores)
