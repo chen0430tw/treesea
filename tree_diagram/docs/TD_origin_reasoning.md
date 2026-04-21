@@ -2003,6 +2003,362 @@ if _TORCH_OK and isinstance(b, torch.Tensor) and b.dim() >= 1 and b.shape[0] == 
 
 ---
 
+## 11.21 选择集依赖 bug — Vein rerank 让 top[0] 随 top_k 翻转（2026-04-20）
+
+### 症状
+
+同一个 seed、同一份物理演算，单纯把 `CandidatePipeline(top_k=3)` 换成 `top_k=5` 就能让 `top[0]` 整颗候选翻过来。具体表现（nano5 CUDA，Q3A/Q3B 对照）：
+
+| 设定 | top_k=3 Δscore | top_k=5 Δscore |
+|------|---------------|----------------|
+| 旧代码 | +0.52（判成 singularity） | -0.008（判成 non-singularity） |
+
+用户端看到的就是 `td_ai_singularity.py` 下午跑是 "NOT singularity"，晚上调了个参数就变成 "IS singularity"。物理没变，阈值没变，排序结果却能翻。
+
+### 原因（定位过程）
+
+1. 一开始怀疑 `VeinletEnsemble.score_all(tri_scores)` 内部有 "当前批次归一化"。→ 读了 `vein/veinlet_experts.py`：`VeinletExpert.score(tri)` 只用单个 tri 和自己的常数，**per-candidate 绝对打分，没有交叉归一化**。
+2. 再读 `vein/tri_vein_kernel.py::compute_tri_vein`：同样 per-candidate，只用 `EvaluationResult` 的自身字段。
+3. 读 `core/worldline_kernel.py::run_tree_diagram` 末尾（line 1390-1397）：
+   ```python
+   reduced_idx = sorted(group_best.values(),
+                         key=lambda j: scores[j], reverse=True)
+   top_idx = reduced_idx[:top_k]
+   ```
+   **这里才是源头。** `run_tree_diagram` 按 `balanced_score` 排序后直接 `[:top_k]` 切片，然后 `candidate_pipeline.py` 再用 vein expert 的 `adjusted` 重排这个切片。
+
+### 真·根因：选择集依赖，不是打分依赖
+
+打分函数是纯的（per-candidate 绝对尺度），但**排序基准在两层之间切换**：
+
+- 第一层（`run_tree_diagram`）：按 balanced_score 排序 → 切到 `top_k`
+- 第二层（`candidate_pipeline`）：按 adjusted（vein）重排该切片
+
+当两个基准不一致时，"先切后重排" 就会让 `top[0]` 依赖于切片大小：
+
+- top_k=3：切出 balanced-top-3 → 重排 → 赢家 = max(adjusted) in {1,2,3}
+- top_k=5：切出 balanced-top-5 → 重排 → 赢家 = max(adjusted) in {1,2,3,4,5}
+
+如果第 4 或第 5 名（按 balanced）的 adjusted 比前 3 名都高，`top[0]` 就翻。这是结构性 bug，跟物理一点关系没有。
+
+### 修复（D:\treesea\tree_diagram\tree_diagram\pipeline\candidate_pipeline.py）
+
+核心原则：**rerank 必须在稳定的池上做，然后再切片**。
+
+```python
+# 模块常量
+_VEIN_POOL_MIN = 12
+
+# run 方法里
+pool_k = max(self.top_k, _VEIN_POOL_MIN)
+top_results, hydro = run_tree_diagram(..., top_k=pool_k, ...)
+
+# Vein rerank 在池上做
+pool_tri_scores    = compute_tri_vein_batch(top_results)
+pool_expert_scores = VeinletEnsemble().score_all(pool_tri_scores)
+paired_pool = sorted(zip(top_results, pool_expert_scores),
+                     key=lambda x: x[1].adjusted, reverse=True)
+# 切到用户要求的 top_k
+top_results   = [r for r, _ in paired_pool][:self.top_k]
+sliced_expert = [es for _, es in paired_pool][:self.top_k]
+for r, es in zip(top_results, sliced_expert):
+    r.final_balanced_score = round(es.adjusted, 6)
+```
+
+关键顺序变化：**vein rerank 从 IPL/CBF 后面移到 IPL/CBF 前面**。这样 IPL/CBF/UTM 全都看到最终 order 后的 `top_results`，下游每一层的输入都一致。旧代码让 IPL/CBF 看到 pre-rerank 的 top_results，UTM 看到 post-rerank 的 top_results，中间层次的状态是不连续的。
+
+### 验收
+
+| 设定 | top[0] family/template | balanced | adjusted |
+|------|----------------------|----------|----------|
+| Q3A top_k=3 | batch/batch_route | -0.2368 | +0.2895 |
+| Q3A top_k=5 | batch/batch_route | -0.2368 | +0.2895 |
+| Q3A top_k=8 | batch/batch_route | -0.2368 | +0.2895 |
+| Q3B top_k=3 | batch/batch_route | +0.3181 | +0.2244 |
+| Q3B top_k=5 | batch/batch_route | +0.3181 | +0.2244 |
+| Q3B top_k=8 | batch/batch_route | +0.3181 | +0.2244 |
+
+**跨 top_k 完全一致** — 既是 top[0] 身份一致，也是分数 bit-identical。之所以 bit-identical，是因为 pool_k = `max(user, 12)` ≥ 实际 pool 大小时，重排序是同一个池子的前缀，prefix-consistency 直接给出确定性。
+
+- `pytest tree_diagram/tests/` → 54/54 pass，没有回归 `_merge_states`/diversity gate/ScoreBreakdown/weather phase 任何一条已有 fix。
+- `td_ai_singularity.py` 默认 top_k=5：Q3A 与 Q3B 都是 zone=transition，Δscore=-0.065 → 正确判成 NOT singularity。
+
+### 教训
+
+1. **"per-candidate 打分 + 切片重排" 是看起来像稳定其实不稳定的组合**。打分是绝对尺度就掉以轻心，忽略了上游切片用的是另一个尺度 → 选择集依赖。
+2. **Codex 一开始给的诊断方向写错了（说是 score_all 内部归一化），但症状描述对**。不要因为诊断细节错了就推翻整个方向，读代码定位真·机制。
+3. **只要存在 "两个排序基准在不同层之间切换"，就是隐性 bug 温床**。这类问题不会在单元测试触发（因为 pool 足够大时一切正常），只有在 top_k 被用户主动改小时才暴露。
+4. **`§11.20 _merge_states` 是 "函数自身行为不对"，§11.21 是 "函数各自都对，但层间契约不对"**。两种 bug 类型完全不同，后者更难找，因为每层单独看都没错。
+5. 所有 "rank at layer A, re-rank at layer B" 的模式都该加一条不变量测试：**同一个输入下，B 的输出对 A 的切片大小应该 prefix-consistent**。这是 TD 项目 §11.17 四层验收标准里 Layer-2 (Numerics) 的一个具体实例。
+
+---
+
+## 11.22 湿度饱和基线 — 术语误读导致实施语义错一层（2026-04-21）
+
+### 症状
+
+Taipei 7 天 forecast 的 `RH_mean` 卡在 **61-66%**（台北 4 月末常态应在 70-85%）。T2m / P / wind10 / phase 都在合理区间，单独湿度偏干 ~15%。
+
+### 根因（Codex 的诊断）
+
+`worldline_kernel.unified_step` / `_torch_unified_step` 用的 saturation proxy：
+
+```python
+sat = 0.0045 * exp(0.060 * (T - 273.15) / 10.0)
+```
+
+和 `td_taipei_forecast.build_taipei_state` 的编码公式（Tetens + 500 hPa）**语义不一致**。在 T_mid ≈ 272 K 时，这个 proxy 给出 ~0.00447，**低于 Tetens q_sat_500hPa = 0.00707 约 37%**。
+
+`cond = 0.20 * max(q - sat, 0) * hc` 把 q 平衡到 sat。诊断层 `_relative_humidity_midlevel_pct` 用 Tetens 回算 RH：
+
+$$RH = \frac{q_{eq}}{q_{sat,Tetens}} \approx \frac{0.00447}{0.00707} \approx 63\%$$
+
+正好对上输出的 60.6% / 63.7% / 65.0%（hc=0.95 / 1.00 / 1.02 三个主导 family）。
+
+### 修复两步 — 第一步错了
+
+**第一次尝试**：把 sat 改成 Tetens q_sat（100% RH），按 Codex 字面引用 "Tetens-based 500 hPa saturation specific humidity"：
+
+```python
+def _q_sat_mid_500hpa(T_K, *, xp):
+    T_C       = T_K - 273.15
+    e_sat_hPa = 6.11 * xp.exp(17.27 * T_C / (T_C + 237.3))
+    return 0.622 * e_sat_hPa / (500.0 - e_sat_hPa)   # q at 100% RH
+```
+
+**结果：RH 冲到 99.7-100%**。pytest 依然全过（基线 57 passed + 1 skipped，有 torch 环境下 58 passed），T/P/wind/phase 都正常，但湿度完全过冲。
+
+为什么过冲：诊断层 `_relative_humidity_midlevel_pct` 的分母也是 Tetens q_sat。当 kernel 的 `sat` == 诊断层的 `q_sat` 时，q_src + advection 把 q 推到 sat，诊断层一算 `q / q_sat` 必然接近 100%。**不是数值误差，是语义同义化导致比例永远 1.0。**
+
+**第二次修复**：Codex 原话是 "和 `td_taipei_forecast.py:96` 到 `:99` 一致"。这四行是：
+
+```python
+# line 96: Tetens e_sat
+e_sat_mid = 6.11 * exp(17.27 * T_mid_C / (T_mid_C + 237.3))
+# line 97: P
+P_mid_hPa = 500.0
+# line 98: 应用 RH 乘子 ← 第一次漏掉的一行
+e_mid     = e_sat_mid * obs_ref.RH_pct / 100.0
+# line 99: q
+q_taipei  = 0.622 * e_mid / (P_mid_hPa - e_mid)
+```
+
+第一次把这四行口语化成 "Tetens 500 hPa q_sat" → **漏掉 line 98 的 RH 乘子**。补回后：
+
+```python
+_P_MID_HPA       = 500.0
+_MID_RH_CRIT_PCT = 75.0   # Sundqvist-style subsaturation cloud closure
+
+def _q_ref_mid_500hpa(T_K, *, xp, rh_pct=_MID_RH_CRIT_PCT):
+    T_C       = T_K - 273.15
+    e_sat_hPa = 6.11 * xp.exp(17.27 * T_C / (T_C + 237.3))
+    e_hPa     = e_sat_hPa * rh_pct / 100.0
+    return 0.622 * e_hPa / (_P_MID_HPA - e_hPa)
+```
+
+RH 落到 **73.9-75.0%**（对齐 RH_crit=75%）。
+
+### Codex 的二次校正（关键命名 / 语义纠偏）
+
+第二次修复初稿曾把常数命名成 `_MID_RH_REF_PCT` + 注释写 "climatological Taipei 500 hPa reference RH"，helper 仍叫 `_q_sat_mid_500hpa`。Codex 直接打回：
+
+> **worldline_kernel.py 是公用核心，不该写成 Taipei-specific**。
+> - `_MID_RH_REF_PCT` → `_MID_RH_CRIT_PCT`（通用 RH_crit）
+> - helper 名 `_q_sat_mid_500hpa` → `_q_ref_mid_500hpa`：**它不是 q_sat，它是 RH_crit 下的 q_ref**
+> - 不把 obs_ref / seed 传进 kernel — 这是 condensation closure 的模型参数，不是观测同化接口
+> - 空间相关 closure 这轮先不做
+
+最终定稿就是上面贴的版本，对 COVID / Gintama / Resident Evil 等非天气 seed 也是 TD-core-generic。
+
+### 教训
+
+1. **"Tetens q_sat" 是口语简写，不是精确术语**。真正需要的是 **Tetens-based reference q at RH_crit**。前者是 100% 饱和，后者是 subsaturation 云量闭合的阈值。漏掉 RH_crit 乘子，实施语义比规格错一层，pytest / 其他物理量都检测不到。
+2. **用 "function name matches intent" 自检**。叫 `_q_sat_*` 就意味着 `sat` 语义 = 饱和；如果 cond 阈值只在 100% RH 触发，配合 "诊断分母也是 q_sat" 的现实，等于把 RH 上限强行推到 100%。命名撒谎，实现就会跟着撒谎。
+3. **kernel 常数不能写场景 specific**。`_MID_RH_REF_PCT = 75.0` + "climatological Taipei" 注释是 TD-as-generic-core 的违规。subsaturation closure 是**物理方案本身的参数**（通用 RH_crit），不是观测数据（obs.RH）。混淆这两者，换场景会莫名其妙跑偏。
+4. **"把 obs 传进 kernel" 永远要警惕**。observation assimilation 和 closure parameter 看起来都是 "输入数据"，但接口层级完全不同：前者是边界条件 / 状态，后者是模型本身的物理。
+5. **Codex 的 "和 line 96-99 一致" 不是三行 + 最后一行，是四行全要抄**。行级引用 > 口语术语；下次再看到 "和 X 一致" 这种表述，先把 X 的全部引用行展开，再用完整上下文理解 "一致" 的范围。
+
+### 和 §11.20 / §11.21 的对比
+
+| 节 | bug 类型 | 本质 |
+|----|---------|------|
+| §11.20 `_merge_states` | 函数自身分支覆盖不全（torch 路径 silent no-op） | **实现层 bug** |
+| §11.21 Vein rerank top_k | 函数各自都对，但层间排序基准不一致 | **层间契约 bug** |
+| §11.22 湿度饱和基线 | 函数实现匹配语义，但**语义被口语术语压缩**导致规格理解错 | **规格/命名 bug** |
+
+三种 bug 的触发链条完全不同：
+- §11.20 靠 Codex 精准行号定位修好
+- §11.21 靠 Codex 指方向 + 自己读代码改结构修好（Codex 最初诊断方向轻微偏但症状描述对）
+- §11.22 靠 Codex 把规格词 "Tetens q_sat" 反复修正成 "Tetens-based q_ref at RH_crit"，**词错一次就实施偏一层**
+
+后面如果还要接 Codex 的外部诊断，要做一条纪律：**术语名字 / 变量名 / 注释的措辞都要让 Codex 再 review 一次**，不只是公式和数值。
+
+### §11.20 / §11.21 / §11.22 / §11.23 四轮新增回归测试（2026-04-21 本轮收口）
+
+| 测试文件 | 对应章节 | 条数 |
+|---------|---------|-----|
+| `tree_diagram/tests/worldline/test_merge_states.py` | §11.20（torch 分支 silent no-op） | 2（含 1 torch） |
+| `tree_diagram/tests/smoke/test_vein_rerank_stability.py` | §11.21（vein rerank top_k prefix-consistency） | 2 |
+| `tree_diagram/tests/worldline/test_humidity_ref.py` | §11.22（Tetens q_ref at RH_crit） | 5（含 1 torch） |
+| `tree_diagram/tests/worldline/test_rh_crit_variable.py` | §11.23（RH_crit(T) 平滑 tanh closure） | 10（含 1 torch） |
+
+**pytest 基线口径**（按环境分开写）：
+
+- **无 torch**：`70 passed + 3 skipped`（三处 `pytest.importorskip("torch")` 跳过）
+- **有 torch**：`73 passed`
+
+本轮之前的基线是 `54 passed`（§11.19 之前没这些结构 bug 的守门测试）。进入 §11.20-23 四轮收口后**每一轮修复都留了同语义的回归测试**，避免 §11.20/21/22 类型的 bug 再次无声复发。后续 PR 里看到 pytest 统计下降或 skip 数上升，必须定位到具体被绕过的保护。**数字必须带环境前提**（有无 torch）——否则跨人跨机器对不上就是隐性误差。
+
+---
+
+## 11.23 RH_crit(T) 平滑 closure — §11.22 固定常数版的泛化（2026-04-21）
+
+### 定位：这是 enhancement，不是 bug fix
+
+§11.22 把湿度 closure 从 "0.0045*exp 的 ad-hoc proxy" 修到 "Tetens-based q_ref at RH_crit=75%"。那一轮是**纠正湿度物理本身语义不一致**，属于 bug 修复。本节 §11.23 是把 §11.22 的**固定常数 closure 泛化成温度相关的 RH_crit(T)**，属于 closure enhancement，不是继续修 bug。差异：
+
+- §11.22：旧实现与编码层语义不一致 → 必须改
+- §11.23：固定常数在物理上是"零阶"闭合，冷层和暖层用同一个 threshold → 可以更精细，但**不是错**
+
+因此本节对默认行为采取 **"零风险渐进"** 策略：**默认仍是 fixed 75%**，variable 模式通过 env var `TD_RH_CRIT_MODE=variable` 可选启用。
+
+### closure 函数形式（平滑、单调、无分段硬拐点）
+
+```python
+# tree_diagram/core/worldline_kernel.py (variable 模式参数收口后)
+_T_MID_CRIT_K       = 273.0
+_RH_CRIT_T_SCALE_K  = 6.0
+_RH_CRIT_COLD_PCT   = 90.0   # 冷渐近
+_RH_CRIT_WARM_PCT   = 68.0   # 暖渐近
+
+# tanh ramp（核心）：
+z = (T_K - _T_MID_CRIT_K) / _RH_CRIT_T_SCALE_K
+rh_crit = _RH_CRIT_WARM_PCT + (_RH_CRIT_COLD_PCT - _RH_CRIT_WARM_PCT) * 0.5 * (1.0 - xp.tanh(z))
+```
+
+物理直觉：
+- **冷层**（T → 小）：空气容水量低 → 给定 q 更接近饱和 → 云形成更早 → RH_crit 更高
+- **暖层**（T → 大）：有下沉干化和对流混合的余地 → RH_crit 更低
+
+tanh 的好处：
+- **自守边界**：tanh ∈ [-1, 1] 决定 rh_crit ∈ [WARM, COLD]，**不需要显式 clip**
+- **平滑**：任意阶导数连续，不会引入分段硬拐点（§11.23 测试 `test_variable_mode_smooth_no_piecewise_corners` 通过二阶导有界直接守这一条）
+- **对称**：tanh 是奇函数，T_mid ± dT 处的 rh_crit 关于中点等距
+
+### 架构选择：env var 切换，不改外层 API
+
+```python
+_RH_CRIT_MODE = os.environ.get("TD_RH_CRIT_MODE", "fixed").lower()
+
+def _mid_rh_crit_pct(T_K, *, xp, mode=None):
+    m = (mode or _RH_CRIT_MODE).lower()
+    if m == "variable":
+        ...  # tanh ramp
+    return _MID_RH_CRIT_PCT  # scalar 75.0
+```
+
+设计原则：
+- `TD_RH_CRIT_MODE` 是**模块级只读开关**（启动时读一次），不透传进 `CandidatePipeline` / `run_tree_diagram` 的 kwargs。外层脚本完全不需改动。
+- `mode` 参数**显式传入**覆盖 env var——这是给测试用的，让测试能定顶行为不依赖环境。
+- **不把 obs_ref / seed 传进 kernel**。遵守 Codex 的红线："closure parameter ≠ observation assimilation"。
+
+### 参数三档调参历程（warm-side-aware 收口）
+
+variable 模式的参数不是一次就定的。三轮并排数据摊开看调参路径：
+
+| 指标 | FIXED 75% (baseline) | 第一档·保守 ramp<br>272.5 / 10 / 85 / 70 | 第二档·冷移失败<br>271.5 / 6 / 92 / 62 | **第三档·收口**<br>**273.0 / 6 / 90 / 68** |
+|------|---------------------|--------------------------|---------------------------|---------------------------|
+| RH_mean 日均 | 73.9–75.0% | 77.1–77.9% | 74.4–76.5% | **79.8–81.2%** ✅ |
+| T2m 日均 | 23.5–23.9°C | 23.4–23.9°C | 23.5–23.9°C | 23.5–23.9°C |
+| T2m 范围 | 21.8–25.5°C | 21.8–25.5°C | 21.9–25.5°C | 21.9–25.4°C |
+| P | 1010.9–1012.1 hPa | 同 | 同 | 1010.9–1012.1 hPa |
+| Wind10 | 6.5–6.6 m/s @ 246–249° | 同 | 同 | 6.5–6.6 m/s @ 246–249° |
+| Phase day 1→7 | 0.75 → 0.84 单调 | 同 | 同 | 0.75 → 0.84 单调 |
+| 结论 | baseline | 方向对力度不足 | **方向错** | **收口** |
+
+### 第二档失败的诊断（反直觉要紧）
+
+第二档 **271.5 / 6 / 92 / 62** 是在第一档的基础上 "**更冷、更陡、更宽**"——按 "冷层高 / 暖层低" 物理直觉加码。结果 RH 反而从 77.5% 掉到 75.3%，比第一档还低。
+
+为什么：rollout 里 T_a 在 Taipei 4 月末实测条件下大多数落在 **272–274 K**。算两档在这段 T 的 rh_crit：
+
+- 第一档（T_mid=272.5, scale=10）：T=273 → z=0.05 → rh_crit ≈ **77.1%**
+- 第二档（T_mid=271.5, scale=6）：T=273 → z=0.25 → rh_crit ≈ **73.3%**
+
+T_mid 冷移 + scale 收紧 → T_a 落到 **warm 臂衰减区** → warm=62 把 RH 拖下来。物理直觉"冷层更湿、暖层更干"本身没错，但**得配 rollout 的 T 分布**。Taipei 的 T_mid 偏暖侧，往冷移 midpoint 等于把 closure 的工作点推到错的一侧。
+
+### 第三档为什么能收口
+
+第三档 **273.0 / 6.0 / 90 / 68** 修的是方向：
+
+- T_mid 从 271.5 → **273.0**：Taipei T_a (272–274 K) 回到过渡带**中心**，而不是 warm 臂
+- warm_asymptote 从 62 → **68**：即使落到 warm 臂也有 68% 兜底，不会干化过度
+- cold 从 92 → 90：大胆但不至于一推就到 95/饱和
+- scale 保持 6：陡峭度比第一档保守版 10 有更强区分度
+
+三档对照下第三档 RH 79.8-81.2%，稳定落在台北 4 月末常态带 **75-85%** 的中上沿；phase/T/P/wind 四项不退化，全部 bit-稳。**这是"收口"的定义——不是 RH 最高，是物理各项都对且 RH 落在合理带内**。
+
+### 默认模式为什么**不**切到 variable
+
+Codex 的判断（本节作者同意）：`worldline_kernel` 是 **TD 通用核心**，不只服务 Taipei 天气。variable RH_crit(T) 在本轮 Taipei 气象场景（273.0 / 6 / 90 / 68）验证了更合理，不等于它已经在 COVID / Gintama / Resident Evil / Q3A/Q3B 等**非天气 seed** 里泛化验证过。**多场景回归前不切默认**——本轮只证明 "variable 在气象场景比常数版更合理"，保留 fixed 作为稳定基线。
+
+使用纪律：
+- 默认 `TD_RH_CRIT_MODE` unset 或 `=fixed`：走 `_MID_RH_CRIT_PCT = 75%` 常数闭合
+- 气象场景显式启用：`TD_RH_CRIT_MODE=variable py -3.13 td_refit_and_week.py`
+- 非气象 seed 跑 variable 前**必须先做该场景的 A/B 回归**，不许把气象收口参数直接外推
+
+### 跨场景 A/B 回归（2026-04-21 当轮实测）
+
+多场景回归的意思是"variable 模式在非气象 seed 下不应引入隐性行为偏移"。跑了三个代表性非气象 seed：
+
+| Seed | FIXED 关键指标 | VARIABLE 关键指标 | 判定 |
+|------|---------------|-----------------|------|
+| `td_ai_singularity.py`（抽象奇点对照） | Q3A score=0.2737, risk=0.406, zone=transition / Q3B score=0.2478, risk=0.469, zone=transition / Δscore=-0.026 / verdict=NOT singularity | **每一位都一致** | **bit-identical** |
+| `td_covid_2019.py`（真实世界事件） | Pre score=0.2786, risk=0.401, zone=transition / Post score=0.2462, risk=0.434, zone=transition / Δscore=-0.032 / verdict=NOT singularity | **每一位都一致** | **bit-identical** |
+| `td_gintama.py`（虚构混沌） | Pre score=0.2669, risk=0.414, zone=transition / Post score=0.2491, risk=0.472, zone=transition / Δscore=-0.018 / verdict=NOT singularity | **每一位都一致** | **bit-identical** |
+
+**解释**：非气象 seed 的编码层（`default_seed` / COVID/AI/Gintama 各自的 `_build_seed`）不注入强湿度场到 `obs_q` / `state.q`，`unified_step` 里的 cond = `0.20 * max(q - sat, 0) * hc` 项因 excess = 0 几乎不触发。sat 公式从 fixed → variable 的变化在这条物理路径上不传递影响 → 输出 bit-identical。
+
+这结果是 **variable 模式安全性的强证据**：
+- 在它有用的场景（气象），variable 把 RH 从 74% 提到 80%
+- 在它无关的场景（非气象），variable 给出 **bit-identical** 输出，不引入任何隐性偏移
+
+### 为什么仍然**不**切默认
+
+虽然三场景 A/B 全对，还是保持默认 `fixed`：
+
+1. **三个场景 ≠ 所有场景**。treesea 生态里的 9 个项目后续可能引入更多 TD seed 类型，variable 模式的长尾行为未测。
+2. **"bit-identical" 是当前实测，不是数学定理**。if cond 在某个场景因新的 seed 编码方式被激活，variable 的值会立即开始传递。
+3. **切默认的 decision 属于 Codex 层，不是实施层**。Claude 完成多场景 A/B 数据供 Codex 判断，但切换决定等 Codex 基于这份数据做。
+
+规则：**"我验证了就可以切" 是越权**。实施层报告验收数据，切换决定由 Codex + 用户基于多场景覆盖度判断。
+
+### 给未来 RH_crit(x, y, T) 留的接口
+
+如果将来要做空间相关 closure，接口已经就位：
+
+```python
+def _mid_rh_crit_pct(T_K, *, xp, mode=None):
+    m = (mode or _RH_CRIT_MODE).lower()
+    if m == "variable":
+        return _variable_closure(T_K, xp=xp)   # 目前只依赖 T
+    # 未来可加 m == "spatial" 分支：_variable_closure_spatial(T_K, XX, YY, ...)
+    return _MID_RH_CRIT_PCT
+```
+
+Codex 本轮明确 defer：空间项一旦引入就难以判断改善来自 closure 本身还是额外自由度，要先证明 RH_crit(T) 比常数版更好（本节已做），再谈 RH_crit(x, y, T)。
+
+### 教训
+
+1. **Enhancement 要和 bug fix 显式区分**。本节和 §11.22 在代码位置上相邻（都在同一个 helper），但性质不同：§11.22 是"纠错"，§11.23 是"精细化"。混淆两者会让版本管理混乱（bug fix 必须立刻默认启用，enhancement 可以先做可选）。
+2. **默认模式保守比"一次切干净"重要**。variable 在 Taipei 气象场景明显好，但默认仍 fixed——因为 `worldline_kernel` 是跨场景核心。"一个场景验证通过就切默认" 是在把单点证据外推成跨域结论。
+3. **env var 比 API 透传适合做实验开关**。如果把 `rh_crit_mode` 做成 `CandidatePipeline` kwarg，意味着外层所有脚本都要修改调用点——违反 "只改 `worldline_kernel.py`" 的 Codex 红线。env var 让外层脚本零改动就能 A/B。
+4. **测试守门关注"形状"而非"数值"**。`test_rh_crit_variable.py` 里的 10 条测试主要守 tanh 的**性质**（单调、对称、平滑、自守边界），不是守某一组具体数值。三档参数切换过程中（272.5/10/85/70 → 271.5/6/92/62 → 273.0/6/90/68），测试**零改动、零误报**——这正好证明这套测试哲学对 "enhancement 参数迭代" 是对的口径：业务最优值不写死进单元测试，让它跟参数自动走。`test_variable_mode_midpoint_is_midrange` 守的是 "T_mid 处 rh = (cold+warm)/2"——tanh 数学事实，和业务最优值无关。
+5. **注释里的具体数值必须 double-check**。§11.23 初稿注释写了 "cold-side 88% / warm-side 12%"，但 88% 和 12% 是**ramp 位置百分比**（tanh 函数在 ±scale 处已走完 88% / 12% 的 ramp），不是 RH_crit 的绝对值。Codex 审稿时直接抓住这两行——属于**文档数值 bug**，非代码错也非参数错。每次调参重写注释时，**手算一次对应 T 的 rh_crit**，不要抄旧数字。
+6. **物理直觉必须配 rollout 的工作点才有意义**。第二档（271.5 / 6 / 92 / 62）按"冷层更湿、暖层更干"加码却 RH 反降——不是直觉错，是**忽略了 rollout 的 T_a 实际落在哪一侧**。Taipei 4 月末 T_mid 偏暖侧，closure 的过渡中心也得往暖侧靠。下次 tune 别的 closure 参数，**必先确认 rollout 的工作点分布**。
+
+---
+
 ## 13. 记忆锚点（万一这份文档你将来只能读前三行）
 
 如果你只记得一句话，记这句：
