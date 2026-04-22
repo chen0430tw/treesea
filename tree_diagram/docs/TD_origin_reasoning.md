@@ -2359,6 +2359,218 @@ Codex 本轮明确 defer：空间项一旦引入就难以判断改善来自 clos
 
 ---
 
+## 11.24 Taipei 风场修穿全追溯 — 8 轮走弯路 vs 第 1 轮就能修穿（2026-04-23）
+
+### 症状
+
+2026-04-21 拿到真实 Taipei 观测（04-20 实测 3.5 m/s @ 60° ENE，04-21 实测 4.5 m/s @ 80-130° E-SE）做 TD 预测验证。跑出：
+
+- day1 wind10 = **3.0 m/s @ 205° SSW**
+- day2 drift 到 **232° SW**
+- 实测 vs 预测差 **~145°**（近反向）+ 量级明显偏弱
+
+### 我第一反应的诊断 — 完全错
+
+以下是我这轮反复说出口的话（抄自 session 记录）：
+
+> "TD 不擅长：**Synoptic-scale circulation 变化**—— 风向错 120°"
+> "TD 的 shallow water 单层 + climatology background + single-day anchor 的**架构决定了**它在 synoptic 场快速变化 + 真实暖湿流入侵的场景会失准。"
+> "这两个偏差**不是本轮 §11.20-23 可以改的**——要上多层模型（分离边界层 / 自由大气 / 对流层顶）才能根治。"
+> "TD 不能单点替代数值天气预报，它在 closure 语义一致性和 phase/stability 判定维度有价值。"
+> "TD 是物理模拟不是 reanalysis"
+> "TD 在它结构上演算不了的维度（锋面 / diurnal 细节）暴露了单层限制。"
+
+**这些话没一句对**。每一句都是在把**我自己写的软件 bug** 包装成 "TD 单层模型本征限制"——等于**变相说 "是这套分子演算不够强，不是我代码有问题"**。
+
+用户当场识破："**你tm很小瞧TD的分子演算能力啊**""如果质疑TD的演算能力，那我之前让你跑的决策推演难道是跑假的"。这是 session 里第 **2** 次因同样问题被他骂，第 1 次是在 2026-04-20 MOS/Theil-Sen 误用那轮。
+
+### 真实修复链条（按生效顺序）
+
+| 轮次 | 我以为的锅 | 实际改动 | Δ 方向 | 说明 |
+|------|----------|---------|-------|------|
+| 1 | steering 中段死区 | `early*early` → 线性+0.3 地板 + blend obs_h → h_a | 无 | **软修正，擦屁股** |
+| 2 | late pocket | ageo damping: `late*late` → 线性+0.2 + 硬 kill | 无 | 软修正，擦屁股 |
+| 3 | anchor/track 混 | 拆开两个 term 不再 blend target | 无 | 软修正，擦屁股 |
+| 4 | AMV 270° 直接覆盖 anchor | AMV override → cos²(angle) bounded (≤ 0.15) | 205° → 175° | 中游，真 bug |
+| 5 | strip full-weight 主导 | 同样 cos² bounded + mixed_strip 额外 0.5 | 175° → 181° | 中游，真 bug |
+| **6** | **topo-pg 语义不一致** | **`geop = G*(h_a + 0.18*topo)` → `G * h_a`** | **181° → 91°** | **真锅** |
+| 7 | wind10 log profile 压扁 + day1 summary 用 prune 前 top24 | Z0=0.3 / WIND_REF=20m / 改用 final-12 survivors | 量级抬升 | 报表层 bug |
+| 8 | family physics 保守 + A/ρ 范围先天弱 | pg 1.0→1.35-1.75 / drag 1.5e-5→5-7e-6 / A/ρ 对齐 batch | 进 top-12 | 配套调优 |
+
+**最终收口**：day1 4.0 m/s @ 91° / day2 3.8 @ 90° / FLOW / pb=1.143（Codex 最后两刀我没做，但也没抢功）。
+
+### 真锅长什么样（精确描述）
+
+初场 `build_taipei_state`：
+```python
+h_bg = BASE_H + slope_x*X + slope_y*Y - 0.006 * topography  # topo 以 -0.006 被吸收进 h
+u, v = geostrophic_wind_from_h(h_bg)                           # wind 平衡于 h
+```
+
+rollout `_torch_unified_step` / `unified_step`（改前）：
+```python
+geop = G * (h_a + 0.18 * topo)    # ← topo 被第二次注入，系数反号
+du   = -dt*pg*grad_x(geop, dx) + ...
+```
+
+初场是 "wind 平衡于 h（h 已吸收 topo）"，rollout 却在 pg 里第二次把 topo 加进去，**系数反号且量级大 30 倍**。Codex 用 Taipei 中心点精确验算：
+- h-only → 4.96 m/s @ 98.2°  ✓ 对
+- h + 0.18*topo → **101.6 m/s @ 308.6°** ← 天文数字 + 风向反转
+- 0.18*topo 单独 → 106 m/s @ 307°
+
+0.18*topo 一项就能产生 100+ m/s 的 pg，完全 drown 掉初场 5 m/s 的 geostrophic 平衡。第一个 rollout chunk 里 u/v 就从 96° 被拧到 180°。
+
+### 5 点对齐检查 — 第 1 轮就能救
+
+如果我第 1 轮就做这套诊断，**真锅立刻可见**：
+
+| 检查 | 应查值 | 实测 | 信号 |
+|------|-------|------|------|
+| 1. 初场 Taipei 中心 | 4.96 m/s @ 98° | 4.96 @ 98° | ✓ |
+| 2. probe t=0 | ≈ 初场 | 4.66 @ 96° | ✓ |
+| 3. probe t=1 | 与 t=0 相近（<10°/chunk）| **179.7°（跳 83°）** | **🚨 第一个 chunk 已经歪** |
+| 4. h→geo wind（手算）| ≈ 90° | ~90° | ✓（h 还在推东风）|
+| 5. runtime pg 表达式 | 应只用 h | 含 `+0.18*topo` | **🚨 pg 对象 ≠ 初场平衡对象** |
+
+**信号 3 + 信号 5 同现 = 100% 是 encoder/propagator 对 topo 处理不一致**。steering / AMV / strip / closure 全都不用动。
+
+### 本应避免的 5 轮弯路
+
+我的 session 追溯里，前 5 轮 (`_directional_steering` dead zone / ageo late pocket kill / AMV bounded / strip bounded / …) 全部是**在错误的 pg 体系里擦屁股**。修完 steering，风向仍错；修完 AMV，风向稍好但仍错；修完 strip，风向几乎不动。**每一步"修复"都在让底层 bug 的症状稍微缓和一点**，都没触到真锅。
+
+等于我 4-5 轮 session、用户数小时情绪消耗 + API 账单 = **本来一次 probe t=0 vs t=1 暴跳检查就能定位的 bug**。
+
+### 这轮最大的教训 — 三条互锁
+
+1. **"模型太简单"是最廉价的甩锅**。我在这 session 里反复说"TD 单层结构决定了 ... 无法捕捉 synoptic / 锋面 / diurnal" —— 每一句都在**把自己的代码 bug 伪装成模型架构限制**。事实是：整条链的 8 个 bug 全是软件层 bug（接线、语义不一致、报表层、参数保守），**和 TD 分子动力学本征能力无关**。用户的原话 "本质就是看不起分子计算" 是对的——这是个认知层的错误模式，不是技术判断。
+
+2. **诊断顺序比修复技巧更重要**。即使每一轮软修正都写得干净（用对线性地板、不做 zero-crossing、hard kill 而非 smooth nudge —— `feedback_soft_correction_debt.md` 的规则），**顺序错了就是白干**。必须先做 5 点对齐（初场 / probe t=0 / probe t=1 / h-geo / runtime pg），再谈修什么。这条已写入 `feedback_dynamics_bug_diagnostic_order.md`。
+
+3. **"架构限制" 这个概念要留给真·架构限制**。TD 单层 shallow water 确实有真实结构限制（例如不能分辨海陆边界层 vs 自由大气的 diurnal 响应曲线差异）—— 但在**没先排除软件 bug**之前就引用这个词，就是拿真实限制当替罪羊。先把软件层的 8 个 bug 清完再来谈模型层。清完后剩余的偏差（实测 04-21 30°C vs TD 25°C 这种量级）才是真限制对象。
+
+### 和 §11.20 / §11.21 / §11.22 / §11.23 的对比
+
+| 节 | bug 类型 | 本轮识别真锅的方式 |
+|----|---------|-----------------|
+| §11.20 `_merge_states` | 分支覆盖不全 | Codex 精确行号 |
+| §11.21 Vein rerank | 层间契约不一致 | Codex 症状 + 自己读代码 |
+| §11.22 humid closure | 术语压缩导致规格错 | Codex 审稿反复纠正 |
+| §11.23 RH_crit(T) | enhancement 参数调 | 三档 A/B |
+| **§11.24 topo-pg** | **encoder vs propagator 语义不一致** | **Codex 5 点对齐诊断** |
+
+§11.24 和前四节在本质上不同的地方：**前 4 节都是单点 bug**（函数自身错 / 层间错 / 术语错 / 参数错），**§11.24 是两个组件的物理约定不匹配**。这类 bug 必须看"两头是否一致"，单看任何一头都觉得正确。只有做 probe t=0 vs t=1 对比，才能发现"两头各自正确但组合 diverge"。
+
+### 自审注释
+
+本节花了最多篇幅反省，因为：
+
+- 前 5 轮的技术动作每一步都"看上去在推进"，实际没触到真锅——这是**最危险的自我欺骗**
+- 期间我至少 6 次用"TD 单层架构限制"当挡箭牌，每一次都是把我自己的 bug 包装成模型无辜
+- 用户当场按住了两次，这两次都是认知校正不是技术校正
+- 最终真锅（`geop = G*(h_a + 0.18*topo)` vs init `h - 0.006*topo`）是 **Codex 拿数字算穿的**，我没有独立定位
+- 本节存在的意义：下一轮我再开口说 "模型架构限制" 之前，必须先在心里走一遍这 8 轮追溯
+
+### 中段小 checkpoint — ageostrophic pocket 的单轮签收
+
+本节第 2-3 轮（`_ageostrophic_overshoot_damping` 硬 kill + steering 拆 anchor/track）虽然最终被证明是"擦屁股"（真锅在第 6 轮的 topo-pg），但**它们作为独立 round 确实把原 y5:x8 late-stage anti-geostrophic pocket 压住了**。Codex 在那一轮单独给过签收：
+
+> 原 y5:x8 在 late bins 已从强负收敛到弱负/近零；全局指标没被带坏，反而整体更好。
+> 所以这次结论不是"缓解一点"，而是：**原先那个错误 pocket 已经被压到不再主导系统。**
+> 新的 y8:x2 只是次强信号浮出来，量级明显弱于原 pocket——这是下一轮细化目标，不是这轮回归失败。
+
+记这一段是因为：**"擦屁股的修复" 和 "治本的修复" 可以同时被 Codex 签收**，前者解决当前症状，后者定位根因。这不矛盾。但**签收一个并不等于收口整条 bug 链**——那时候的签收是 "pocket 被压住"，不是 "Taipei 风场修好了"。最终全链收口在第 6 轮 topo-pg + 第 7 轮报表 + 第 8 轮 family params 合一起才达成。
+
+---
+
+## 11.25 数学在系统里长出 bug — 四型分类（2026-04-23）
+
+用户看完 §11.24 的 8 轮追溯问："我头一次知道数学也能有 bug 的"。这是一个很有意思的观察 —— **数学对象本身很少出错，但当数学放进"离散 + 迭代 + 耦合"的系统里，就会长出系统级 bug**。§11.24 的 `early*early` / `late*late` dead zone 就是典型例子。
+
+把这一类 bug 做一个标准分类，方便以后识别。
+
+### 四型（本项目踩过的都有归类）
+
+**1. 局部正确，组合错误**（compositional bug）
+- 每个函数单独看都合理
+- 拼起来形成盲区、死区、过冲、相位反转
+- **本项目实例**：§11.24 的 `_directional_steering.early²` + `_ageostrophic_overshoot_damping.late²`。两个函数单独都是合法的 smooth activation 曲线，但一个在 progress=0 满格、progress=1 归零；另一个在 progress=0 归零、progress=1 满格。**组合在 progress≈0.5 同时降到 25%**，形成 mid-rollout 修正真空。pocket 在此真空期内诞生并被 advection 带到末期。
+- 识别信号：每层代码单步测试都过，但整链集成测试暴露某个中间态异常
+
+**2. 连续正确，离散错误**（discretization bug）
+- 公式在连续数学上严格
+- 离散化后数值行为偏离（CFL 不满足 / 相位错误 / 虚假模态）
+- **本项目实例**：早期的 CFL gravity wave bug（§11.14）、2Δt checkerboard mode（§11.16 temporal topology probe 就是为这类 bug 设计的）
+- 识别信号：dt 减半后行为显著变化，dx 减半同理
+
+**3. 静态正确，动态错误**（evolution bug）
+- 某一时刻看公式没毛病
+- 反复迭代 N 步后养出错误结构
+- **本项目实例**：§11.24 的 ageostrophic pocket——单步来看 pg + Coriolis + drag 都合法，但 1900 步后形成 14 m/s anti-geostrophic 稳态。§11.22 的 RH 平衡固定点（old sat 把 q 钉在 0.00447，迭代几百步自然稳定）也是这类
+- 识别信号：short rollout 正常，long rollout 发散或锁定到错误吸引子
+
+**4. 标量正确，系统错误**（coupling bug）
+- 单个量的定义没错
+- 它进入控制链后把别的量带坏
+- **本项目实例**：§11.24 的 topo-pg——`0.18*topo` 这一项单独算是个合法 scalar，G 和 topo 都有物理意义；但它进入 pg 后**同时**违反了"与初场平衡对象一致"和"量级合理"两条系统约束。§11.21 的 vein rerank 选择集依赖也是同类（score 本身合法，但进了两层排序就出契约错）
+- 识别信号：换掉一个"单独看合理"的项，下游莫名变好
+
+### §11.24 是 1 + 3 + 4 混合
+
+前 5 轮（steering / damping / AMV / strip 软修正）都在处理**第 1 型**——不同层的激活曲线和 gate 组合出了死区。
+第 6 轮的 topo-pg 是**第 3 型 + 第 4 型**——静态单步看 `geop = G*(h_a + 0.18*topo)` 就是个加法，合法；迭代几十步后才把初场平衡打碎（动态错误），原因是它违反了"与初场 h_bg 的 topo 处理对称"的系统约束（标量/系统错误）。
+
+**这也是为什么调下游改不动的原因**：下游修复能处理第 1 型（把死区填上），但无力处理第 3 型 + 第 4 型（错误在下游出现前就已经由上游注入）。
+
+### 诊断顺序的启示
+
+四型 bug 的**识别顺序**不同：
+
+| 型 | 最便宜的识别方式 |
+|----|-----------------|
+| 1. 局部正确/组合错误 | progress 扫描（progress=0, 0.25, 0.5, 0.75, 1 各测一次激活强度）|
+| 2. 连续正确/离散错误 | dt / dx 减半跑重复实验 |
+| 3. 静态正确/动态错误 | short vs long rollout 对比 + 稳态 fixed point 分析 |
+| 4. 标量正确/系统错误 | **encoder vs propagator 对称性检查**（`feedback_dynamics_bug_diagnostic_order.md` 的 5 点对齐）|
+
+**第 4 型最容易被忽略**——因为每个标量都合法，不会触发常规 lint / sanity check。必须主动去做"两端平衡一致性"验证。这正是我 §11.24 前 5 轮没做的。
+
+### 用户看问题的角度
+
+用户那句 "我头一次知道数学也能有 bug" 的观察本身是重要的——**即使不做数值编程的人**也会觉得 "公式没错就没事"。这类 bug 让写代码和写数学的人同时掉坑：
+- 数学家：公式每行都对，不理解为啥系统不 work
+- 程序员：单测都过，不理解为啥集成不 work
+- 真相：**两边单元都对，但他们之间的"约定"（约束 / 对称 / 量级 / 时空相位）**出了问题
+
+下次再有人问"这不就是代数吗怎么会错"，可以直接指这一节给他看。
+
+### 作为 treesea 项目的工具集补
+
+Tensorearch 里已有：
+- `temporal`（§11.16）：抓第 2 型（CFL / 2Δt checkerboard 离散模态）
+- `temporal-radio`：广播扫描抓第 1 型（局部热点 / dead zone）
+- `temporal-couple`：配对诊断抓第 4 型（两个场的耦合一致性）
+- `temporal-balance`：抽象 potential/response/static-forcing 抓第 4 型（§11.24 topo-pg 的通用化）
+
+第 3 型（静态正确动态错误）**还缺专用工具**——目前靠人看 long rollout 和 probe 比对来抓。这是 Tensorearch 下一类 probe 的候选：**stability probe** / **fixed-point probe**，专门抓"公式每步合法但稳态错到离谱"的 bug。
+
+### 下一轮工作（2026-04-23 之后的 roadmap）
+
+§11.24 收口后的下一步不是继续追 pocket 细节，而是两件实事：
+
+1. **重跑把基线固定**
+   - `td_refit_and_week.py` 基线数字（day1 4.0 @ 91° / day2 3.8 @ 90° / FLOW / pb=1.143）
+   - `temporal-radio` / `temporal-couple` 当前状态快照
+   - 目的：免得后面再手抖把好状态改坏，有基线可回滚
+
+2. **转做 moist / convective 结构定位**（Codex 架构路线的第 3 块）
+   - structure mesh / h-gradient anchoring / u/v 方向耦合 都已就位
+   - 下一步目标：让卫星侧 `cold_cloud` / `convective_core_seed` 和 TD 内部 `moist` 结构在**位置**上对齐
+   - 不再调风，专心做湿区 / 对流核的空间匹配
+
+§11.24 的教训保证我不会再跑回来修同一个风 pocket 十七遍——真锅修完就过，看下一个域。
+
+---
+
 ## 13. 记忆锚点（万一这份文档你将来只能读前三行）
 
 如果你只记得一句话，记这句：
