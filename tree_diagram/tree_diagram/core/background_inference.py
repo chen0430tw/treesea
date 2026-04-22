@@ -81,12 +81,25 @@ def infer_problem_background(seed: ProblemSeed) -> ProblemBackground:
         dominant_pressures.append("no_dominant_pressure")
 
     # Candidate families
+    #
+    # Keep the original governance / subject families, but also expose the
+    # weather-oriented variants defined in worldline_kernel.  The Taipei weather
+    # forecast stack consumes the same ProblemBackground contract; if these
+    # families are omitted here, the forecast candidate pool can never explore
+    # stronger pressure-gradient or humidity-biased regimes and every survivor
+    # ends up with the same underpowered wind amplitude.
     candidate_families = [
         "batch",
+        "strong_pg",
+        "balanced",
+        "high_mix",
         "network",
+        "humid_bias",
         "phase",
         "electrical",
+        "terrain_lock",
         "ascetic",
+        "weak_mix",
         "hybrid",
         "composite",
     ]

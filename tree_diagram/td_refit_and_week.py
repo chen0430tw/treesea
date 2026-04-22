@@ -11,6 +11,7 @@ No MOS / Theil-Sen / WeatherCalibration regression is used here.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import sys
@@ -25,12 +26,20 @@ sys.path.insert(0, str(HERE))
 
 from td_taipei_forecast import ReferenceObs, build_taipei_state
 from tree_diagram.core.background_inference import infer_problem_background as td_infer_bg
+from tree_diagram.core.cbf_balancer import aggregate_cbf
+from tree_diagram.core.group_field import encode_group_field
+from tree_diagram.core.oracle_output import oracle_summary_abstract
 from tree_diagram.core.problem_seed import ProblemSeed
+from tree_diagram.core.structure_alignment import satellite_alignment_reports_for_fields
+from tree_diagram.core.structure_mesh import build_satellite_structure_mesh, dominant_strip_signal
+from tree_diagram.core.umdst_kernel import Metrics, TDOutputs
 from tree_diagram.core.worldline_kernel import (
     _TORCH_OK,
     _DOMAIN_X as TD_DOMAIN_X,
     _DOMAIN_Y as TD_DOMAIN_Y,
     _carr_to_torch,
+    _subset_carr,
+    _subset_state,
     _state_to_numpy,
     _state_to_torch,
     _torch_rollout,
@@ -51,6 +60,7 @@ from tree_diagram.numerics.weather_bridge import (
     R_WATER_VAPOR,
 )
 from tree_diagram.pipeline.candidate_pipeline import CandidatePipeline
+from tree_diagram.control.utm_hydrology_controller import UTMHydrologyController
 
 try:
     import torch
@@ -61,12 +71,18 @@ OBS_PATH = HERE / "calibration" / "taipei_obs_daily.json"
 TODAY = date(2026, 4, 19)
 TAU_PERSIST_DAYS = 2.0
 EPSILON = R_DRY_AIR / R_WATER_VAPOR
-Z0_URBAN_M = 1.0
+# Taipei station sits in a dense urban basin but not in a true roughness-length
+# regime as high as z0=1 m at the observation footprint. Using z0=1.0 with a
+# 30 m reference still over-damps the already low-level internal steering wind.
+# A mixed urban / coastal roughness z0≈0.3 m keeps the 10 m diagnostic in a
+# realistic city regime while no longer crushing day1/day2 winds by ~30%.
+Z0_URBAN_M = 0.3
 TAIPEI_STATION_ELEV_M = 9.0
 PRESSURE_ENCODER_M_PER_HPA = 8.0
 BL_TOP_ABOVE_SURFACE_M = 1500.0   # subtropical boundary-layer top (AGL)
 BL_EFFECTIVE_LAPSE_K_PER_M = 3.0e-3  # stable subtropical BL lapse, see
                                       # _surface_from_internal() docstring.
+WIND_REF_ABOVE_SURFACE_M = 20.0      # low-level steering reference for 10 m wind
 
 TD_NX = 128
 TD_NY = 96
@@ -80,6 +96,45 @@ TD_CFG = GridConfig(NX=TD_NX, NY=TD_NY, DX=TD_DX, DY=TD_DY, DT=TD_DT, STEPS=TD_S
 TD_XX, TD_YY, _, _ = build_grid(TD_CFG)
 TD_TOPO = build_topography(TD_XX, TD_YY).astype(np.float32)
 TD_CY, TD_CX = TD_NY // 2, TD_NX // 2
+TD_FINAL_TOP_K = 12
+TD_SAT_POOL_TOP_K = 24
+DEFAULT_SATELLITE_STRUCTURE_JSON = HERE / "weather_sat" / "jma_sample" / "processed" / "NC_H09_20260421_1940_R21_FLDK.02801_02401_structure.json"
+DEFAULT_SATELLITE_AMV_JSON = HERE / "weather_sat" / "jma_sample" / "processed" / "NC_H09_20260421_1940_R21_FLDK.02801_02401_amv.json"
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run a 7-day Taipei forecast with optional satellite structure evidence.")
+    parser.add_argument(
+        "--satellite-structure-json",
+        type=Path,
+        default=None,
+        help="Optional Himawari structure JSON to fold into day-1 reranking.",
+    )
+    parser.add_argument(
+        "--satellite-weight",
+        type=float,
+        default=0.35,
+        help="Weight applied to satellite alignment before adding to final day-1 rerank.",
+    )
+    parser.add_argument(
+        "--satellite-amv-json",
+        type=Path,
+        default=None,
+        help="Optional Himawari pseudo-AMV JSON used as a mid-level wind anchor override.",
+    )
+    parser.add_argument(
+        "--final-top-k",
+        type=int,
+        default=TD_FINAL_TOP_K,
+        help="Final survivor count after day-1 rerank.",
+    )
+    parser.add_argument(
+        "--satellite-pool-top-k",
+        type=int,
+        default=TD_SAT_POOL_TOP_K,
+        help="Expanded candidate pool size used before day-1 satellite pruning.",
+    )
+    return parser.parse_args()
 
 
 def _candidate_key(params: dict, family: str) -> tuple:
@@ -147,6 +202,17 @@ def _surface_from_internal(
         nighttime-inversion plus weak daytime mixing average over a day.
     This reduces the total column lapse correction from ~29 K (single layer)
     to ~25 K, aligning T_2m with observed climatology without any regression.
+
+    Wind: unlike T, the TD internal ``u/v`` is *not* a literal 500 hPa wind.
+    ``build_taipei_state()`` seeds ``u/v`` from observed surface wind and
+    geostrophically balances that against ``h``. Treating it as a 5 km wind and
+    then applying a log-profile all the way down to 10 m double-penalises the
+    speed: a 3-5 m/s low-level steering flow gets crushed to ~0.7-0.9 m/s.
+
+    So use a fixed low-level reference height (30 m AGL) for the 10 m neutral
+    log-law reduction. That preserves the intended surface-anchor semantics:
+    internal wind remains a low-level steering wind, while the 10 m diagnostic
+    still gets a modest roughness reduction rather than a full-column one.
     """
     z_mid = max(h_mid_m, surface_elevation_m + 50.0)
     z_2m = surface_elevation_m + 2.0
@@ -179,7 +245,8 @@ def _surface_from_internal(
 
     wind_mid_ms = math.hypot(u_mid, v_mid)
     log_num = math.log((z_10m - surface_elevation_m + Z0_URBAN_M) / Z0_URBAN_M)
-    log_den = math.log((dz_ref + Z0_URBAN_M) / Z0_URBAN_M)
+    dz_wind_ref = min(dz_ref, WIND_REF_ABOVE_SURFACE_M)
+    log_den = math.log((dz_wind_ref + Z0_URBAN_M) / Z0_URBAN_M)
     wind_10m_ms = wind_mid_ms * log_num / max(1.0e-6, log_den)
     wind_dir_deg = (math.degrees(math.atan2(-u_mid, -v_mid)) + 360.0) % 360.0
 
@@ -340,6 +407,160 @@ def _field_fit_scores(
     return 1.0 - composite
 
 
+def _resolve_satellite_structure_json(explicit: Path | None) -> Path | None:
+    if explicit is not None:
+        return explicit if explicit.exists() else None
+    return DEFAULT_SATELLITE_STRUCTURE_JSON if DEFAULT_SATELLITE_STRUCTURE_JSON.exists() else None
+
+
+def _relative_alignment(values: np.ndarray, *, scale: float = 0.10) -> np.ndarray:
+    """Map a candidate-set score vector to [-scale, +scale] with relative spread."""
+    values = np.asarray(values, dtype=np.float64)
+    if values.size == 0:
+        return values.copy()
+    lo = float(values.min())
+    hi = float(values.max())
+    if hi - lo < 1.0e-12:
+        return np.zeros_like(values)
+    centered = 2.0 * ((values - lo) / (hi - lo)) - 1.0
+    return np.clip(scale * centered, -scale, scale)
+
+
+def _satellite_component_scores(reports: list[dict]) -> dict[str, np.ndarray]:
+    component_names = ("cold_cloud", "tbb_gradient_front", "convective_core_seed")
+    out = {name: np.zeros(len(reports), dtype=np.float64) for name in component_names}
+    for idx, report in enumerate(reports):
+        component_scores = report.get("component_scores")
+        if isinstance(component_scores, dict):
+            for name in component_names:
+                out[name][idx] = float(component_scores.get(name, 0.0))
+            continue
+        for item in report.get("alignments", []):
+            sat_kind = str(item["satellite_kind"])
+            if sat_kind in out:
+                out[sat_kind][idx] = float(item["alignment_score"])
+    return out
+
+
+def _satellite_strip_signal(payload_json: Path | dict | None) -> dict | None:
+    if payload_json is None:
+        return None
+    if isinstance(payload_json, Path):
+        payload = json.loads(payload_json.read_text(encoding="utf-8"))
+    else:
+        payload = payload_json
+    mesh = build_satellite_structure_mesh(payload)
+    signal = dominant_strip_signal(mesh)
+    if signal is None:
+        return None
+    signal["strip_count"] = len(mesh.strips)
+    return signal
+
+
+def _resolve_satellite_amv_json(explicit: Path | None) -> Path | None:
+    if explicit is not None and explicit.exists():
+        return explicit
+    if DEFAULT_SATELLITE_AMV_JSON.exists():
+        return DEFAULT_SATELLITE_AMV_JSON
+    return None
+
+
+def _rebuild_hydro_oracle(
+    seed: ProblemSeed,
+    bg,
+    top_results: list,
+    prev_hydro: dict,
+    *,
+    step: int,
+) -> tuple[dict, dict]:
+    """Recompute hydro/oracle on the final survivor set.
+
+    Needed when we expand the initial pool (e.g. 24) and then prune to a final
+    survivor set (e.g. 12) after day-1 evidence. CandidatePipeline.run() hydro
+    reflects the wider pool; this function realigns hydro/oracle with the
+    actual survivors that continue into days 2-7.
+    """
+    hydro = dict(prev_hydro)
+
+    td_list = [
+        TDOutputs(
+            riskfield=[r.risk],
+            curve=[r.field_fit, r.feasibility],
+            graph=[],
+            samples={},
+            meta={
+                "balanced_score": r.balanced_score,
+                "phase_final": (
+                    0.50 * float(r.risk)
+                    + 0.30 * max(0.0, 1.0 - float(r.stability))
+                    + 0.20 * max(0.0, 1.0 - float(r.feasibility))
+                ),
+                "phase_max": (
+                    0.40 * float(r.risk)
+                    + 0.40 * max(0.0, 1.0 - float(r.stability))
+                    + 0.20 * max(0.0, 1.0 - float(r.field_fit))
+                ),
+                "stability": r.stability,
+                "p_blow": r.risk,
+            },
+        )
+        for r in top_results
+    ]
+
+    cbf_metrics = [
+        Metrics(
+            e_cons_mean=min(
+                0.70,
+                0.50 * max(0.0, 1.0 - float(r.field_fit))
+                + 0.50 * max(0.0, 1.0 - float(r.stability)),
+            ),
+            impact_peak=r.nutrient_gain,
+            variance_proxy=max(0.0, 1.0 - float(r.stability)),
+            disagree_proxy=max(0.0, 1.0 - float(r.feasibility)),
+            ood_proxy=float(r.risk),
+            p_blow_max=float(r.risk),
+            phase_max=(
+                0.40 * float(r.risk)
+                + 0.40 * max(0.0, 1.0 - float(r.stability))
+                + 0.20 * max(0.0, 1.0 - float(r.field_fit))
+            ),
+            phase_final=(
+                0.50 * float(r.risk)
+                + 0.30 * max(0.0, 1.0 - float(r.stability))
+                + 0.20 * max(0.0, 1.0 - float(r.feasibility))
+            ),
+            repeatability=float(r.stability),
+        )
+        for r in top_results
+    ]
+    hydro["cbf_allocation"] = aggregate_cbf(cbf_metrics, {})
+
+    utm_ctrl = UTMHydrologyController()
+    metrics_list_for_utm = [
+        {"score": r.balanced_score, "instability": max(0.0, 1.0 - r.stability)}
+        for r in top_results
+    ]
+    utm_adj = utm_ctrl.adjust(
+        top_results,
+        metrics_list=metrics_list_for_utm,
+        utm_p_blow=float(hydro.get("cbf_allocation", {}).get("mean_p_blow", 0.0)),
+        step=step,
+    )
+    hydro["utm_hydro_state"] = utm_adj.hydro_state
+    hydro["utm_state"] = utm_adj.utm_state
+    hydro["utm_main_channel_k"] = len(utm_adj.main_channel_ids)
+    hydro.update(utm_adj.merged_hydro)
+
+    oracle = oracle_summary_abstract(
+        seed,
+        bg,
+        encode_group_field(seed),
+        top_results,
+        hydro,
+    )
+    return hydro, oracle
+
+
 def _build_weather_seed(today_obs_: ReferenceObs, climo_ref_: ReferenceObs, obs_days_: list[dict], today_date: date) -> ProblemSeed:
     T_std = float(np.std([d["T_mean_C"] for d in obs_days_]))
     P_std = float(np.std([d["P_mean_hPa"] for d in obs_days_]))
@@ -410,7 +631,11 @@ def _select_device() -> str:
 
 
 def main() -> int:
+    args = parse_args()
     device = _select_device()
+    satellite_structure_json = _resolve_satellite_structure_json(args.satellite_structure_json)
+    satellite_amv_json = _resolve_satellite_amv_json(args.satellite_amv_json)
+    pool_top_k = args.final_top_k if satellite_structure_json is None else max(args.final_top_k, args.satellite_pool_top_k)
     obs_days = json.loads(OBS_PATH.read_text(encoding="utf-8"))["days"]
 
     climo_T = float(np.mean([d["T_mean_C"] for d in obs_days]))
@@ -428,7 +653,7 @@ def main() -> int:
         wd_deg=climo_wd,
     )
 
-    today_obs = ReferenceObs(T_avg_C=23.8, RH_pct=75.0, P_hPa=1012.3, ws_ms=1.69, wd_deg=44.0)
+    today_obs = ReferenceObs(T_avg_C=25.5, RH_pct=69.0, P_hPa=1012.0, ws_ms=3.5, wd_deg=60.0)
 
     print("=" * 68)
     print("TD CandidatePipeline - weather worldline selection")
@@ -438,11 +663,32 @@ def main() -> int:
     print(f"  phase_instability: {weather_seed.environment['phase_instability']:.3f}")
     print(f"  stress_level:      {weather_seed.subject['stress_level']:.3f}")
     print(f"  output_power:      {weather_seed.subject['output_power']:.3f}")
+    print(f"  candidate_pool:    {pool_top_k} -> {args.final_top_k}")
+    if satellite_structure_json is not None:
+        print(f"  satellite_struct:  {satellite_structure_json.name} (weight={args.satellite_weight:.2f})")
+    amv_anchor_override_uv = None
+    if satellite_amv_json is not None:
+        amv_payload = json.loads(satellite_amv_json.read_text(encoding="utf-8"))
+        amv_u = float(amv_payload["mean_u_ms"])
+        amv_v = float(amv_payload["mean_v_ms"])
+        amv_ws = math.hypot(amv_u, amv_v)
+        amv_wd = (math.degrees(math.atan2(-amv_u, -amv_v)) + 360.0) % 360.0
+        amv_anchor_override_uv = (amv_u, amv_v)
+        print(f"  satellite_amv:     {satellite_amv_json.name} mean={amv_ws:.1f}m/s@{amv_wd:.0f}")
+    satellite_strip_signal = _satellite_strip_signal(satellite_structure_json)
+    if satellite_strip_signal is not None:
+        print(
+            "  satellite_strip:  "
+            f"{satellite_strip_signal['strip_type']} "
+            f"ori={satellite_strip_signal['orientation_deg']:.1f}° "
+            f"w={satellite_strip_signal['weight']:.3f} "
+            f"(n={int(satellite_strip_signal['strip_count'])})"
+        )
 
     t0 = time.time()
     pipeline = CandidatePipeline(
         seed=weather_seed,
-        top_k=12,
+        top_k=pool_top_k,
         NX=TD_NX,
         NY=TD_NY,
         steps=300,
@@ -473,9 +719,36 @@ def main() -> int:
     candidates = [candidate_lookup[k] for k in top_keys]
     carr = td_prepare_candidate_arrays(candidates)
 
-    today_init_state = build_taipei_state(TD_XX, TD_YY, TD_TOPO, TD_CFG, perturbation=-1.0, obs_ref=today_obs)
-    today_obs_state = build_taipei_state(TD_XX, TD_YY, TD_TOPO, TD_CFG, perturbation=0.0, obs_ref=today_obs)
-    climo_obs_state = build_taipei_state(TD_XX, TD_YY, TD_TOPO, TD_CFG, perturbation=0.0, obs_ref=climo_ref)
+    structure_strip_orientation_deg = None if satellite_strip_signal is None else float(satellite_strip_signal["orientation_deg"])
+    structure_strip_weight = 0.0 if satellite_strip_signal is None else float(satellite_strip_signal["weight"])
+    structure_strip_type = None if satellite_strip_signal is None else str(satellite_strip_signal["strip_type"])
+    today_init_state = build_taipei_state(
+        TD_XX, TD_YY, TD_TOPO, TD_CFG,
+        perturbation=-1.0,
+        obs_ref=today_obs,
+        structure_strip_orientation_deg=structure_strip_orientation_deg,
+        structure_strip_weight=structure_strip_weight,
+        structure_strip_type=structure_strip_type,
+        wind_anchor_override_uv=amv_anchor_override_uv,
+    )
+    today_obs_state = build_taipei_state(
+        TD_XX, TD_YY, TD_TOPO, TD_CFG,
+        perturbation=0.0,
+        obs_ref=today_obs,
+        structure_strip_orientation_deg=structure_strip_orientation_deg,
+        structure_strip_weight=structure_strip_weight,
+        structure_strip_type=structure_strip_type,
+        wind_anchor_override_uv=amv_anchor_override_uv,
+    )
+    climo_obs_state = build_taipei_state(
+        TD_XX, TD_YY, TD_TOPO, TD_CFG,
+        perturbation=0.0,
+        obs_ref=climo_ref,
+        structure_strip_orientation_deg=structure_strip_orientation_deg,
+        structure_strip_weight=0.5 * structure_strip_weight,
+        structure_strip_type=structure_strip_type,
+        wind_anchor_override_uv=amv_anchor_override_uv,
+    )
     today_fields = _state_to_fields(today_obs_state)
     climo_fields = _state_to_fields(climo_obs_state)
     init_fields = _state_to_fields(today_init_state)
@@ -508,6 +781,10 @@ def main() -> int:
     step_offset = 0
     daily: list[dict] = []
     day1_alignment_state = None
+    day1_satellite_scores = None
+    day1_satellite_reports = None
+    day1_satellite_components = None
+    pruned_to_final_pool = False
 
     def _read_centers_numpy(state):
         return np.stack(
@@ -699,10 +976,36 @@ def main() -> int:
             dtype=np.float64,
         )
         field_scores = _field_fit_scores(h_field, T_field, q_field, u_field, v_field, blended_fields)
+        satellite_scores = None
+        satellite_reports = None
+        satellite_components = None
+        if day_idx == 0 and satellite_structure_json is not None:
+            satellite_reports = satellite_alignment_reports_for_fields(
+                satellite_structure_json,
+                h_field,
+                T_field,
+                q_field,
+                u_field,
+                v_field,
+            )
+            satellite_scores = np.asarray([float(r["frame_score"]) for r in satellite_reports], dtype=np.float64)
+            satellite_components = _satellite_component_scores(satellite_reports)
+            day1_satellite_scores = satellite_scores.copy()
+            day1_satellite_reports = satellite_reports
+            day1_satellite_components = satellite_components
         summary["weather_fit_mean"] = float(np.mean(weather_scores))
         summary["weather_fit_std"]  = float(np.std(weather_scores))
         summary["field_fit_mean"]   = float(np.mean(field_scores))
         summary["field_fit_std"]    = float(np.std(field_scores))
+        if satellite_scores is not None:
+            summary["satellite_fit_mean"] = float(np.mean(satellite_scores))
+            summary["satellite_fit_std"] = float(np.std(satellite_scores))
+            summary["sat_front_mean"] = float(np.mean(satellite_components["tbb_gradient_front"]))
+            summary["sat_front_std"] = float(np.std(satellite_components["tbb_gradient_front"]))
+            summary["sat_moist_mean"] = float(np.mean(satellite_components["cold_cloud"]))
+            summary["sat_moist_std"] = float(np.std(satellite_components["cold_cloud"]))
+            summary["sat_conv_mean"] = float(np.mean(satellite_components["convective_core_seed"]))
+            summary["sat_conv_std"] = float(np.std(satellite_components["convective_core_seed"]))
 
         daily.append(
             {
@@ -714,6 +1017,9 @@ def main() -> int:
                 "td_native_scores": td_native_scores.copy(),
                 "weather_scores": weather_scores,
                 "field_scores": field_scores,
+                "satellite_scores": satellite_scores,
+                "satellite_reports": satellite_reports,
+                "satellite_components": satellite_components,
             }
         )
         print(
@@ -722,10 +1028,147 @@ def main() -> int:
             f"T2m_mean={summary['T2m_mean']:.1f}C (min={summary['T2m_min']:.1f} max={summary['T2m_max']:.1f}) "
             f"T2m_end={summary['T2m_end']:.1f}C "
             f"wind10_mean={summary['wind10_mean']:.1f}m/s"
+            + (
+                f" sat={summary['satellite_fit_mean']:.3f}+-{summary['satellite_fit_std']:.3f}"
+                f" front={summary['sat_front_mean']:.3f}"
+                f" moist={summary['sat_moist_mean']:.3f}"
+                f" conv={summary['sat_conv_mean']:.3f}"
+                if satellite_scores is not None else ""
+            )
         )
+
+        if day_idx == 0 and satellite_structure_json is not None and not pruned_to_final_pool:
+            attach_weather_alignment(td_top_results, day1_alignment_state)
+            sat_alignments = _relative_alignment(day1_satellite_scores, scale=0.10)
+            sat_front_align = _relative_alignment(day1_satellite_components["tbb_gradient_front"], scale=0.10)
+            sat_moist_align = _relative_alignment(day1_satellite_components["cold_cloud"], scale=0.10)
+            sat_conv_align = _relative_alignment(day1_satellite_components["convective_core_seed"], scale=0.10)
+            for idx, (result, sat_score, sat_align) in enumerate(zip(td_top_results, day1_satellite_scores, sat_alignments)):
+                result.satellite_score = float(sat_score)
+                result.satellite_alignment = float(sat_align)
+                result.satellite_front_score = float(day1_satellite_components["tbb_gradient_front"][idx])
+                result.satellite_moist_score = float(day1_satellite_components["cold_cloud"][idx])
+                result.satellite_convective_score = float(day1_satellite_components["convective_core_seed"][idx])
+                result.satellite_front_alignment = float(sat_front_align[idx])
+                result.satellite_moist_alignment = float(sat_moist_align[idx])
+                result.satellite_convective_alignment = float(sat_conv_align[idx])
+                result.satellite_report = day1_satellite_reports[idx]
+                result.final_balanced_score = round(
+                    float(result.balanced_score)
+                    + float(result.weather_alignment or 0.0)
+                    + float(args.satellite_weight) * float(sat_align),
+                    6,
+                )
+
+            survivor_order = sorted(
+                range(len(td_top_results)),
+                key=lambda i: td_top_results[i].final_balanced_score or td_top_results[i].balanced_score,
+                reverse=True,
+            )[: args.final_top_k]
+            survivor_order = list(survivor_order)
+
+            # Recompute the stored day-1 report on the final survivor subset.
+            # The original summary above is built on the expanded top-24 pool so
+            # satellite pruning has enough diversity to work with. That is
+            # correct for the pruning decision, but it is not the final forecast
+            # product the user sees. If we keep the pre-prune median in
+            # daily[0]["summary"], the day-1 table under-reports Taipei wind by
+            # mixing in candidates that were explicitly discarded. Rebuild the
+            # day-1 summary, score arrays, and day-end auxiliary snapshot on the
+            # final survivor set before printing the forecast table.
+            surv = np.asarray(survivor_order, dtype=np.int64)
+            T2m_cand_mean_surv = T2m_cand_mean[surv]
+            T2m_cand_min_surv = T2m_cand_min[surv]
+            T2m_cand_max_surv = T2m_cand_max[surv]
+            RH_cand_mean_surv = RH_cand_mean[surv]
+            P_cand_mean_surv = P_cand_mean[surv]
+            ws_cand_mean_surv = ws_cand_mean[surv]
+            u_cand_mean_surv = u_cand_mean[surv]
+            v_cand_mean_surv = v_cand_mean[surv]
+            end_centers_surv = end_centers[surv]
+            end_summary_base_surv = _physical_summary_from_centers(
+                end_centers_surv,
+                TAIPEI_STATION_ELEV_M,
+                pressure_anchor_h_mid_m,
+                pressure_anchor_surface_hpa,
+            )
+            end_summary_surv = _apply_diurnal_t2m(end_summary_base_surv, TD_SAMPLES_PER_DAY * 3.0 - 1.5)
+
+            day1_summary = daily[-1]["summary"]
+            day1_summary["T2m_mean"] = float(np.median(T2m_cand_mean_surv))
+            day1_summary["T2m_min"] = float(np.median(T2m_cand_min_surv))
+            day1_summary["T2m_max"] = float(np.median(T2m_cand_max_surv))
+            day1_summary["RH_mean"] = float(np.median(RH_cand_mean_surv))
+            day1_summary["P_mean"] = float(np.median(P_cand_mean_surv))
+            day1_summary["wind10_mean"] = float(np.median(ws_cand_mean_surv))
+            _u_med_surv = float(np.median(u_cand_mean_surv))
+            _v_med_surv = float(np.median(v_cand_mean_surv))
+            day1_summary["wind10_dir_mean"] = (math.degrees(math.atan2(-_u_med_surv, -_v_med_surv)) + 360.0) % 360.0
+            day1_summary["T2m_mean_cand_std"] = float(np.std(T2m_cand_mean_surv))
+            day1_summary["P_mean_cand_std"] = float(np.std(P_cand_mean_surv))
+            day1_summary["T2m_end"] = end_summary_surv["temperature_2m_C"]
+            day1_summary["RH_end"] = end_summary_surv["relative_humidity_pct"]
+            day1_summary["P_end"] = end_summary_surv["surface_pressure_hpa"]
+            day1_summary["wind10_end"] = end_summary_surv["wind_speed_10m_ms"]
+            day1_summary["wind10_dir_end"] = end_summary_surv["wind_direction_deg"]
+            day1_summary["phase_mean"] = float(np.mean(phase_values[surv]))
+            day1_summary["phase_std"] = float(np.std(phase_values[surv]))
+            day1_summary["td_fit_mean"] = float(np.mean(td_native_scores[surv]))
+            day1_summary["td_fit_std"] = float(np.std(td_native_scores[surv]))
+            day1_summary["weather_fit_mean"] = float(np.mean(weather_scores[surv]))
+            day1_summary["weather_fit_std"] = float(np.std(weather_scores[surv]))
+            day1_summary["field_fit_mean"] = float(np.mean(field_scores[surv]))
+            day1_summary["field_fit_std"] = float(np.std(field_scores[surv]))
+            if satellite_scores is not None:
+                day1_summary["satellite_fit_mean"] = float(np.mean(satellite_scores[surv]))
+                day1_summary["satellite_fit_std"] = float(np.std(satellite_scores[surv]))
+                day1_summary["sat_front_mean"] = float(np.mean(day1_satellite_components["tbb_gradient_front"][surv]))
+                day1_summary["sat_front_std"] = float(np.std(day1_satellite_components["tbb_gradient_front"][surv]))
+                day1_summary["sat_moist_mean"] = float(np.mean(day1_satellite_components["cold_cloud"][surv]))
+                day1_summary["sat_moist_std"] = float(np.std(day1_satellite_components["cold_cloud"][surv]))
+                day1_summary["sat_conv_mean"] = float(np.mean(day1_satellite_components["convective_core_seed"][surv]))
+                day1_summary["sat_conv_std"] = float(np.std(day1_satellite_components["convective_core_seed"][surv]))
+            daily[-1]["scores"] = phase_values[surv].copy()
+            daily[-1]["td_native_scores"] = td_native_scores[surv].copy()
+            daily[-1]["weather_scores"] = weather_scores[surv].copy()
+            daily[-1]["field_scores"] = field_scores[surv].copy()
+            if satellite_scores is not None:
+                daily[-1]["satellite_scores"] = satellite_scores[surv].copy()
+                daily[-1]["satellite_reports"] = [satellite_reports[i] for i in survivor_order]
+                daily[-1]["satellite_components"] = {
+                    key: value[surv].copy() for key, value in satellite_components.items()
+                }
+
+            td_top_results = [td_top_results[i] for i in survivor_order]
+            candidates = [candidates[i] for i in survivor_order]
+            carr = _subset_carr(carr, survivor_order, len(phase_values))
+            if use_torch_rollout:
+                carr_dev = _subset_carr(carr_dev, survivor_order, len(phase_values))
+                td_state_dev = _subset_state(td_state_dev, survivor_order)
+                td_state = _state_to_numpy(td_state_dev)
+            else:
+                td_state = _subset_state(td_state, survivor_order)
+            pruned_to_final_pool = True
+            print(
+                f"  satellite day-1 prune: {len(phase_values)} -> {len(td_top_results)} survivors "
+                f"(best={td_top_results[0].family}/{int(td_top_results[0].params['n'])} final={td_top_results[0].final_balanced_score:+.3f})"
+            )
+            print(
+                f"  day 1 (post-prune): wind10_mean={day1_summary['wind10_mean']:.1f}m/s@"
+                f"{day1_summary['wind10_dir_mean']:.0f} "
+                f"fit={day1_summary['td_fit_mean']:.3f}+-{day1_summary['td_fit_std']:.3f}"
+            )
     print(f"  week done in {time.time() - t0:.1f}s")
     if use_torch_rollout:
         td_state = _state_to_numpy(td_state_dev)
+
+    td_hydro, td_oracle = _rebuild_hydro_oracle(
+        weather_seed,
+        bg,
+        td_top_results,
+        td_hydro,
+        step=TD_STEPS_PER_DAY,
+    )
 
     print("\n" + "=" * 68)
     print("Physical Forecast — daily stats (8 samples/day, 3h stride)")
@@ -760,7 +1203,12 @@ def main() -> int:
 
     if day1_alignment_state is None:
         raise RuntimeError("missing day-1 rollout state for TD weather alignment")
-    attach_weather_alignment(td_top_results, day1_alignment_state)
+    if not pruned_to_final_pool:
+        attach_weather_alignment(td_top_results, day1_alignment_state)
+    if day1_satellite_scores is None:
+        for result in td_top_results:
+            result.satellite_score = None
+            result.satellite_alignment = None
     reranked = sorted(
         td_top_results,
         key=lambda result: result.final_balanced_score or result.balanced_score,
@@ -774,15 +1222,31 @@ def main() -> int:
     print(f"  background_emerged={td_oracle.get('background_naturally_emerged')}")
     print(f"  inferred_goal={td_oracle.get('inferred_goal_axis')}")
     print(f"  dominant_pressures={', '.join(td_oracle.get('dominant_pressures', [])[:3])}")
-    print(f"  {'rank':<5} {'family':<13} {'n':>5} {'bal':>7} {'weather':>8} {'align':>7} {'final':>8}")
+    if day1_satellite_scores is not None:
+        print(f"  {'rank':<5} {'family':<13} {'n':>5} {'bal':>7} {'weather':>8} {'align':>7} {'sat':>7} {'front':>7} {'moist':>7} {'conv':>7} {'final':>8}")
+    else:
+        print(f"  {'rank':<5} {'family':<13} {'n':>5} {'bal':>7} {'weather':>8} {'align':>7} {'final':>8}")
     for idx, result in enumerate(reranked[:8], start=1):
-        print(
-            f"  #{idx:<4} {result.family:<13} {int(result.params['n']):>5} "
-            f"{result.balanced_score:>+7.3f} "
-            f"{result.weather_score:>8.4f} "
-            f"{result.weather_alignment:>+7.3f} "
-            f"{result.final_balanced_score:>+8.3f}"
-        )
+        if day1_satellite_scores is not None:
+            print(
+                f"  #{idx:<4} {result.family:<13} {int(result.params['n']):>5} "
+                f"{result.balanced_score:>+7.3f} "
+                f"{result.weather_score:>8.4f} "
+                f"{result.weather_alignment:>+7.3f} "
+                f"{getattr(result, 'satellite_alignment', 0.0):>+7.3f} "
+                f"{getattr(result, 'satellite_front_alignment', 0.0):>+7.3f} "
+                f"{getattr(result, 'satellite_moist_alignment', 0.0):>+7.3f} "
+                f"{getattr(result, 'satellite_convective_alignment', 0.0):>+7.3f} "
+                f"{result.final_balanced_score:>+8.3f}"
+            )
+        else:
+            print(
+                f"  #{idx:<4} {result.family:<13} {int(result.params['n']):>5} "
+                f"{result.balanced_score:>+7.3f} "
+                f"{result.weather_score:>8.4f} "
+                f"{result.weather_alignment:>+7.3f} "
+                f"{result.final_balanced_score:>+8.3f}"
+            )
 
     return 0
 

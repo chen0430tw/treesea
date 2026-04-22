@@ -31,6 +31,36 @@ TAIPEI_CLIMO_T_C      = 21.6     # 2026-03-15 .. 2026-04-13 ERA5 mean
 TAIPEI_CLIMO_P_HPA    = 1011.9
 TAIPEI_CLIMO_WS_MS    = 1.95
 TAIPEI_CLIMO_WD_DEG   = 51.0     # NE wind (climo-derived from 30-day ERA5 vector mean)
+TAIPEI_WIND_ANCHOR_MIN = 0.25    # keep some obs response even near-climo
+TAIPEI_WIND_ANCHOR_MAX = 1.00
+TAIPEI_WIND_INCREMENT_WIDTH = 1.4  # wider than station weight; synoptic increment
+TAIPEI_STRUCTURE_ANCHOR_MAX = 0.75
+
+# Hard cap on cloud-top AMV contribution to the near-surface wind anchor.
+# AMV (Atmospheric Motion Vector) from band-13 brightness-temperature tracking
+# is a cloud-top pseudo-wind, NOT a near-surface flow — it routinely disagrees
+# with the boundary-layer anchor by 90°+ during frontal / synoptic transitions.
+# This cap bounds AMV's influence to a 15% increment on top of the observed
+# anchor, with an additional cos²(angle) conflict-downweight applied inside
+# build_taipei_state so that a 150° mis-match (cloud-top vs surface) gives
+# AMV effectively zero influence instead of a full override.
+_AMV_MAX_WEIGHT = 0.15
+
+# Hard cap on satellite structure-strip contribution to the near-surface wind
+# anchor. Strip orientation is a cloud-band axis — it only constrains the
+# *direction* of synoptic flow to within ±90°, not which sign along that axis
+# and definitely not near-surface vs cloud-top. Previously
+# `TAIPEI_STRUCTURE_ANCHOR_MAX = 0.75` let one strip dominate 75% of the wind
+# anchor; authorised 2026-04-22 to bound strip as an increment with the same
+# principles as AMV:
+#   * base cap at 0.15 (ceiling irrespective of strip_count / confidence)
+#   * mixed_strip gets an extra 0.5 factor (semantically impure — averages
+#     front / moist / shear proxies, so its orientation is the weakest prior)
+#   * cos²(angle) conflict-downweight vs the obs-derived anchor — large angle
+#     or anti-aligned strip gives zero influence, same geometry as AMV guard
+_STRIP_MAX_WEIGHT = 0.15
+_STRIP_MIXED_TYPE_FACTOR = 0.5
+TAIPEI_STRUCTURE_WIND_WIDTH = 0.9
 
 # 台北今天观测（默认 obs — td_taipei_forecast.py 对外仍以此为"今天"）
 TAIPEI_TEMP_AVG_C   = 24.0
@@ -54,9 +84,76 @@ class ReferenceObs:
     wd_deg:  float = TAIPEI_WIND_FROM_DEG   # direction FROM (compass bearing)
 
 
+def _wind_components(ws_ms: float, wd_deg: float) -> tuple[float, float]:
+    """Meteorological direction-FROM to model (u east+, v north+) components."""
+    wd_rad = math.radians(wd_deg)
+    return -ws_ms * math.sin(wd_rad), -ws_ms * math.cos(wd_rad)
+
+
+def _geostrophic_slopes_from_uv(u_ms: float, v_ms: float, cfg: GridConfig) -> tuple[float, float]:
+    """Inverse f-plane geostrophic balance: target (u, v) -> linear h slopes."""
+    half_x = 0.5 * cfg.NX * cfg.DX
+    half_y = 0.5 * cfg.NY * cfg.DY
+    slope_x = v_ms * cfg.F0 / cfg.G * half_x
+    slope_y = -u_ms * cfg.F0 / cfg.G * half_y
+    return slope_x, slope_y
+
+
+def _wind_anchor_alpha(obs_ref: ReferenceObs) -> float:
+    """Blend weight for the synoptic wind increment.
+
+    This is not "single-station overwrite". It is a bounded analysis-style
+    increment strength: strong when direction departs far from climatology or
+    speed anomaly is large, weak-but-nonzero near climatology.
+    """
+    dir_delta = abs(((obs_ref.wd_deg - TAIPEI_CLIMO_WD_DEG + 180.0) % 360.0) - 180.0)
+    dir_term = min(1.0, dir_delta / 180.0)
+    speed_term = min(1.0, abs(obs_ref.ws_ms - TAIPEI_CLIMO_WS_MS) / max(1.0, TAIPEI_CLIMO_WS_MS + 1.5))
+    alpha = 0.25 + 0.55 * dir_term + 0.20 * speed_term
+    return float(np.clip(alpha, TAIPEI_WIND_ANCHOR_MIN, TAIPEI_WIND_ANCHOR_MAX))
+
+
+def _wind_components_from_strip_orientation(
+    orientation_deg: float,
+    reference_u: float,
+    reference_v: float,
+    ws_ms: float,
+    *,
+    strip_type: str | None = None,
+) -> tuple[float, float]:
+    """Convert a strip axis orientation into an along-strip wind guess.
+
+    orientation_deg follows the structure-layer convention on array/image
+    indices:
+      0°  -> +x axis
+      90° -> +y axis (downward on the raster)
+    A strip implies an axis but not a sign. We therefore choose the sign whose
+    vector is closest to the reference wind (typically the station observation),
+    so this stays a bounded analysis increment instead of a free overwrite.
+    """
+    orient = float(orientation_deg)
+    if strip_type in {"front_strip", "mixed_strip"}:
+        # Front-like strips describe the band axis; the relevant synoptic
+        # increment is the cross-strip/background-turning direction rather than
+        # blindly following the band itself.
+        orient = (orient - 90.0) % 180.0
+    theta = math.radians(orient)
+    # Convert image-space axis (x right, y down) into model wind components
+    # (u east+, v north+): x stays east+, raster y must flip sign into north+.
+    cand_a = np.asarray([math.cos(theta), -math.sin(theta)], dtype=np.float64)
+    cand_b = -cand_a
+    ref = np.asarray([reference_u, reference_v], dtype=np.float64)
+    pick = cand_a if float(cand_a @ ref) >= float(cand_b @ ref) else cand_b
+    return float(ws_ms * pick[0]), float(ws_ms * pick[1])
+
+
 def build_taipei_state(XX, YY, topography, cfg: GridConfig,
                        perturbation: float = 0.0,
-                       obs_ref: ReferenceObs | None = None) -> WeatherState:
+                       obs_ref: ReferenceObs | None = None,
+                       structure_strip_orientation_deg: float | None = None,
+                       structure_strip_weight: float = 0.0,
+                       structure_strip_type: str | None = None,
+                       wind_anchor_override_uv: tuple[float, float] | None = None) -> WeatherState:
     """以台北为中心构建 internal state。
 
     obs_ref 注入当日表面观测 → internal state 的 Taipei 锚点随 obs 变化：
@@ -84,9 +181,47 @@ def build_taipei_state(XX, YY, topography, cfg: GridConfig,
     _h_obs_offset = 8.0 * (obs_ref.P_hPa - TAIPEI_CLIMO_P_HPA) + perturbation * 1.0
 
     # 风向矢量化（wd 是 FROM 方向；u 向东正，v 向北正）
-    wd_rad = math.radians(obs_ref.wd_deg)
-    u_taipei = -obs_ref.ws_ms * math.sin(wd_rad)
-    v_taipei = -obs_ref.ws_ms * math.cos(wd_rad)
+    u_obs, v_obs = _wind_components(obs_ref.ws_ms, obs_ref.wd_deg)
+    u_taipei = u_obs
+    v_taipei = v_obs
+
+    # AMV override semantics — bounded, conflict-aware increment.
+    #
+    # Previous behaviour directly replaced (u_taipei, v_taipei) with the
+    # AMV vector. That produced the known failure mode: a cloud-top / TBB
+    # motion vector (Himawari band-13 brightness-temperature tracking)
+    # was rewriting the near-surface / day-1 wind anchor. For this
+    # specific case the AMV pointed ~270° W while the observed surface
+    # anchor was ~60° ENE — a 150° disagreement — and the override
+    # rotated the day-1 near-surface flow by ~140°. Codex red-lined this
+    # path: "cloud-top pseudo-AMV 不该直接改 near-surface / day-1 风向".
+    #
+    # New semantics (authorised 2026-04-22):
+    #   1. cap the AMV weight at `_AMV_MAX_WEIGHT` (0.15) — AMV is at
+    #      most a 15% increment on top of the observed anchor
+    #   2. downweight smoothly by cos²(angle(AMV, obs)):
+    #        aligned  (0°)   → full cap (0.15)
+    #        30° off         → ~0.11
+    #        perpendicular   → 0
+    #        any angle > 90° → 0 (cloud-top drifting opposite the
+    #                             surface anchor is evidence of vertical
+    #                             decoupling, NOT a correction signal)
+    #   3. if either |obs| or |amv| is negligible, skip the conflict
+    #      check and fall through to the default cap (no anchor to
+    #      conflict with, so just admit the cap-level AMV nudge)
+    if wind_anchor_override_uv is not None:
+        u_amv = float(wind_anchor_override_uv[0])
+        v_amv = float(wind_anchor_override_uv[1])
+        obs_mag = math.hypot(u_obs, v_obs)
+        amv_mag = math.hypot(u_amv, v_amv)
+        if obs_mag > 0.1 and amv_mag > 0.1:
+            cos_angle = (u_obs * u_amv + v_obs * v_amv) / (obs_mag * amv_mag)
+        else:
+            cos_angle = 1.0
+        conflict_factor = max(0.0, cos_angle) ** 2
+        amv_weight = _AMV_MAX_WEIGHT * conflict_factor
+        u_taipei = (1.0 - amv_weight) * u_obs + amv_weight * u_amv
+        v_taipei = (1.0 - amv_weight) * v_obs + amv_weight * v_amv
 
     # 中层比湿：用 T_internal_taipei 的饱和水汽压 + 当日 RH，500 hPa 总压。
     # 水汽密度 ρ_v = e/(R_v·T) 随温度强依赖；旧版 q_surface × 0.5 会超饱和
@@ -104,28 +239,80 @@ def build_taipei_state(XX, YY, topography, cfg: GridConfig,
     # Slopes from inverse geostrophic balance:
     #   ∂h/∂x = +v_climo * f/g   (m/m)    → h_slope_x = ∂h/∂x * half_domain_x
     #   ∂h/∂y = -u_climo * f/g   (m/m)
-    _wd_rad_c = math.radians(TAIPEI_CLIMO_WD_DEG)
-    u_climo = -TAIPEI_CLIMO_WS_MS * math.sin(_wd_rad_c)
-    v_climo = -TAIPEI_CLIMO_WS_MS * math.cos(_wd_rad_c)
-    _half_x = 0.5 * cfg.NX * cfg.DX      # physical half-domain (m)
-    _half_y = 0.5 * cfg.NY * cfg.DY
-    _slope_x = v_climo * cfg.F0 / cfg.G * _half_x
-    _slope_y = -u_climo * cfg.F0 / cfg.G * _half_y
+    u_climo, v_climo = _wind_components(TAIPEI_CLIMO_WS_MS, TAIPEI_CLIMO_WD_DEG)
+    _slope_x, _slope_y = _geostrophic_slopes_from_uv(u_climo, v_climo, cfg)
     # Periodic-BC safe envelope: linear slope near center fades to EXACTLY 0
     # at X=±1 / Y=±1 via (1-X²)(1-Y²) polynomial → h values wrap seamlessly
     # (avoids np.roll boundary discontinuity that blew wind to U_CLIP_MS=35).
     _env = (1.0 - XX**2) * (1.0 - YY**2)
     h_bg = cfg.BASE_H + _slope_x * XX * _env + _slope_y * YY * _env - 0.006 * topography
-    u_bg, v_bg = geostrophic_wind_from_h(h_bg, cfg.DX, cfg.DY, cfg.F0, cfg.G)
+
+    # Analysis-style wind increment: retain climo background, but let strong
+    # obs wind anomalies rotate the h gradient locally/regionally instead of
+    # leaving the entire domain locked to climatology.
+    anchor_alpha = _wind_anchor_alpha(obs_ref)
+    target_u = float(u_taipei)
+    target_v = float(v_taipei)
+    if structure_strip_orientation_deg is not None and structure_strip_weight > 1.0e-6:
+        struct_u, struct_v = _wind_components_from_strip_orientation(
+            float(structure_strip_orientation_deg),
+            u_taipei,
+            v_taipei,
+            max(obs_ref.ws_ms, TAIPEI_CLIMO_WS_MS),
+            strip_type=structure_strip_type,
+        )
+
+        # Bounded, conflict-aware strip increment — same principles as the
+        # AMV block above.
+        #
+        # Previous path: `structure_alpha = clip(weight,0,1) * 0.75` let one
+        # satellite strip rotate up to 75% of the wind anchor. For the
+        # 2026-04-21 case that pinned near-surface wind to ~175° S
+        # because a mixed_strip at ori=96.4° (E-W oriented band) forced
+        # geostrophy into N-S. Even when AMV had been correctly downweighted
+        # to zero, strip alone could still override the 60° ENE surface
+        # anchor. Codex red-lined this path on 2026-04-22.
+        #
+        # New semantics:
+        #   1. base cap at `_STRIP_MAX_WEIGHT` (0.15)
+        #   2. mixed_strip additional `_STRIP_MIXED_TYPE_FACTOR` (0.5)
+        #   3. cos²(angle(struct, target)) conflict factor — identical to
+        #      the AMV conflict guard, so a strip pointing anti-parallel
+        #      to the surface anchor contributes zero
+        target_mag = math.hypot(target_u, target_v)
+        struct_mag = math.hypot(struct_u, struct_v)
+        if target_mag > 0.1 and struct_mag > 0.1:
+            cos_angle = (target_u * struct_u + target_v * struct_v) / (target_mag * struct_mag)
+        else:
+            cos_angle = 1.0
+        conflict_factor = max(0.0, cos_angle) ** 2
+        type_factor = (
+            _STRIP_MIXED_TYPE_FACTOR if structure_strip_type == "mixed_strip" else 1.0
+        )
+        structure_alpha = (
+            float(np.clip(structure_strip_weight, 0.0, 1.0))
+            * _STRIP_MAX_WEIGHT
+            * type_factor
+            * conflict_factor
+        )
+        target_u = (1.0 - structure_alpha) * target_u + structure_alpha * struct_u
+        target_v = (1.0 - structure_alpha) * target_v + structure_alpha * struct_v
+    obs_slope_x, obs_slope_y = _geostrophic_slopes_from_uv(target_u, target_v, cfg)
+    inc_slope_x = anchor_alpha * (obs_slope_x - _slope_x)
+    inc_slope_y = anchor_alpha * (obs_slope_y - _slope_y)
+    inc_env = np.exp(-TAIPEI_WIND_INCREMENT_WIDTH * (XX**2 + YY**2)) * _env
+    h_increment = inc_slope_x * XX * inc_env + inc_slope_y * YY * inc_env
+
+    h_analysis = h_bg + h_increment
     T_bg = 273.15 + 18.0 * np.cos(np.pi * YY) - 8.0 * np.sin(np.pi * XX) - 0.004 * topography
     q_bg = 0.008 + 0.005 * np.cos(np.pi * YY)**2 - 0.002 * np.sin(np.pi * XX)**2
     q_bg = np.clip(q_bg, 1e-4, 0.025)
 
-    # h: linear climo-geostrophic h_bg + uniform obs-P offset. No Gaussian
-    # blend (it created a center plateau that killed the geostrophic gradient).
-    h = h_bg + _h_obs_offset
-    u = taipei_weight * u_taipei + (1 - taipei_weight) * u_bg
-    v = taipei_weight * v_taipei + (1 - taipei_weight) * v_bg
+    # h: background geostrophic slope + bounded obs-driven increment + uniform
+    # pressure offset. This allows the synoptic wind anchor to rotate without
+    # letting one station overwrite the whole domain.
+    h = h_analysis + _h_obs_offset
+    u, v = geostrophic_wind_from_h(h, cfg.DX, cfg.DY, cfg.F0, cfg.G)
     T = taipei_weight * T_internal_taipei + (1 - taipei_weight) * T_bg
     q = taipei_weight * q_taipei + (1 - taipei_weight) * q_bg
     q = np.clip(q, 1e-4, 0.025)

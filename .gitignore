@@ -66,3 +66,12 @@ slurm-*.out
 _tmp_extract/
 *.tmp
 *.bak
+
+# Pytest temp dirs (Windows basetemp workaround — see docs/TD_origin_reasoning.md)
+.pytest_tmp/
+.pttmp/
+.pttmp_all/
+.pttmp_stalign/
+
+# Raw satellite / weather data (Himawari bands, NCL inputs — GB-scale)
+tree_diagram/weather_sat/

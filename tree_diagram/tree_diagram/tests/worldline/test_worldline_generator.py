@@ -15,6 +15,20 @@ def test_generate_candidates_nonempty():
     assert len(candidates) > 0
 
 
+def test_background_includes_weather_candidate_families():
+    seed = default_seed()
+    bg = infer_problem_background(seed)
+    expected = {
+        "strong_pg",
+        "balanced",
+        "high_mix",
+        "humid_bias",
+        "terrain_lock",
+        "weak_mix",
+    }
+    assert expected.issubset(set(bg.candidate_families))
+
+
 def test_candidates_have_required_keys():
     seed = default_seed()
     bg = infer_problem_background(seed)
